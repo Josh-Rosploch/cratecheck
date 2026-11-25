@@ -47,11 +47,27 @@
     spotifyClientId: '',
     spotifyAccessToken: '',
     spotifyRefreshToken: '',
-    spotifyExpiresAt: 0
+    spotifyExpiresAt: 0,
+    showSpotify: true,
+    showApple: true,
+    showDeezer: true,
+    showYoutube: true
   }, JSON.parse(localStorage.getItem(CC.CFG_KEY) || '{}'));
 
   CC.persistCfg = () => localStorage.setItem(CC.CFG_KEY, JSON.stringify(CC.cfg));
-  CC.sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  CC.sleep = (ms, signal) => new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new DOMException('Cancelled', 'AbortError')); return; }
+    const t = setTimeout(() => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    function onAbort() {
+      clearTimeout(t);
+      reject(new DOMException('Cancelled', 'AbortError'));
+    }
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+  });
+
   CC.esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   CC.norm = (s) => String(s || '').toLowerCase().replace(/\(.*?\)|\[.*?\]/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
   CC.normFull = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -104,7 +120,7 @@
     r.onsuccess = () => res(r.result || []); r.onerror = () => rej(r.error);
   });
 
-  // ==================== DISCOGS RATE-LIMITED API ====================
+  // ==================== DISCOGS SMART BURST QUEUE (60/MIN REAL LIMIT) ====================
   const dQueue = [];
   let dBusy = false;
   let lastDCall = 0;
@@ -129,13 +145,15 @@
     try {
       const now = Date.now();
       recentDCalls = recentDCalls.filter(t => now - t < 60000);
-      if (recentDCalls.length >= 49) {
-        const waitMs = 60500 - (now - recentDCalls[0]);
-        statusCb(`Cooling down Discogs rate limit (${Math.ceil(waitMs / 1000)}s)...`, true);
+      if (recentDCalls.length >= 57) {
+        const waitMs = 60600 - (now - recentDCalls[0]);
+        statusCb(`Discogs 60/min ceiling reached — resuming in ${Math.ceil(waitMs / 1000)}s...`, true);
         await CC.sleep(Math.max(1000, waitMs));
       }
+      // Smart burst: 160ms gap when plenty of headroom, 950ms when nearing cap
+      const minGap = recentDCalls.length > 42 ? 950 : 160;
       const gap = Date.now() - lastDCall;
-      if (gap < 1200) await CC.sleep(1200 - gap);
+      if (gap < minGap) await CC.sleep(minGap - gap);
 
       const url = new URL('https://api.discogs.com' + job.path);
       Object.entries(job.params || {}).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v); });
@@ -153,11 +171,13 @@
 
       const res = await fetch(url.toString(), fetchOpts);
       if (res.status === 429) {
-        statusCb('Discogs rate limit hit — waiting 60s...', true);
+        statusCb('Discogs rate limit hit — cooling down 60s...', true);
         await CC.sleep(60000);
         const retry = await fetch(url.toString(), fetchOpts);
         if (!retry.ok) throw new Error(`Discogs HTTP ${retry.status}`);
         job.resolve(await retry.json().catch(() => ({})));
+      } else if (res.status === 204) {
+        job.resolve({});
       } else if (!res.ok) {
         const errTxt = await res.text().catch(() => '');
         const err = new Error(`Discogs HTTP ${res.status}: ${errTxt.slice(0, 120)}`);
@@ -175,25 +195,45 @@
   }
 
   CC.getReleaseCached = async (releaseId) => {
-    if (CC.releaseDetailCache.has(releaseId)) return CC.releaseDetailCache.get(releaseId);
-    const data = await CC.discogsFetch(`/releases/${releaseId}`);
-    CC.releaseDetailCache.set(releaseId, data);
+    const id = Number(releaseId);
+    if (CC.releaseDetailCache.has(id)) return CC.releaseDetailCache.get(id);
+    const data = await CC.discogsFetch(`/releases/${id}`);
+    CC.releaseDetailCache.set(id, data);
     return data;
   };
 
+  // Find existing instance(s) of a release in user's Discogs collection
+  CC.findDiscogsInstances = async (releaseId) => {
+    if (!CC.cfg.discogsUser || !releaseId) return [];
+    const data = await CC.discogsFetch(`/users/${encodeURIComponent(CC.cfg.discogsUser)}/collection/releases/${releaseId}`).catch(() => null);
+    return Array.isArray(data?.releases) ? data.releases : [];
+  };
+
+  // Delete an instance from user's Discogs collection
+  CC.deleteDiscogsInstance = async (folderId, releaseId, instanceId) => {
+    if (!CC.cfg.discogsUser || !releaseId || !instanceId) return false;
+    await CC.discogsFetch(
+      `/users/${encodeURIComponent(CC.cfg.discogsUser)}/collection/folders/${encodeURIComponent(folderId || '1')}/releases/${releaseId}/instances/${instanceId}`,
+      {},
+      'DELETE'
+    );
+    return true;
+  };
+
+  // Push Media Condition, Sleeve Condition, and Notes fields
   CC.syncDiscogsInstanceFields = async (folderId, releaseId, instanceId, mediaCond, sleeveCond, notes) => {
     if (!CC.cfg.discogsUser || !releaseId || !instanceId) return 0;
     const f = CC.cfg.discogsFields || { media: 1, sleeve: 2, notes: 3 };
     const updates = [];
     if (f.media && mediaCond) updates.push({ id: f.media, val: mediaCond });
     if (f.sleeve && sleeveCond) updates.push({ id: f.sleeve, val: sleeveCond });
-    if (f.notes && notes) updates.push({ id: f.notes, val: notes });
+    if (f.notes && notes !== undefined && notes !== null) updates.push({ id: f.notes, val: notes });
 
     let okCount = 0;
     for (const u of updates) {
       try {
         await CC.discogsFetch(
-          `/users/${encodeURIComponent(CC.cfg.discogsUser)}/collection/folders/${encodeURIComponent(folderId)}/releases/${releaseId}/instances/${instanceId}/fields/${u.id}`,
+          `/users/${encodeURIComponent(CC.cfg.discogsUser)}/collection/folders/${encodeURIComponent(folderId || '1')}/releases/${releaseId}/instances/${instanceId}/fields/${u.id}`,
           {},
           'POST',
           { value: u.val }
@@ -204,94 +244,93 @@
     return okCount;
   };
 
-  // ==================== GEMINI API (3x AUTO-RETRY ON 503 + THINKING FALLBACK) ====================
-  CC.callGeminiJSON = async (parts, thinkingLevel = null) => {
+  // ==================== GEMINI API (INFINITE 5s AUTO-RETRY + CANCEL) ====================
+  let activeGeminiCtrl = null;
+
+  CC.cancelGemini = () => {
+    if (activeGeminiCtrl) {
+      try { activeGeminiCtrl.abort(); } catch (_) {}
+      activeGeminiCtrl = null;
+    }
+  };
+
+  CC.callGeminiJSON = async (parts, thinkingLevel = null, opts = {}) => {
+    const { expectJSON = true, retryLabel = 'Gemini' } = opts;
     const model = (CC.cfg.geminiModel || 'gemini-3.5-flash-lite').trim();
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(CC.cfg.geminiKey.trim())}`;
 
+    const ctrl = new AbortController();
+    activeGeminiCtrl = ctrl;
+    const signal = ctrl.signal;
+
     const send = (useThinking) => {
-      const genCfg = { responseMimeType: 'application/json', temperature: 0.1 };
+      const genCfg = { temperature: 0.1 };
+      if (expectJSON) genCfg.responseMimeType = 'application/json';
       if (useThinking && thinkingLevel) genCfg.thinkingConfig = { thinkingLevel };
       return fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents: [{ parts }], generationConfig: genCfg })
+        body: JSON.stringify({ contents: [{ parts }], generationConfig: genCfg }),
+        signal
       });
     };
 
-    const maxAttempts = 3;
-    const retryDelays = [2500, 4500];
-    let lastStatus = 0;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      let res = null;
-      try {
-        res = await send(true);
-        if (res.status === 400 && thinkingLevel) res = await send(false);
-      } catch (netErr) {
-        if (attempt < maxAttempts) {
-          statusCb(`Connection hiccup — retrying (${attempt + 1}/${maxAttempts})...`, true);
-          await CC.sleep(retryDelays[attempt - 1]);
+    let attempt = 0;
+    try {
+      while (true) {
+        if (signal.aborted) throw new DOMException('Cancelled by user', 'AbortError');
+        attempt++;
+        let res = null;
+        try {
+          res = await send(true);
+          if (res.status === 400 && thinkingLevel) res = await send(false);
+        } catch (netErr) {
+          if (netErr.name === 'AbortError' || signal.aborted) throw new DOMException('Cancelled by user', 'AbortError');
+          statusCb(`${retryLabel}: connection hiccup — retrying in 5s (try #${attempt + 1})...`, true, { cancellable: true });
+          await CC.sleep(5000, signal);
           continue;
         }
-        const e = new Error('Network error after 3/3 tries — check signal & tap Retry.');
-        e.isRetryable = true;
-        throw e;
-      }
 
-      lastStatus = res.status;
-
-      // Transient Gemini server overload (503 / 502 / 504 / 500) -> auto-retry up to 3x
-      if ([500, 502, 503, 504].includes(res.status)) {
-        if (attempt < maxAttempts) {
-          const sec = (retryDelays[attempt - 1] / 1000).toFixed(1).replace(/\.0$/, '');
-          statusCb(`Gemini busy (${res.status}) — retrying (${attempt + 1}/${maxAttempts}) in ${sec}s...`, true);
-          await CC.sleep(retryDelays[attempt - 1]);
+        // Transient server overload -> keep retrying every 5 seconds until user cancels
+        if ([500, 502, 503, 504].includes(res.status)) {
+          statusCb(`${retryLabel} busy (HTTP ${res.status}) — retrying in 5s (try #${attempt + 1})...`, true, { cancellable: true });
+          await CC.sleep(5000, signal);
           continue;
         }
-        const e = new Error(`Gemini still busy after 3/3 tries (HTTP ${res.status}) — wait a moment & tap Retry.`);
-        e.isRetryable = true;
-        e.status = res.status;
-        throw e;
-      }
 
-      if (!res.ok) {
-        const t = await res.text().catch(() => '');
-        const e = new Error(`Gemini HTTP ${res.status}: ${t.slice(0, 140)}`);
-        e.status = res.status;
-        e.isRetryable = res.status === 429;
-        throw e;
-      }
+        if (!res.ok) {
+          const t = await res.text().catch(() => '');
+          const e = new Error(`Gemini HTTP ${res.status}: ${t.slice(0, 160)}`);
+          e.status = res.status;
+          throw e;
+        }
 
-      const data = await res.json();
-      const raw = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
-      const cleaned = raw.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
-      try { return JSON.parse(cleaned); }
-      catch (_) {
-        const m = cleaned.match(/\{[\s\S]*\}/);
-        if (m) return JSON.parse(m[0]);
-        throw new Error('Could not parse Gemini JSON');
+        const data = await res.json();
+        const raw = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+        if (!expectJSON) return raw.trim();
+
+        const cleaned = raw.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+        try { return JSON.parse(cleaned); }
+        catch (_) {
+          const m = cleaned.match(/\{[\s\S]*\}/);
+          if (m) return JSON.parse(m[0]);
+          throw new Error('Could not parse Gemini JSON');
+        }
       }
+    } finally {
+      if (activeGeminiCtrl === ctrl) activeGeminiCtrl = null;
     }
-
-    const e = new Error(`Gemini busy after 3/3 tries (HTTP ${lastStatus}) — wait a moment & tap Retry.`);
-    e.isRetryable = true;
-    throw e;
   };
 
-  // ==================== REMIX/VERSION-AWARE 30s AUDIO HIGHLIGHT FETCHER ====================
+  // ==================== REMIX-AWARE AUDIO PREVIEW + PLATFORM AVAILABILITY ====================
   function splitTrackVersion(raw) {
     const str = String(raw || '').trim();
     const parts = [];
     const parens = str.match(/[\(\[]([^\)\]]+)[\)\]]/g);
     if (parens) parens.forEach(p => parts.push(p.slice(1, -1).trim()));
     let base = str.replace(/[\(\[][^\)\]]*[\)\]]/g, '').trim();
-
     const dashMatch = base.match(/^(.*?)\s+[-–—]\s+(.*\b(?:mix|remix|version|edit|dub|extended|radio|club|instrumental|acoustic|live|remaster\w*)\b.*)$/i);
-    if (dashMatch) {
-      base = dashMatch[1].trim();
-      parts.push(dashMatch[2].trim());
-    }
+    if (dashMatch) { base = dashMatch[1].trim(); parts.push(dashMatch[2].trim()); }
     return { base, version: parts.join(' ').trim() };
   }
 
@@ -318,7 +357,6 @@
         const candFull = CC.normFull(candTrack || '');
         const candV = CC.normFull(cand.version || '');
         const vSim = Math.max(CC.simFull(req.version, cand.version || ''), CC.simFull(req.version, candTrack || ''));
-
         const stop = new Set(['mix', 'remix', 'version', 'edit', 'the', 'and', 'original', 'single']);
         const reqDistinct = reqV.split(' ').filter(w => w.length > 2 && !stop.has(w));
         const distinctHits = reqDistinct.filter(w => candFull.includes(w)).length;
@@ -331,14 +369,11 @@
           score += 0.30;
           versionMatched = candV.includes('radio');
         } else if (candV && /remix|mix|line dance|dub|club|extended|karaoke/i.test(candV)) {
-          score -= 0.22;
+          score -= 0.25;
         }
       } else {
-        if (cand.version && /remix|line dance|dub|club mix|extended|karaoke|instrumental/i.test(cand.version)) {
-          score -= 0.20;
-        } else {
-          score += 0.12;
-        }
+        if (cand.version && /remix|line dance|dub|club mix|extended|karaoke|instrumental/i.test(cand.version)) score -= 0.22;
+        else score += 0.12;
       }
       return { score, versionMatched };
     }
@@ -350,12 +385,11 @@
 
   async function queryApple(term, artist, rawTrack, album, strictTrack) {
     try {
-      const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(term)}&media=music&entity=song&limit=20`);
+      const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(term)}&media=music&entity=song&limit=25`);
       if (!res.ok) return null;
       const data = await res.json();
-      const items = (data.results || []).filter(r => r.previewUrl);
+      const items = (data.results || []).filter(r => r.previewUrl || r.trackViewUrl);
       if (!items.length) return null;
-
       const best = items
         .map(r => {
           const ev = scoreAudioCandidate(r.artistName, r.trackName, r.collectionName, artist, rawTrack, album, strictTrack);
@@ -363,10 +397,10 @@
         })
         .filter(x => x.score > 0)
         .sort((a, b) => b.score - a.score)[0];
-
       if (!best) return null;
       return {
-        previewUrl: best.r.previewUrl,
+        previewUrl: best.r.previewUrl || '',
+        externalUrl: best.r.trackViewUrl || '',
         trackName: best.r.trackName,
         artistName: best.r.artistName,
         score: best.score,
@@ -384,7 +418,7 @@
 
       window[cbName] = (payload) => {
         cleanup();
-        const list = (payload?.data || []).filter(x => x.preview);
+        const list = (payload?.data || []).filter(x => x.preview || x.link);
         if (!list.length) { resolve(null); return; }
         const best = list
           .map(x => {
@@ -395,7 +429,8 @@
           .sort((a, b) => b.score - a.score)[0];
         if (best) {
           resolve({
-            previewUrl: best.x.preview,
+            previewUrl: best.x.preview || '',
+            externalUrl: best.x.link || '',
             trackName: best.x.title,
             artistName: best.x.artist?.name || artist,
             score: best.score,
@@ -405,55 +440,85 @@
       };
 
       script.onerror = () => { cleanup(); resolve(null); };
-      script.src = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=15&output=jsonp&callback=${cbName}`;
+      script.src = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=20&output=jsonp&callback=${cbName}`;
       document.body.appendChild(script);
     });
   }
 
-  async function searchKeylessClip(artist, track, album, strictTrack = true) {
+  async function querySpotifyExact(query, artist, rawTrack, album, strictTrack) {
+    if (!CC.cfg.spotifyAccessToken && !CC.cfg.spotifyRefreshToken) return null;
+    try {
+      const d = await spFetch(`https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=track&limit=10`);
+      const list = d?.tracks?.items || [];
+      if (!list.length) return null;
+      const best = list
+        .map(x => {
+          const aName = (x.artists || []).map(a => a.name).join(', ');
+          const ev = scoreAudioCandidate(aName, x.name, x.album?.name, artist, rawTrack, album, strictTrack);
+          return { x, aName, score: ev.score, versionMatched: ev.versionMatched };
+        })
+        .filter(y => y.score > 0)
+        .sort((a, b) => b.score - a.score)[0];
+      if (!best) return null;
+      return {
+        externalUrl: best.x.external_urls?.spotify || '',
+        trackName: best.x.name,
+        artistName: best.aName,
+        score: best.score,
+        exactVersion: best.versionMatched
+      };
+    } catch (_) { return null; }
+  }
+
+  // Returns { clip, fallbackClip, platforms: { spotify, apple, deezer, youtube } }
+  CC.fetchAudioAndPlatforms = async (artist, track, album, strictTrack = true) => {
     const isVarious = !artist || /^various(\s+artists)?$/i.test(artist.trim());
     const rawTrack = String(track || '').trim();
     const { base, version } = splitTrackVersion(rawTrack);
     const prefix = isVarious ? '' : `${artist} `;
 
-    const queries = [];
-    if (base && version) {
-      queries.push(`${prefix}${base} ${version}`.trim());
-      queries.push(`${prefix}${base}`.trim());
-    } else if (base) {
-      queries.push(`${prefix}${base}`.trim());
-    } else if (album) {
-      queries.push(`${prefix}${album}`.trim());
-    }
-    if (!queries.length) return null;
+    const primaryQ = (base && version) ? `${prefix}${base} ${version}`.trim()
+      : (base ? `${prefix}${base}`.trim() : `${prefix}${album}`.trim());
+    const baseQ = base ? `${prefix}${base}`.trim() : primaryQ;
 
-    let bestOverall = null;
-    const consider = (cand) => {
-      if (!cand) return;
-      if (!bestOverall) { bestOverall = cand; return; }
-      if (cand.exactVersion && !bestOverall.exactVersion) { bestOverall = cand; return; }
-      if (cand.exactVersion === bestOverall.exactVersion && cand.score > bestOverall.score) bestOverall = cand;
+    const ytUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(primaryQ)}`;
+
+    const [ap1, dz1, sp1] = await Promise.all([
+      queryApple(primaryQ, artist, rawTrack, album, strictTrack),
+      queryDeezerJSONP(primaryQ, artist, rawTrack, album, strictTrack),
+      CC.cfg.showSpotify ? querySpotifyExact(primaryQ, artist, rawTrack, album, strictTrack) : Promise.resolve(null)
+    ]);
+
+    let apBest = ap1, dzBest = dz1, spBest = sp1;
+
+    // If a specific remix/version wasn't matched on any platform, check base track as an EXPLICIT optional fallback
+    if (version && !ap1?.exactVersion && !dz1?.exactVersion) {
+      const [ap2, dz2] = await Promise.all([
+        queryApple(baseQ, artist, rawTrack, album, strictTrack),
+        queryDeezerJSONP(baseQ, artist, rawTrack, album, strictTrack)
+      ]);
+      if (!apBest || (ap2 && ap2.score > apBest.score)) apBest = ap2;
+      if (!dzBest || (dz2 && dz2.score > dzBest.score)) dzBest = dz2;
+    }
+
+    const streamCandidates = [apBest, dzBest].filter(x => x && x.previewUrl);
+    const exactStream = streamCandidates.filter(x => x.exactVersion).sort((a, b) => b.score - a.score)[0] || null;
+    const altStream = !exactStream ? (streamCandidates.sort((a, b) => b.score - a.score)[0] || null) : null;
+
+    return {
+      clip: exactStream,
+      fallbackClip: altStream,
+      requestedVersion: version || '',
+      platforms: {
+        spotify: spBest?.externalUrl ? { url: spBest.externalUrl, label: `Spotify${spBest.exactVersion === false ? ' (closest)' : ''}` } : null,
+        apple: apBest?.externalUrl ? { url: apBest.externalUrl, label: `Apple Music${apBest.exactVersion === false ? ' (closest)' : ''}` } : null,
+        deezer: dzBest?.externalUrl ? { url: dzBest.externalUrl, label: `Deezer${dzBest.exactVersion === false ? ' (closest)' : ''}` } : null,
+        youtube: { url: ytUrl, label: 'YouTube' }
+      }
     };
+  };
 
-    const firstQ = queries[0];
-    consider(await queryApple(firstQ, artist, rawTrack, album, strictTrack));
-    if (bestOverall?.exactVersion) return bestOverall;
-
-    consider(await queryDeezerJSONP(firstQ, artist, rawTrack, album, strictTrack));
-    if (bestOverall?.exactVersion) return bestOverall;
-
-    if (queries.length > 1) {
-      consider(await queryApple(queries[1], artist, rawTrack, album, strictTrack));
-      if (bestOverall?.exactVersion) return bestOverall;
-      consider(await queryDeezerJSONP(queries[1], artist, rawTrack, album, strictTrack));
-    }
-
-    return bestOverall;
-  }
-
-  CC.fetchAudioHighlight = searchKeylessClip;
-
-  // ==================== SPOTIFY PKCE OAUTH & UNCAPPED SYNC ====================
+  // ==================== SPOTIFY PKCE OAUTH & 100% FULL LIBRARY SYNC ====================
   function randomStr(len) {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     const arr = new Uint8Array(len);
@@ -541,32 +606,58 @@
     CC.persistCfg();
   };
 
-  CC.syncSpotifyAll = async () => {
-    statusCb('Starting uncapped Spotify sync...', true);
-    const artistCounts = {};
+  // Full uncapped sync: all 3 time ranges, all liked songs, all saved albums, all owned/collab playlists, exact (artist|track) pairs & decades
+  CC.syncSpotifyAll = async (existingDna = '') => {
+    statusCb('Starting complete Spotify library sync...', true);
+    const artistMap = {}; // normArtist -> { name, count, tracks: Set, playlists: Set }
+    const trackPairs = new Set(); // "normArtist|normTrack"
     const trackTitles = new Set();
+    const decades = {};
+    const playlistSummaries = [];
 
-    const addArtist = (name, weight = 1) => {
+    const ensureArtist = (name) => {
       const n = CC.norm(name);
-      if (!n) return;
-      if (!artistCounts[n]) artistCounts[n] = { name, count: 0 };
-      artistCounts[n].count += weight;
+      if (!n) return null;
+      if (!artistMap[n]) artistMap[n] = { name, count: 0, tracks: new Set(), playlists: new Set() };
+      return artistMap[n];
     };
-    const addTrack = (tr, weight = 1) => {
+
+    const addDecade = (dateStr) => {
+      const m = String(dateStr || '').match(/^(\d{4})/);
+      if (!m) return;
+      const dec = `${Math.floor(Number(m[1]) / 10) * 10}s`;
+      decades[dec] = (decades[dec] || 0) + 1;
+    };
+
+    const addTrack = (tr, weight = 1, playlistName = '') => {
       if (!tr || !tr.name) return;
       const nt = CC.norm(tr.name);
       if (nt) trackTitles.add(nt);
-      (tr.artists || []).forEach(a => addArtist(a.name, weight));
+      if (tr.album?.release_date) addDecade(tr.album.release_date);
+      (tr.artists || []).forEach(a => {
+        const rec = ensureArtist(a.name);
+        if (!rec) return;
+        rec.count += weight;
+        rec.tracks.add(tr.name.trim());
+        if (playlistName) rec.playlists.add(playlistName);
+        const na = CC.norm(a.name);
+        if (na && nt) trackPairs.add(`${na}|${nt}`);
+      });
     };
 
     const me = await spFetch('https://api.spotify.com/v1/me');
 
-    for (const range of ['long_term', 'medium_term']) {
+    // All 3 Top Artist & Top Track time ranges
+    for (const range of ['long_term', 'medium_term', 'short_term']) {
+      statusCb(`Syncing Top Artists & Tracks (${range})...`, true);
       const topA = await spFetch(`https://api.spotify.com/v1/me/top/artists?limit=50&time_range=${range}`).catch(() => ({ items: [] }));
-      (topA.items || []).forEach((a, i) => addArtist(a.name, Math.max(5, 25 - Math.floor(i / 2))));
+      (topA.items || []).forEach((a, i) => {
+        const rec = ensureArtist(a.name);
+        if (rec) rec.count += Math.max(4, 20 - Math.floor(i / 3));
+      });
+      const topT = await spFetch(`https://api.spotify.com/v1/me/top/tracks?limit=50&time_range=${range}`).catch(() => ({ items: [] }));
+      (topT.items || []).forEach(t => addTrack(t, 3));
     }
-    const topT = await spFetch('https://api.spotify.com/v1/me/top/tracks?limit=50&time_range=long_term').catch(() => ({ items: [] }));
-    (topT.items || []).forEach(t => addTrack(t, 4));
 
     let next = 'https://api.spotify.com/v1/me/tracks?limit=50';
     let count = 0;
@@ -576,7 +667,7 @@
       (d.items || []).forEach(it => addTrack(it.track, 2));
       count += (d.items || []).length;
       next = d.next;
-      if (next) await CC.sleep(80);
+      if (next) await CC.sleep(70);
     }
 
     next = 'https://api.spotify.com/v1/me/albums?limit=50';
@@ -585,12 +676,16 @@
       statusCb(`Syncing Saved Albums (${count} scanned)...`, true);
       const d = await spFetch(next).catch(() => ({ items: [], next: null }));
       (d.items || []).forEach(it => {
-        (it.album?.artists || []).forEach(a => addArtist(a.name, 4));
+        if (it.album?.release_date) addDecade(it.album.release_date);
+        (it.album?.artists || []).forEach(a => {
+          const rec = ensureArtist(a.name);
+          if (rec) rec.count += 4;
+        });
         (it.album?.tracks?.items || []).forEach(t => addTrack(t, 1));
       });
       count += (d.items || []).length;
       next = d.next;
-      if (next) await CC.sleep(80);
+      if (next) await CC.sleep(70);
     }
 
     const owned = [];
@@ -600,7 +695,7 @@
       const pls = await spFetch(plUrl).catch(() => ({ items: [], next: null }));
       (pls.items || []).forEach(p => { if (p && (p.owner?.id === me.id || p.collaborative)) owned.push(p); });
       plUrl = pls.next;
-      if (plUrl) await CC.sleep(80);
+      if (plUrl) await CC.sleep(70);
     }
 
     for (let i = 0; i < owned.length; i++) {
@@ -610,23 +705,41 @@
       while (pNext) {
         statusCb(`Playlist ${i + 1}/${owned.length}: ${pl.name} (${pTracks} songs)...`, true);
         const pd = await spFetch(pNext).catch(() => ({ items: [], next: null }));
-        (pd.items || []).forEach(e => addTrack(e.item || e.track, 1));
+        (pd.items || []).forEach(e => addTrack(e.item || e.track, 1, pl.name));
         pTracks += (pd.items || []).length;
         pNext = pd.next;
-        if (pNext) await CC.sleep(80);
+        if (pNext) await CC.sleep(70);
       }
+      playlistSummaries.push({ name: pl.name, count: pTracks });
     }
 
-    const topArtists = Object.values(artistCounts).sort((a, b) => b.count - a.count).slice(0, 120).map(x => x.name);
+    // Serialize sets cleanly for IndexedDB
+    const allArtists = {};
+    Object.entries(artistMap).forEach(([k, v]) => {
+      allArtists[k] = {
+        name: v.name,
+        count: v.count,
+        tracks: Array.from(v.tracks),
+        playlists: Array.from(v.playlists)
+      };
+    });
+
+    const topArtists = Object.values(allArtists).sort((a, b) => b.count - a.count).map(x => x.name);
+
     return {
       syncedAt: Date.now(),
       userDisplayName: me.display_name || me.id,
       topArtists,
-      allArtists: artistCounts,
+      allArtists,
+      trackPairs: Array.from(trackPairs),
       trackTitles: Array.from(trackTitles),
-      totalTracks: trackTitles.size,
-      totalArtists: Object.keys(artistCounts).length,
-      totalPlaylists: owned.length
+      playlistSummaries,
+      decades,
+      totalTracks: trackPairs.size || trackTitles.size,
+      totalArtists: Object.keys(allArtists).length,
+      totalPlaylists: owned.length,
+      tasteDna: existingDna || '',
+      dnaUpdatedAt: existingDna ? Date.now() : 0
     };
   };
 
