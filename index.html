@@ -7,12 +7,12 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>CrateCheck — Media Scanner</title>
-  <link rel="stylesheet" href="style.css?v=1.8" />
+  <link rel="stylesheet" href="style.css?v=1.9" />
 </head>
 <body>
 
 <header>
-  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.8</span></div>
+  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.9</span></div>
   <div class="status-pills">
     <span id="aiPill" class="pill" title="Gemini Cloud AI status" onclick="switchView('settings')">Gemini: Off</span>
     <span id="ratePill" class="pill" title="Discogs API sliding window (max 58/min)">API 0/58</span>
@@ -29,12 +29,6 @@
       <button class="btn btn-sm" onclick="switchView('settings')">⚙️ Open Settings</button>
     </div>
 
-    <!-- Single Item vs Pile Scan Mode -->
-    <div class="mode-switch" id="scanModeSeg">
-      <button class="mode-btn active" data-mode="single">📼 Single Item</button>
-      <button class="mode-btn" data-mode="pile">📚 Pile / Shelf Scan</button>
-    </div>
-
     <!-- Edit / Re-Check Existing Stash Item Banner -->
     <div id="editModeBanner" class="card hidden" style="border-color: var(--purple); background: rgba(168, 85, 247, 0.14);">
       <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px;">
@@ -48,31 +42,36 @@
       </label>
     </div>
 
+    <!-- Shared Format Filter (Applies to BOTH Single Item & Pile/Shelf Scans) -->
+    <div class="seg-control" id="formatSeg">
+      <button class="seg-btn active" data-fmt="Auto">Auto</button>
+      <button class="seg-btn" data-fmt="Cassette">Cassette</button>
+      <button class="seg-btn" data-fmt="CD">CD</button>
+      <button class="seg-btn" data-fmt="Vinyl">Vinyl</button>
+    </div>
+
+    <!-- Single Item vs Pile Scan Mode -->
+    <div class="mode-switch" id="scanModeSeg">
+      <button class="mode-btn active" data-mode="single">📼 Single Item</button>
+      <button class="mode-btn" data-mode="pile">📚 Pile / Shelf Scan</button>
+    </div>
+
     <!-- ==================== SINGLE ITEM MODE ==================== -->
     <div id="singleModeWrap">
-      <div class="seg-control" id="formatSeg">
-        <button class="seg-btn active" data-fmt="Auto">Auto</button>
-        <button class="seg-btn" data-fmt="Cassette">Cassette</button>
-        <button class="seg-btn" data-fmt="CD">CD</button>
-        <button class="seg-btn" data-fmt="Vinyl">Vinyl</button>
-      </div>
-
       <div class="card">
         <input id="galleryInput" class="hidden-file" type="file" accept="image/*" multiple />
         <input id="nativeCamInput" class="hidden-file" type="file" accept="image/*" capture="environment" />
 
-        <div class="btn-row-4" style="margin-top:0;">
-          <button class="btn btn-secondary stage-btn" onclick="openCameraViewfinder()">
-            <span style="font-size:1.25rem;">📷</span><span>2-Shot Cam</span>
+        <button class="btn btn-primary-scan" onclick="openCameraViewfinder('single')">
+          📷 Take Photos (2-Shot + Auto-UPC)
+        </button>
+
+        <div class="btn-row">
+          <button class="btn btn-secondary btn-sm" style="width:100%; min-height:42px;" onclick="document.getElementById('galleryInput').click()">
+            🖼️ Upload Photos
           </button>
-          <button class="btn btn-secondary stage-btn" onclick="document.getElementById('galleryInput').click()">
-            <span style="font-size:1.25rem;">🖼️</span><span>Upload</span>
-          </button>
-          <button class="btn btn-secondary stage-btn" onclick="openBarcodeScanner()">
-            <span style="font-size:1.25rem;">║▌</span><span>Scan UPC</span>
-          </button>
-          <button class="btn btn-secondary stage-btn" onclick="toggleManualEntry()">
-            <span style="font-size:1.25rem;">⌨️</span><span>Type / URL</span>
+          <button class="btn btn-secondary btn-sm" style="width:100%; min-height:42px;" onclick="openManualModal('search')">
+            ⌨️ Manual / Discogs URL
           </button>
         </div>
 
@@ -82,8 +81,8 @@
           <div style="font-size:0.72rem; color:var(--muted); margin-top:5px;">Tap any photo to inspect fullscreen · AI 2048px JPEG · Stash 1200px WebP</div>
         </div>
 
-        <div class="search-action-row">
-          <button id="btnRunSearch" class="btn btn-primary-scan" onclick="runFullScan()" disabled>
+        <div id="singleActionRow" class="search-action-row hidden">
+          <button id="btnRunSearch" class="btn btn-green" onclick="runFullScan()" disabled>
             🔍 Search &amp; Verify
           </button>
           <button id="btnClearStage" class="btn btn-secondary hidden" style="width:auto; min-width:74px;" onclick="resetScanner()">
@@ -93,40 +92,54 @@
       </div>
     </div>
 
-    <!-- ==================== PILE / SHELF SCAN MODE (WITH TAP-TO-HIGHLIGHT) ==================== -->
+    <!-- ==================== PILE / SHELF SCAN MODE ==================== -->
     <div id="pileModeWrap" class="hidden">
       <div class="card">
         <input id="pileGalleryInput" class="hidden-file" type="file" accept="image/*" />
         <input id="pileCamInput" class="hidden-file" type="file" accept="image/*" capture="environment" />
-        <p style="font-size:0.84rem; margin-bottom:10px;">
-          Snap or upload a box/shelf of tapes. AI maps each legible tape's position and scores it against your <strong>Taste DNA &amp; Soft Spots</strong> immediately. <strong>Tap any tape to spotlight it &amp; check Discogs pricing.</strong>
+        <p style="font-size:0.84rem; margin-bottom:6px;">
+          Snap or upload a crate/shelf. Auto-analyzes immediately against your <strong>Taste Profile &amp; Soft Spots</strong>. Tap any numbered pin or result to spotlight it &amp; check rough Discogs prices.
+        </p>
+        <p style="font-size:0.76rem; color:#93c5fd; margin-bottom:10px;">
+          💡 Works best with spines (cassettes, CDs, vinyl), and also attempts front covers/faces.
         </p>
         <div class="btn-row" style="margin-top:0;">
-          <button class="btn btn-secondary" onclick="document.getElementById('pileCamInput').click()">📷 Snap Pile / Shelf</button>
+          <button class="btn btn-primary-scan" style="min-height:46px; font-size:0.9rem;" onclick="openCameraViewfinder('pile')">📷 Snap Pile / Shelf</button>
           <button class="btn btn-secondary" onclick="document.getElementById('pileGalleryInput').click()">🖼️ Upload Photo</button>
         </div>
 
         <div id="pilePreviewWrap" class="hidden" style="margin-top:10px;">
-          <div class="pile-stage-outer">
-            <div id="pileImgBox" class="pile-img-box">
-              <img id="pilePreviewImg" class="pile-preview-img" />
-              <div id="pileOverlay" class="pile-overlay"></div>
+          <div class="pile-toolbar">
+            <div class="inline-actions" style="gap:4px;">
+              <button type="button" class="btn btn-secondary btn-sm pile-zbtn" onclick="stepPileZoom('inline', -0.5)" title="Zoom Out">−</button>
+              <span id="pileZoomLbl" class="pile-zoom-lbl">100%</span>
+              <button type="button" class="btn btn-secondary btn-sm pile-zbtn" onclick="stepPileZoom('inline', 0.5)" title="Zoom In">+</button>
+              <button type="button" class="btn btn-secondary btn-sm pile-zbtn" onclick="resetPileZoom('inline')">Reset</button>
+            </div>
+            <button type="button" class="btn btn-secondary btn-sm" style="min-height:30px; padding:3px 10px; font-size:0.76rem;" onclick="openPileFullscreen()">🔍 Fullscreen</button>
+          </div>
+
+          <div id="pileViewport" class="pile-viewport">
+            <div id="pileZoomContent" class="pile-zoom-content">
+              <img id="pilePreviewImg" class="pile-preview-img" draggable="false" />
+              <svg id="pileSvg" class="pile-svg" viewBox="0 0 1000 1000" preserveAspectRatio="none"></svg>
+              <div id="pilePins" class="pile-pins"></div>
             </div>
           </div>
-          <div id="pileHighlightBar" class="pile-highlight-bar hidden"></div>
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px;">
-            <span id="pilePhotoHint" style="font-size:0.74rem; color:var(--muted);">Ready to analyze</span>
-            <button type="button" class="btn btn-secondary btn-sm" style="min-height:28px; padding:3px 9px; font-size:0.74rem;" onclick="openPileLightbox()">🔍 Fullscreen</button>
-          </div>
-        </div>
 
-        <div class="search-action-row">
-          <button id="btnRunPileScan" class="btn btn-primary-scan" onclick="runPileScan()" disabled>
-            📚 Analyze Pile
-          </button>
-          <button id="btnClearPile" class="btn btn-secondary hidden" style="width:auto; min-width:74px;" onclick="resetPileScan()">
-            Clear
-          </button>
+          <div id="pileHighlightBar" class="pile-highlight-bar hidden"></div>
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-top:6px;">
+            <span id="pilePhotoHint" style="font-size:0.74rem; color:var(--muted);">Pinch or use +/− to zoom · Tap pins to spotlight</span>
+          </div>
+
+          <div id="pileActionRow" class="search-action-row">
+            <button id="btnRunPileScan" class="btn btn-secondary btn-sm" style="flex:1; min-height:40px;" onclick="runPileScan()">
+              🔄 Re-Analyze Pile
+            </button>
+            <button id="btnClearPile" class="btn btn-secondary btn-sm" style="width:auto; min-width:74px; min-height:40px;" onclick="resetPileScan()">
+              Clear
+            </button>
+          </div>
         </div>
       </div>
 
@@ -135,7 +148,7 @@
           <h2 style="margin:0;">📚 Pull List (<span id="pileCount">0</span>)</h2>
           <div class="inline-actions" style="gap:6px;">
             <button id="btnPileCheckPrices" type="button" class="btn btn-secondary btn-sm" style="min-height:30px; padding:4px 10px;" onclick="fetchAllPilePrices()">💰 Check Prices</button>
-            <span class="badge badge-yellow" style="margin:0;">Tap to Highlight</span>
+            <span class="badge badge-yellow" style="margin:0;">Tap to Spotlight</span>
           </div>
         </div>
         <div id="pileSkippedNote" style="font-size:0.78rem; color:var(--muted); margin-bottom:10px;"></div>
@@ -200,7 +213,7 @@
           <span class="taste-score" id="tasteScore">...</span>
         </div>
         <div id="tasteLocalBadges" style="margin-bottom:6px;"></div>
-        <div id="tasteBody" style="font-size:0.87rem; color:#e2e8f0;">Analyzing against your full Spotify Taste DNA...</div>
+        <div id="tasteBody" style="font-size:0.87rem; color:#e2e8f0;">Analyzing against your Taste Profile &amp; Soft Spots...</div>
         <div id="contextBox" class="context-box hidden"></div>
         <div id="tasteHits" style="margin-top:10px; font-size:0.84rem; color:#cbd5e1;"></div>
       </div>
@@ -246,6 +259,14 @@
         </div>
       </div>
 
+      <!-- Conservative Tie-Breaker Explicit Confirmation -->
+      <div id="tiebreakConfirmWrap" class="confirm-tiebreak-box hidden">
+        <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer; font-size:0.84rem; color:#fde68a;">
+          <input id="chkConfirmTiebreak" type="checkbox" style="width:20px; height:20px; margin-top:2px; flex:0 0 auto;" onchange="updateSaveButtonsState()" />
+          <span id="tiebreakConfirmText">Confirm saving as most common pressing.</span>
+        </label>
+      </div>
+
       <div style="margin-top:12px; display:flex; flex-direction:column; gap:8px;">
         <button id="btnSaveBoth" class="btn btn-green" onclick="saveCurrentItem(true)">
           ✅ Confirm &amp; Add to Discogs + Local Stash
@@ -263,8 +284,8 @@
       <button id="btnWrongPressing" class="link-toggle hidden" onclick="toggleCandidatesPanel()">
         Wrong pressing? View all Discogs matches ▾
       </button>
-      <button type="button" class="link-toggle" style="margin-top:2px;" onclick="openDirectIdEntry()">
-        🔗 Have the exact Discogs link or ID? Load it (keeps photos) ▾
+      <button type="button" class="link-toggle" style="margin-top:2px;" onclick="openManualModal('id')">
+        🔗 Load Discogs URL / Edit Info (keeps photos) ▾
       </button>
     </div>
 
@@ -276,62 +297,6 @@
       </div>
       <div id="candOverflowBar" class="hidden" style="margin-bottom:10px;"></div>
       <div id="candidatesList"></div>
-    </div>
-
-    <!-- Scanned Metadata & Direct Discogs URL / ID Loader -->
-    <div id="extractCard" class="card hidden">
-      <details id="extractDetails">
-        <summary>✏️ Edit Metadata / Load Exact Discogs URL or ID</summary>
-        <div style="margin-top:10px;">
-          <div style="margin-bottom:10px; padding-bottom:10px; border-bottom:1px solid var(--border);">
-            <label class="field-label">🔗 Load Exact Discogs URL or Release ID (keeps your photos &amp; grades)</label>
-            <div style="display:flex; gap:6px;">
-              <input id="fDirectId" type="text" placeholder="Paste discogs.com/release/1429179... or 1429179" />
-              <button type="button" class="btn btn-sm" style="flex:0 0 auto;" onclick="loadReleaseById(document.getElementById('fDirectId').value)">Load ID</button>
-            </div>
-          </div>
-
-          <div class="field-grid">
-            <div class="field-full">
-              <label class="field-label">Album / Release Title</label>
-              <input id="fTitle" type="text" placeholder="e.g., Dawn Patrol" oninput="updateStageUI()" />
-            </div>
-            <div class="field-full">
-              <label class="field-label">Artist(s)</label>
-              <input id="fArtist" type="text" placeholder="e.g., Night Ranger" oninput="updateStageUI()" />
-            </div>
-            <div>
-              <label class="field-label">Catalog #</label>
-              <input id="fCatno" type="text" placeholder="e.g., MCAC-5460" oninput="updateStageUI()" />
-            </div>
-            <div>
-              <label class="field-label">Barcode (UPC/EAN)</label>
-              <input id="fBarcode" type="text" placeholder="e.g., 07673254604" oninput="updateStageUI()" />
-            </div>
-            <div>
-              <label class="field-label">Format</label>
-              <select id="fFormat">
-                <option value="Cassette">Cassette</option>
-                <option value="CD">CD</option>
-                <option value="Vinyl">Vinyl</option>
-              </select>
-            </div>
-            <div>
-              <label class="field-label">Year</label>
-              <input id="fYear" type="text" placeholder="e.g., 1982" />
-            </div>
-            <div class="field-full">
-              <label class="field-label">Label</label>
-              <input id="fLabel" type="text" placeholder="e.g., MCA Records" />
-            </div>
-          </div>
-          <div id="detectedCluesLine" style="font-size:0.76rem; color:var(--muted); margin-top:8px;"></div>
-          <div class="btn-row" style="margin-top:10px;">
-            <button class="btn btn-sm" style="width:100%;" onclick="runDiscogsSearch()">🔍 Re-Search Discogs</button>
-            <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="inspectUnlistedItem()">🎧 Not on Discogs?</button>
-          </div>
-        </div>
-      </details>
     </div>
   </section>
 
@@ -402,7 +367,7 @@
         <div class="toggle-row">
           <div>
             <div style="font-size:0.9rem; font-weight:600;">🕵️ Auto Zero-Guessing Verification</div>
-            <div style="font-size:0.76rem; color:var(--muted);">Sweeps up to 45 pressings + [r=ID] siblings, respects loose tapes &amp; picks conservatively on ties</div>
+            <div style="font-size:0.76rem; color:var(--muted);">Sweeps up to 45 pressings + [r=ID] siblings, respects loose tapes &amp; flags conservative ties</div>
           </div>
           <input id="cfgAutoDetective" type="checkbox" style="width:22px; height:22px;" />
         </div>
@@ -433,6 +398,17 @@
           <a class="btn btn-secondary btn-sm" href="https://www.discogs.com/manage_folders" target="_blank" rel="noopener">📁 Manage Folders ↗</a>
           <span id="discogsUserBadge" style="font-size:0.82rem; color:var(--green); font-weight:700;"></span>
         </div>
+
+        <div class="sub-panel" style="margin-bottom:10px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+            <div>
+              <div style="font-size:0.84rem; font-weight:700;">📀 Collection Index (Another-Pressing Alert)</div>
+              <div id="discogsCollectionSummary" style="font-size:0.75rem; color:var(--muted);">Not synced yet — detects when you already own an album in a different pressing/format.</div>
+            </div>
+            <button id="btnSyncDiscogsIndex" type="button" class="btn btn-secondary btn-sm" onclick="syncDiscogsCollectionUI()">🔄 Sync Discogs Collection Index</button>
+          </div>
+        </div>
+
         <div style="margin-bottom:10px;">
           <label class="field-label">Target Discogs Folder</label>
           <select id="cfgDiscogsFolder">
@@ -452,7 +428,7 @@
             </select>
           </div>
           <div>
-            <label class="field-label">High-Value Alert ($)</label>
+            <label class="field-label">High-Value Alert (USD $)</label>
             <input id="cfgThreshold" type="number" min="1" step="1" value="20" />
           </div>
         </div>
@@ -471,55 +447,63 @@
       </div>
     </details>
 
-    <!-- 3. Music Services & Taste DNA -->
+    <!-- 3. Music Services & Taste Profile -->
     <details id="accMusic" class="acc-card">
       <summary class="acc-summary">
-        <span>3. 🎧 Music Services &amp; Taste DNA</span>
+        <span>3. 🎧 Music Services &amp; Taste Profile</span>
         <span id="pillMusic" class="pill">Off</span>
       </summary>
       <div class="acc-body">
-        <div class="inline-guide">
-          <strong>Spotify Setup:</strong> Create an app at <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard ↗</a>, check <strong>only Web API</strong>, paste your exact Redirect URI below, then paste the Client ID.
-        </div>
-        <div style="margin-bottom:10px;">
-          <label class="field-label">Spotify Client ID</label>
-          <input id="cfgSpotifyClientId" type="text" placeholder="32-char Client ID" />
-        </div>
-        <label class="field-label">Your Exact Redirect URI</label>
-        <div class="code-copy">
-          <span id="redirectUriText" style="flex:1;"></span>
-          <button class="btn btn-secondary btn-sm" onclick="copyRedirectUri()">Copy</button>
-        </div>
-
-        <div id="spotifySummary" style="font-size:0.84rem; color:var(--spotify); font-weight:700; margin:8px 0 4px;">Not synced yet.</div>
-        <div id="dnaSummary" style="font-size:0.78rem; color:var(--muted); margin-bottom:10px;"></div>
-
-        <div class="btn-row" style="margin-top:0; margin-bottom:10px;">
-          <button class="btn btn-spotify btn-sm" style="width:100%;" onclick="startSpotifyAuth()">🎧 Sync ALL Spotify</button>
-          <button id="btnAnalyzeDna" class="btn btn-purple btn-sm" style="width:100%;" onclick="analyzeFullSpotifyDNA()">🧠 Analyze ALL Data</button>
+        <!-- Front-and-center editable Taste Profile & Soft Spots (works with or without AI drafting) -->
+        <div class="inline-guide" style="margin-bottom:10px;">
+          <strong>Always-On Taste Profile:</strong> Edit your Taste Profile &amp; Soft Spots directly below — they work immediately on every Single &amp; Pile scan without ever needing to send your Spotify library to AI.
         </div>
 
         <div style="margin-bottom:10px;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-            <label class="field-label" style="margin:0;">Your Taste DNA Profile (editable — sent on every scan)</label>
-            <button type="button" class="btn btn-secondary btn-sm" style="min-height:28px; padding:3px 9px; font-size:0.74rem;" onclick="saveTasteDnaManual()">Save DNA</button>
-          </div>
-          <textarea id="cfgTasteDna" class="tall-textarea" rows="5" placeholder="Tap '🧠 Analyze ALL Data' after syncing Spotify to generate your complete Taste DNA..."></textarea>
+          <label class="field-label">Your Taste Profile (editable — sent on every scan)</label>
+          <textarea id="cfgTasteDna" class="tall-textarea" rows="5" placeholder="Describe your favorite genres, bands, eras, and production styles — or optionally auto-draft from Spotify below..."></textarea>
         </div>
 
         <div style="margin-bottom:10px;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-            <label class="field-label" style="margin:0;">Soft Spots &amp; Niche Pockets (equal first-class weight on every scan)</label>
-            <button type="button" class="btn btn-secondary btn-sm" style="min-height:28px; padding:3px 9px; font-size:0.74rem;" onclick="saveTasteDnaManual()">Save</button>
-          </div>
+          <label class="field-label">Soft Spots &amp; Niche Pockets (equal first-class weight on every scan)</label>
           <textarea id="cfgSoftSpots" rows="3" placeholder="Italo Disco, 80s Euro-dance, synthwave, game/movie soundtracks..."></textarea>
         </div>
 
-        <details style="margin-bottom:12px;">
-          <summary style="font-size:0.82rem;">Optional: Merge Exportify CSV (for playlists made by others)</summary>
-          <p style="margin-top:6px; font-size:0.8rem;">Export any playlist at <strong>exportify.net</strong> and import the CSV here.</p>
-          <input id="csvImportInput" type="file" accept=".csv" onchange="importExportifyCSV(this.files[0])" />
-        </details>
+        <button type="button" class="btn btn-sm" style="margin-bottom:14px;" onclick="saveTasteDnaManual()">💾 Save Taste Profile &amp; Soft Spots</button>
+
+        <!-- Spotify Local Zero-AI Exact Matching + Optional One-Time AI Draft -->
+        <div class="sub-panel" style="margin-bottom:12px;">
+          <div style="font-weight:800; font-size:0.88rem; margin-bottom:4px;">🟢 Spotify Local Library Sync (Zero-AI Exact Matcher)</div>
+          <p style="font-size:0.78rem; margin-bottom:8px;">
+            Syncing Spotify stores your artists &amp; songs locally on this device for instant, zero-AI exact matches on every scan. Create an app at <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener" style="color:#60a5fa; font-weight:700;">developer.spotify.com/dashboard ↗</a> (check <strong>only Web API</strong>) and paste the Redirect URI below.
+          </p>
+          <div style="margin-bottom:8px;">
+            <label class="field-label">Spotify Client ID</label>
+            <input id="cfgSpotifyClientId" type="text" placeholder="32-char Client ID" />
+          </div>
+          <label class="field-label">Your Exact Redirect URI</label>
+          <div class="code-copy">
+            <span id="redirectUriText" style="flex:1;"></span>
+            <button class="btn btn-secondary btn-sm" onclick="copyRedirectUri()">Copy</button>
+          </div>
+
+          <div id="spotifySummary" style="font-size:0.84rem; color:var(--spotify); font-weight:700; margin:8px 0 4px;">Not synced yet.</div>
+          <div id="dnaSummary" style="font-size:0.78rem; color:var(--muted); margin-bottom:10px;"></div>
+
+          <div class="btn-row" style="margin-top:0; margin-bottom:8px;">
+            <button class="btn btn-spotify btn-sm" style="width:100%;" onclick="startSpotifyAuth()">🎧 Sync Spotify Locally</button>
+            <button id="btnAnalyzeDna" class="btn btn-secondary btn-sm" style="width:100%;" onclick="analyzeFullSpotifyDNA()">🧠 Auto-Draft Profile</button>
+          </div>
+          <div style="font-size:0.73rem; color:var(--muted); margin-bottom:8px;">
+            Optional one-time helper: <strong>Auto-Draft Profile</strong> asks Gemini to summarize your synced Spotify library into the editable box above.
+          </div>
+
+          <details>
+            <summary style="font-size:0.8rem;">Optional: Merge Exportify CSV (for playlists made by others)</summary>
+            <p style="margin-top:6px; font-size:0.78rem;">Export any playlist at <strong>exportify.net</strong> and import the CSV here.</p>
+            <input id="csvImportInput" type="file" accept=".csv" onchange="importExportifyCSV(this.files[0])" />
+          </details>
+        </div>
 
         <div style="border-top:1px solid var(--border); padding-top:10px;">
           <div style="font-weight:800; font-size:0.88rem; margin-bottom:4px;">▲ Mini-Player "Open In" Platforms</div>
@@ -551,7 +535,7 @@
         <span id="pillData" class="pill">0 items</span>
       </summary>
       <div class="acc-body">
-        <p style="font-size:0.84rem; margin-bottom:10px;">Export a JSON backup after big scanning sessions (includes 1200px photos, grades, stash, Spotify library, Taste DNA &amp; Soft Spots).</p>
+        <p style="font-size:0.84rem; margin-bottom:10px;">Export a JSON backup after big scanning sessions (includes 1200px photos, grades, stash, Spotify library, Taste Profile &amp; Soft Spots).</p>
         <div class="btn-row" style="margin-top:0; margin-bottom:8px;">
           <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="exportJSON()">⬇️ Export JSON</button>
           <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="document.getElementById('jsonRestoreInput').click()">⬆️ Restore JSON</button>
@@ -562,16 +546,101 @@
         <div class="inline-guide" style="margin-bottom:0;">
           <strong>Workflow Tips:</strong>
           <ol style="margin:6px 0 0; padding-left:18px;">
-            <li><strong>Gemini Cloud Auto-Retry:</strong> Transient <code>500/503</code> hiccups retry automatically every 5s with a one-tap Cancel button.</li>
-            <li><strong>Full-Res 2-Shot Camera:</strong> Uses hardware autofocus + 2048px AI capture (tap screen to focus) and auto-detects UPC live.</li>
-            <li><strong>Instant Pile Scan:</strong> Spines and Taste scores appear right away — tap any tape to spotlight it and lazily fetch its Discogs price, or tap <strong>💰 Check Prices</strong> for all.</li>
-            <li><strong>Safe Stash Re-Check:</strong> Swapping a wrong Discogs pressing adds the new copy first before deleting the old one.</li>
+            <li><strong>2-Shot Camera + Auto-UPC:</strong> Snap Front/Side A → flip → snap Back/Side B, then tap <strong>🔍 Finish &amp; Search</strong>.</li>
+            <li><strong>Interactive Pile Scan:</strong> Snapping or uploading a shelf auto-analyzes immediately with 3072px ultra-high detail, rotated polygon highlights, and pinch-zoom.</li>
+            <li><strong>Currency-Aware Value Alerts:</strong> Non-USD prices are converted to approximate USD before triggering High-Value alerts.</li>
+            <li><strong>Safe Discogs Swaps:</strong> Swapping pressings adds the new copy, syncs fields, and saves locally before removing the old copy.</li>
           </ol>
         </div>
       </div>
     </details>
   </section>
 </main>
+
+<!-- Manual Search & Direct Discogs URL/ID Modal -->
+<div id="manualModal" class="modal-backdrop hidden" onclick="if(event.target === this) closeManualModal()">
+  <div class="modal-box modal-sheet">
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:12px;">
+      <h3 style="margin:0;">⌨️ Manual Search &amp; Discogs ID</h3>
+      <button type="button" class="btn btn-secondary btn-sm" style="min-height:30px; padding:4px 10px;" onclick="closeManualModal()">✕ Close</button>
+    </div>
+
+    <!-- Section A: Direct Discogs Release URL or ID -->
+    <div class="modal-section">
+      <div class="modal-section-title">A. Paste Exact Discogs Release URL or ID</div>
+      <div style="font-size:0.75rem; color:var(--muted); margin-bottom:8px;">Loads the exact pressing directly while keeping your staged photos &amp; grades.</div>
+      <div style="display:flex; gap:6px;">
+        <input id="fDirectId" type="text" placeholder="discogs.com/release/1429179 or 1429179" />
+        <button type="button" class="btn btn-sm" style="flex:0 0 auto;" onclick="loadReleaseById(document.getElementById('fDirectId').value)">🔗 Load ID</button>
+      </div>
+    </div>
+
+    <!-- Section B: Manual Search Fields -->
+    <div class="modal-section" style="margin-bottom:0;">
+      <div class="modal-section-title">B. Manual Search Fields</div>
+      <div class="field-grid">
+        <div class="field-full">
+          <label class="field-label">Album / Release Title</label>
+          <input id="fTitle" type="text" placeholder="e.g., Dawn Patrol" oninput="updateStageUI()" />
+        </div>
+        <div class="field-full">
+          <label class="field-label">Artist(s)</label>
+          <input id="fArtist" type="text" placeholder="e.g., Night Ranger" oninput="updateStageUI()" />
+        </div>
+        <div>
+          <label class="field-label">Catalog #</label>
+          <input id="fCatno" type="text" placeholder="e.g., MCAC-5460" oninput="updateStageUI()" />
+        </div>
+        <div>
+          <label class="field-label">Barcode (UPC/EAN)</label>
+          <input id="fBarcode" type="text" placeholder="e.g., 07673254604" oninput="updateStageUI()" />
+        </div>
+        <div>
+          <label class="field-label">Format</label>
+          <select id="fFormat">
+            <option value="Cassette">Cassette</option>
+            <option value="CD">CD</option>
+            <option value="Vinyl">Vinyl</option>
+          </select>
+        </div>
+        <div>
+          <label class="field-label">Year</label>
+          <input id="fYear" type="text" placeholder="e.g., 1982" />
+        </div>
+        <div class="field-full">
+          <label class="field-label">Label</label>
+          <input id="fLabel" type="text" placeholder="e.g., MCA Records" />
+        </div>
+      </div>
+      <div id="detectedCluesLine" style="font-size:0.76rem; color:var(--muted); margin-top:8px;"></div>
+      <div class="btn-row" style="margin-top:10px;">
+        <button type="button" class="btn btn-sm" style="width:100%;" onclick="submitManualDiscogsSearch()">🔍 Search Discogs</button>
+        <button type="button" class="btn btn-secondary btn-sm" style="width:100%;" onclick="submitUnlistedItem()">🎧 Not on Discogs?</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Fullscreen Interactive Zoomable Pile Overlay Modal -->
+<div id="pileFullscreenModal" class="lb-overlay hidden">
+  <div class="lb-top">
+    <div class="inline-actions" style="gap:4px;">
+      <button type="button" class="btn btn-secondary btn-sm pile-zbtn" onclick="stepPileZoom('fs', -0.5)" title="Zoom Out">−</button>
+      <span id="pileFsZoomLbl" class="pile-zoom-lbl">100%</span>
+      <button type="button" class="btn btn-secondary btn-sm pile-zbtn" onclick="stepPileZoom('fs', 0.5)" title="Zoom In">+</button>
+      <button type="button" class="btn btn-secondary btn-sm pile-zbtn" onclick="resetPileZoom('fs')">Reset</button>
+    </div>
+    <button type="button" class="btn btn-secondary btn-sm" onclick="closePileFullscreen()">✕ Close</button>
+  </div>
+  <div id="pileFsViewport" class="pile-viewport pile-viewport-fs">
+    <div id="pileFsZoomContent" class="pile-zoom-content">
+      <img id="pileFsImg" class="pile-preview-img pile-preview-img-fs" draggable="false" />
+      <svg id="pileFsSvg" class="pile-svg" viewBox="0 0 1000 1000" preserveAspectRatio="none"></svg>
+      <div id="pileFsPins" class="pile-pins"></div>
+    </div>
+  </div>
+  <div id="pileFsHighlightBar" class="pile-highlight-bar pile-fs-bar hidden"></div>
+</div>
 
 <!-- Stash Full Detail Overlay -->
 <div id="stashDetailModal" class="detail-overlay hidden">
@@ -582,7 +651,7 @@
   <div id="sdBody" class="detail-body"></div>
 </div>
 
-<!-- Continuous 2-Shot In-App Camera Viewfinder -->
+<!-- Continuous 2-Shot / Pile Full-Res In-App Camera Viewfinder -->
 <div id="cameraModal" class="cam-overlay hidden">
   <div class="cam-top">
     <span id="camStepBadge" class="badge badge-blue" style="margin:0; font-size:0.82rem;">Shot 1: Front / Side A</span>
@@ -600,7 +669,7 @@
   <div class="cam-bottom">
     <div id="camThumbs" class="cam-thumbs"></div>
     <div class="cam-controls">
-      <button type="button" class="btn btn-secondary btn-sm" onclick="closeCameraViewfinder()">Finish (<span id="camCountLbl">0</span>)</button>
+      <button id="camFinishBtn" type="button" class="btn btn-green btn-sm" onclick="finishCameraAndSearch()">🔍 Finish &amp; Search (<span id="camCountLbl">0</span>)</button>
       <button id="camShutterBtn" type="button" class="shutter-btn" onclick="captureViewfinderShot()" title="Snap Photo"></button>
       <button type="button" class="btn btn-secondary btn-sm" onclick="toggleCamTorch()" id="camTorchBtn" style="visibility:hidden;">🔦</button>
     </div>
@@ -642,19 +711,6 @@
 </div>
 <audio id="previewAudio" preload="none" playsinline></audio>
 
-<!-- Dedicated Live UPC Barcode Scanner Modal -->
-<div id="barcodeModal" class="modal-backdrop hidden">
-  <div class="modal-box">
-    <h3 style="margin-bottom:8px;">║▌ Aim at Barcode (UPC / EAN)</h3>
-    <div class="scanner-frame">
-      <video id="barcodeVideo" playsinline muted></video>
-      <div class="scanner-line"></div>
-    </div>
-    <p id="barcodeHint" style="font-size:0.82rem; margin-bottom:10px;">Hold steady in good light...</p>
-    <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="closeBarcodeScanner()">Cancel</button>
-  </div>
-</div>
-
 <!-- Clean 3-Tab Bottom Navigation -->
 <nav class="bottom-nav">
   <button class="nav-btn active" data-view="scan" onclick="switchView('scan')"><span class="ico">📷</span>Scan</button>
@@ -664,7 +720,7 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="apis.js?v=1.8"></script>
-<script src="app.js?v=1.8"></script>
+<script src="apis.js?v=1.9"></script>
+<script src="app.js?v=1.9"></script>
 </body>
 </html>

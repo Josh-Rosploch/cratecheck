@@ -61,7 +61,7 @@
     showYoutube: true
   }, storedCfg);
 
-  // Cleanly strip any legacy v1.7 Ollama keys so upgrades land directly in Gemini Cloud mode
+  // Cleanly strip any legacy Ollama keys so upgrades land directly in Gemini Cloud mode
   delete CC.cfg.aiProvider;
   delete CC.cfg.ollamaUrl;
   delete CC.cfg.ollamaModel;
@@ -71,14 +71,49 @@
 
   CC.isAiReady = () => Boolean(CC.cfg.geminiKey?.trim());
 
+  // Lightweight approximate FX-to-USD rates for currency-aware High-Value threshold checks
+  CC.FX_TO_USD = {
+    USD: 1.0,
+    EUR: 1.09,
+    GBP: 1.27,
+    CAD: 0.72,
+    AUD: 0.65,
+    JPY: 0.0066,
+    CHF: 1.13,
+    SEK: 0.095,
+    MXN: 0.050,
+    BRL: 0.17,
+    NZD: 0.60,
+    ZAR: 0.055
+  };
+
+  CC.toApproxUsd = (val, currency = 'USD') => {
+    if (val === null || val === undefined || val === '' || !Number.isFinite(Number(val))) return null;
+    const code = String(currency || 'USD').trim().toUpperCase();
+    const rate = CC.FX_TO_USD[code];
+    if (!rate) return null;
+    return Number(val) * rate;
+  };
+
   CC.formatMoney = (val, currency = 'USD') => {
-    if (val === null || val === undefined || !Number.isFinite(Number(val))) return '—';
+    if (val === null || val === undefined || val === '' || !Number.isFinite(Number(val))) return '—';
     const num = Number(val);
     const code = String(currency || 'USD').trim().toUpperCase();
     const symMap = { USD: '$', EUR: '€', GBP: '£', JPY: '¥', CAD: 'CA$', AUD: 'A$', NZD: 'NZ$' };
     const decimals = code === 'JPY' ? 0 : 2;
     if (symMap[code]) return `${symMap[code]}${num.toFixed(decimals)}`;
     return `${code} ${num.toFixed(decimals)}`;
+  };
+
+  CC.formatMoneyWithUsd = (val, currency = 'USD') => {
+    const base = CC.formatMoney(val, currency);
+    if (base === '—') return base;
+    const code = String(currency || 'USD').trim().toUpperCase();
+    if (code === 'USD') return base;
+    const usd = CC.toApproxUsd(val, code);
+    if (usd === null) return base;
+    const usdStr = usd >= 10 ? `$${Math.round(usd)}` : `$${usd.toFixed(2)}`;
+    return `${base} (~${usdStr})`;
   };
 
   CC.sleep = (ms, signal) => new Promise((resolve, reject) => {
@@ -273,6 +308,73 @@
     return { okCount, failedCount, errors };
   };
 
+  CC.syncDiscogsCollectionIndex = async () => {
+    if (!CC.cfg.discogsUser || !CC.cfg.discogsToken) {
+      throw new Error('Verify your Discogs account first');
+    }
+    const releaseIds = new Set();
+    const masterIds = new Set();
+    const masterMap = {};
+    const albumKeys = {};
+    let page = 1;
+    let totalPages = 1;
+    let totalItems = 0;
+
+    const pushEntry = (mapObj, key, entry) => {
+      if (!key) return;
+      if (!mapObj[key]) mapObj[key] = [];
+      if (!mapObj[key].some(e => e.releaseId === entry.releaseId)) {
+        mapObj[key].push(entry);
+      }
+    };
+
+    while (page <= totalPages) {
+      statusCb(`📀 Syncing Discogs Collection Index (page ${page}/${totalPages})...`, true);
+      const res = await CC.discogsFetch(
+        `/users/${encodeURIComponent(CC.cfg.discogsUser)}/collection/folders/0/releases`,
+        { per_page: 100, page }
+      );
+      totalPages = Number(res?.pagination?.pages || 1);
+      const list = Array.isArray(res?.releases) ? res.releases : [];
+      totalItems += list.length;
+
+      for (const item of list) {
+        const info = item.basic_information || {};
+        const relId = Number(info.id || item.id || 0);
+        if (!relId) continue;
+        releaseIds.add(relId);
+
+        const mId = Number(info.master_id || 0);
+        const artist = (info.artists || []).map(a => String(a.name || '').replace(/\s*\(\d+\)$/, '')).join(', ').trim();
+        const title = String(info.title || '').trim();
+        const format = (info.formats || []).map(f => f.name).filter(Boolean).join(', ');
+        const year = info.year || '';
+        const entry = { releaseId: relId, artist, title, format, year };
+
+        if (mId > 0) {
+          masterIds.add(mId);
+          pushEntry(masterMap, String(mId), entry);
+        }
+        const na = CC.norm(artist);
+        const nt = CC.norm(title);
+        if (na && nt) {
+          pushEntry(albumKeys, `${na}|${nt}`, entry);
+        }
+      }
+      page++;
+    }
+
+    return {
+      username: CC.cfg.discogsUser,
+      syncedAt: Date.now(),
+      totalItems,
+      releaseIds: Array.from(releaseIds),
+      masterIds: Array.from(masterIds),
+      masterMap,
+      albumKeys
+    };
+  };
+
   // ==================== GEMINI CLOUD AI ENGINE (WITH INFINITE 5s AUTO-RETRY) ====================
   let activeAiCtrl = null;
 
@@ -296,7 +398,12 @@
   }
 
   async function runGeminiRequest(parts, thinkingLevel, opts = {}) {
-    const { expectJSON = true, retryLabel = 'Gemini' } = opts;
+    const {
+      expectJSON = true,
+      retryLabel = 'Gemini',
+      maxOutputTokens = null,
+      mediaResolution = null
+    } = opts;
     if (!CC.cfg.geminiKey?.trim()) throw new Error('Add your Gemini API Key in Settings');
     const model = (CC.cfg.geminiModel || 'gemini-3.5-flash-lite').trim();
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(CC.cfg.geminiKey.trim())}`;
@@ -305,9 +412,11 @@
     activeAiCtrl = ctrl;
     const signal = ctrl.signal;
 
-    const send = (useThinking) => {
+    const send = (useThinking, useMediaRes) => {
       const genCfg = { temperature: 0.1 };
       if (expectJSON) genCfg.responseMimeType = 'application/json';
+      if (maxOutputTokens) genCfg.maxOutputTokens = maxOutputTokens;
+      if (useMediaRes && mediaResolution) genCfg.mediaResolution = mediaResolution;
       if (useThinking && thinkingLevel) genCfg.thinkingConfig = { thinkingLevel };
       return fetch(url, {
         method: 'POST',
@@ -324,8 +433,9 @@
         attempt++;
         let res = null;
         try {
-          res = await send(true);
-          if (res.status === 400 && thinkingLevel) res = await send(false);
+          res = await send(true, true);
+          if (res.status === 400 && mediaResolution) res = await send(true, false);
+          if (res.status === 400 && thinkingLevel) res = await send(false, false);
         } catch (netErr) {
           if (netErr.name === 'AbortError' || signal.aborted) throw new DOMException('Cancelled by user', 'AbortError');
           statusCb(`${retryLabel}: connection hiccup — retrying in 5s (try #${attempt + 1})...`, true, { cancellable: true });
