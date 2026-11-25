@@ -7,685 +7,12 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>CrateCheck — Media Scanner</title>
-  <style>
-    :root {
-      --bg: #0f1117;
-      --card: #181c26;
-      --card-2: #202636;
-      --border: #2c3448;
-      --text: #f1f5f9;
-      --muted: #94a3b8;
-      --accent: #3b82f6;
-      --accent-hover: #2563eb;
-      --green: #10b981;
-      --green-bg: rgba(16, 185, 129, 0.14);
-      --yellow: #f59e0b;
-      --yellow-bg: rgba(245, 158, 11, 0.15);
-      --red: #ef4444;
-      --red-bg: rgba(239, 68, 68, 0.16);
-      --purple: #a855f7;
-      --purple-bg: rgba(168, 85, 247, 0.16);
-      --spotify: #1db954;
-      --radius: 14px;
-      --safe-bottom: env(safe-area-inset-bottom, 0px);
-    }
-
-    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-
-    body {
-      margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      line-height: 1.45;
-      padding-bottom: calc(82px + var(--safe-bottom));
-    }
-
-    header {
-      position: sticky;
-      top: 0;
-      z-index: 40;
-      background: rgba(15, 17, 23, 0.92);
-      backdrop-filter: blur(10px);
-      border-bottom: 1px solid var(--border);
-      padding: 12px 16px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-    }
-
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-weight: 800;
-      font-size: 1.05rem;
-      letter-spacing: -0.02em;
-    }
-    .ver-tag {
-      font-size: 0.68rem;
-      font-weight: 700;
-      color: #93c5fd;
-      background: rgba(59, 130, 246, 0.18);
-      border: 1px solid rgba(59, 130, 246, 0.35);
-      padding: 1px 6px;
-      border-radius: 6px;
-    }
-
-    .status-pills {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 0.72rem;
-      font-weight: 600;
-    }
-
-    .pill {
-      padding: 4px 8px;
-      border-radius: 999px;
-      background: var(--card-2);
-      border: 1px solid var(--border);
-      color: var(--muted);
-      white-space: nowrap;
-    }
-    .pill.ok { color: var(--green); border-color: rgba(16, 185, 129, 0.4); }
-    .pill.warn { color: var(--yellow); border-color: rgba(245, 158, 11, 0.4); }
-    .pill.err { color: var(--red); border-color: rgba(239, 68, 68, 0.4); }
-
-    main {
-      max-width: 720px;
-      margin: 0 auto;
-      padding: 14px;
-    }
-
-    .view { display: none; }
-    .view.active { display: block; }
-
-    .card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 14px;
-      margin-bottom: 12px;
-    }
-
-    h2 { margin: 0 0 10px; font-size: 1.05rem; font-weight: 700; }
-    h3 { margin: 0 0 8px; font-size: 0.95rem; font-weight: 700; }
-    p { margin: 0 0 10px; color: var(--muted); font-size: 0.9rem; }
-    p:last-child { margin-bottom: 0; }
-
-    .seg-control {
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 6px;
-      background: var(--card);
-      border: 1px solid var(--border);
-      padding: 5px;
-      border-radius: 12px;
-      margin-bottom: 12px;
-    }
-
-    .seg-btn {
-      background: transparent;
-      border: none;
-      color: var(--muted);
-      font-weight: 700;
-      font-size: 0.84rem;
-      padding: 9px 4px;
-      border-radius: 8px;
-      cursor: pointer;
-    }
-    .seg-btn.active {
-      background: var(--accent);
-      color: #fff;
-    }
-
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      width: 100%;
-      min-height: 48px;
-      padding: 12px 16px;
-      border-radius: 12px;
-      border: 1px solid transparent;
-      font-size: 0.95rem;
-      font-weight: 700;
-      cursor: pointer;
-      color: #fff;
-      background: var(--accent);
-      text-decoration: none;
-      transition: transform 0.08s ease, opacity 0.15s ease;
-    }
-    .btn:active { transform: scale(0.985); }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .btn-primary-scan {
-      min-height: 62px;
-      font-size: 1.06rem;
-      background: linear-gradient(135deg, #2563eb, #4f46e5);
-      box-shadow: 0 6px 20px rgba(37, 99, 235, 0.35);
-    }
-    .btn-green { background: var(--green); color: #052e16; }
-    .btn-spotify { background: var(--spotify); color: #052e16; }
-    .btn-purple { background: linear-gradient(135deg, #7c3aed, #6366f1); color: #fff; }
-    .btn-secondary { background: var(--card-2); border-color: var(--border); color: var(--text); }
-    .btn-danger { background: var(--red-bg); border-color: rgba(239,68,68,0.4); color: #fca5a5; }
-    .btn-sm { min-height: 36px; padding: 7px 12px; font-size: 0.82rem; width: auto; }
-
-    .btn-row {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-      margin-top: 8px;
-    }
-    .btn-row-3 {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 6px;
-      margin-top: 8px;
-    }
-
-    .inline-actions {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .hidden-file { display: none; }
-
-    .preview-strip {
-      display: flex;
-      gap: 10px;
-      overflow-x: auto;
-      margin-top: 10px;
-    }
-    .preview-item {
-      position: relative;
-      flex: 0 0 auto;
-    }
-    .preview-item img {
-      width: 88px;
-      height: 88px;
-      object-fit: cover;
-      border-radius: 10px;
-      border: 1px solid var(--border);
-      display: block;
-    }
-    .preview-label {
-      position: absolute;
-      bottom: 4px;
-      left: 4px;
-      background: rgba(0,0,0,0.75);
-      color: #fff;
-      font-size: 0.65rem;
-      padding: 2px 5px;
-      border-radius: 4px;
-    }
-
-    .field-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-    }
-    .field-full { grid-column: 1 / -1; }
-
-    label.field-label {
-      display: block;
-      font-size: 0.74rem;
-      color: var(--muted);
-      font-weight: 600;
-      margin-bottom: 4px;
-    }
-
-    input[type="text"], input[type="password"], input[type="number"], select, textarea {
-      width: 100%;
-      background: #0d1017;
-      border: 1px solid var(--border);
-      color: var(--text);
-      border-radius: 10px;
-      padding: 10px 11px;
-      font-size: 0.92rem;
-      font-family: inherit;
-    }
-    input:focus, select:focus, textarea:focus {
-      outline: none;
-      border-color: var(--accent);
-    }
-
-    .status-banner {
-      display: none;
-      align-items: center;
-      gap: 10px;
-      padding: 12px 14px;
-      border-radius: 12px;
-      background: var(--card-2);
-      border: 1px solid var(--border);
-      margin-bottom: 12px;
-      font-size: 0.88rem;
-      font-weight: 600;
-    }
-    .status-banner.show { display: flex; }
-
-    .spinner {
-      width: 18px;
-      height: 18px;
-      border: 2.5px solid rgba(255,255,255,0.2);
-      border-top-color: var(--accent);
-      border-radius: 50%;
-      animation: spin 0.7s linear infinite;
-      flex: 0 0 auto;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-
-    /* Variant Detective Card */
-    .detective-card {
-      background: linear-gradient(180deg, rgba(139, 92, 246, 0.14), rgba(24, 28, 38, 0.95));
-      border: 1.5px solid rgba(168, 85, 247, 0.45);
-      border-radius: var(--radius);
-      padding: 14px;
-      margin-bottom: 12px;
-    }
-    .detective-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      margin-bottom: 8px;
-    }
-    .detective-q {
-      background: rgba(13, 16, 23, 0.78);
-      border: 1px solid rgba(168, 85, 247, 0.35);
-      border-radius: 12px;
-      padding: 12px;
-      margin-top: 10px;
-    }
-    .detective-hint {
-      font-size: 0.8rem;
-      color: #c4b5fd;
-      margin: 4px 0 10px;
-    }
-    .opt-btn {
-      display: block;
-      width: 100%;
-      text-align: left;
-      padding: 11px 12px;
-      margin-bottom: 7px;
-      border-radius: 10px;
-      background: var(--card-2);
-      border: 1px solid var(--border);
-      color: var(--text);
-      font-size: 0.86rem;
-      font-weight: 700;
-      cursor: pointer;
-    }
-    .opt-btn:last-child { margin-bottom: 0; }
-    .opt-btn:active { border-color: var(--purple); background: rgba(168, 85, 247, 0.18); }
-
-    .candidate-card {
-      display: flex;
-      gap: 12px;
-      padding: 12px;
-      border-radius: 12px;
-      background: var(--card-2);
-      border: 1.5px solid var(--border);
-      margin-bottom: 8px;
-      cursor: pointer;
-      transition: border-color 0.15s ease, opacity 0.15s ease;
-    }
-    .candidate-card.selected {
-      border-color: var(--accent);
-      background: rgba(59, 130, 246, 0.12);
-    }
-    .candidate-card.ai-pick {
-      border-color: var(--purple);
-      box-shadow: 0 0 0 1px rgba(168, 85, 247, 0.28);
-    }
-    .candidate-card.eliminated {
-      opacity: 0.45;
-    }
-    .candidate-thumb {
-      width: 64px;
-      height: 64px;
-      border-radius: 8px;
-      object-fit: cover;
-      background: #0d1017;
-      flex: 0 0 auto;
-    }
-    .candidate-meta { flex: 1; min-width: 0; }
-    .candidate-title {
-      font-weight: 700;
-      font-size: 0.92rem;
-      margin-bottom: 3px;
-      word-break: break-word;
-    }
-    .candidate-sub {
-      font-size: 0.78rem;
-      color: var(--muted);
-      margin-bottom: 5px;
-    }
-    .candidate-diff {
-      font-size: 0.78rem;
-      color: #e2e8f0;
-      background: rgba(13, 16, 23, 0.65);
-      border-left: 3px solid var(--purple);
-      padding: 4px 8px;
-      border-radius: 4px;
-      margin: 5px 0;
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 0.72rem;
-      font-weight: 700;
-      padding: 3px 8px;
-      border-radius: 6px;
-      margin-right: 4px;
-      margin-bottom: 4px;
-    }
-    .badge-green { background: var(--green-bg); color: #34d399; }
-    .badge-yellow { background: var(--yellow-bg); color: #fbbf24; }
-    .badge-red { background: var(--red-bg); color: #f87171; }
-    .badge-purple { background: var(--purple-bg); color: #d8b4fe; }
-    .badge-blue { background: rgba(59, 130, 246, 0.18); color: #93c5fd; }
-
-    .alert-box {
-      padding: 12px 14px;
-      border-radius: 12px;
-      font-weight: 800;
-      font-size: 0.92rem;
-      margin-bottom: 10px;
-      border: 1.5px solid transparent;
-    }
-    .alert-high-value {
-      background: linear-gradient(135deg, rgba(245, 158, 11, 0.22), rgba(239, 68, 68, 0.22));
-      border-color: #f59e0b;
-      color: #fde68a;
-    }
-    .alert-scarce {
-      background: linear-gradient(135deg, rgba(168, 85, 247, 0.22), rgba(245, 158, 11, 0.2));
-      border-color: #a855f7;
-      color: #e9d5ff;
-    }
-    .alert-dup {
-      background: var(--yellow-bg);
-      border-color: var(--yellow);
-      color: #fde68a;
-      font-size: 0.84rem;
-    }
-
-    .metrics-grid {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 8px;
-      margin-bottom: 10px;
-    }
-    .metric-box {
-      background: #0d1017;
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 9px 10px;
-    }
-    .metric-label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
-    .metric-val { font-size: 1.05rem; font-weight: 800; margin-top: 2px; }
-
-    .taste-box {
-      background: linear-gradient(180deg, rgba(29, 185, 84, 0.08), rgba(15, 17, 23, 0.6));
-      border: 1px solid rgba(29, 185, 84, 0.35);
-      border-radius: 12px;
-      padding: 12px;
-      margin-bottom: 10px;
-    }
-    .taste-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      margin-bottom: 6px;
-    }
-    .taste-score {
-      font-size: 1.3rem;
-      font-weight: 900;
-      color: var(--spotify);
-    }
-
-    .notes-box {
-      background: #0d1017;
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 8px 10px;
-      margin-bottom: 10px;
-      font-size: 0.78rem;
-      color: var(--muted);
-      white-space: pre-wrap;
-      max-height: 150px;
-      overflow-y: auto;
-    }
-
-    .tracklist {
-      max-height: 220px;
-      overflow-y: auto;
-      background: #0d1017;
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 8px 10px;
-      margin-bottom: 10px;
-      font-size: 0.82rem;
-    }
-    .track-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 8px;
-      padding: 5px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.05);
-    }
-    .track-row:last-child { border-bottom: none; }
-    .track-hit { color: #34d399; font-weight: 700; }
-
-    .link-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin-bottom: 12px;
-    }
-
-    .chip-row {
-      display: flex;
-      gap: 6px;
-      overflow-x: auto;
-      padding-bottom: 6px;
-      margin-bottom: 10px;
-    }
-    .chip {
-      flex: 0 0 auto;
-      padding: 6px 12px;
-      border-radius: 999px;
-      border: 1px solid var(--border);
-      background: var(--card-2);
-      color: var(--muted);
-      font-size: 0.78rem;
-      font-weight: 700;
-      cursor: pointer;
-    }
-    .chip.active {
-      background: var(--accent);
-      border-color: var(--accent);
-      color: #fff;
-    }
-
-    .stash-item {
-      display: flex;
-      gap: 11px;
-      padding: 12px;
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      margin-bottom: 10px;
-    }
-    .stash-thumb {
-      width: 68px;
-      height: 68px;
-      border-radius: 8px;
-      object-fit: cover;
-      background: #0d1017;
-      flex: 0 0 auto;
-    }
-    .stash-body { flex: 1; min-width: 0; }
-
-    .toggle-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 8px 0;
-    }
-
-    .code-copy {
-      display: flex;
-      gap: 6px;
-      align-items: center;
-      background: #0d1017;
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 8px 10px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 0.76rem;
-      word-break: break-all;
-      margin: 6px 0;
-    }
-
-    .guide-step {
-      padding: 12px;
-      background: var(--card-2);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      margin-bottom: 10px;
-    }
-    .guide-step ol {
-      margin: 6px 0 0;
-      padding-left: 18px;
-      color: var(--muted);
-      font-size: 0.86rem;
-    }
-    .guide-step li { margin-bottom: 6px; }
-    .guide-step a { color: #60a5fa; font-weight: 600; }
-
-    /* Live Barcode Modal */
-    .modal-backdrop {
-      position: fixed;
-      inset: 0;
-      z-index: 90;
-      background: rgba(0, 0, 0, 0.88);
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 16px;
-    }
-    .modal-box {
-      width: 100%;
-      max-width: 440px;
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 14px;
-    }
-    .scanner-frame {
-      position: relative;
-      width: 100%;
-      aspect-ratio: 4/3;
-      background: #000;
-      border-radius: 12px;
-      overflow: hidden;
-      margin-bottom: 10px;
-    }
-    .scanner-frame video {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-    }
-    .scanner-line {
-      position: absolute;
-      left: 10%;
-      right: 10%;
-      top: 50%;
-      height: 2px;
-      background: #ef4444;
-      box-shadow: 0 0 8px #ef4444;
-    }
-
-    nav.bottom-nav {
-      position: fixed;
-      bottom: 0;
-      left: 0;
-      right: 0;
-      z-index: 50;
-      background: rgba(15, 17, 23, 0.96);
-      backdrop-filter: blur(12px);
-      border-top: 1px solid var(--border);
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      padding: 6px 6px calc(6px + var(--safe-bottom));
-    }
-
-    .nav-btn {
-      background: transparent;
-      border: none;
-      color: var(--muted);
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 3px;
-      padding: 6px 4px;
-      font-size: 0.72rem;
-      font-weight: 700;
-      cursor: pointer;
-      border-radius: 10px;
-    }
-    .nav-btn span.ico { font-size: 1.25rem; line-height: 1; }
-    .nav-btn.active { color: var(--accent); background: rgba(59, 130, 246, 0.1); }
-
-    .toast {
-      position: fixed;
-      left: 50%;
-      bottom: calc(88px + var(--safe-bottom));
-      transform: translateX(-50%) translateY(20px);
-      background: #1e293b;
-      color: #fff;
-      border: 1px solid var(--border);
-      padding: 10px 16px;
-      border-radius: 999px;
-      font-size: 0.85rem;
-      font-weight: 700;
-      opacity: 0;
-      pointer-events: none;
-      transition: all 0.2s ease;
-      z-index: 100;
-      max-width: 90vw;
-      text-align: center;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.45);
-    }
-    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-
-    details summary {
-      cursor: pointer;
-      font-weight: 700;
-      font-size: 0.88rem;
-      color: var(--text);
-      padding: 4px 0;
-    }
-    .hidden { display: none !important; }
-  </style>
+  <link rel="stylesheet" href="style.css?v=1.3" />
 </head>
 <body>
 
 <header>
-  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.2</span></div>
+  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.3</span></div>
   <div class="status-pills">
     <span id="ratePill" class="pill" title="Discogs API sliding window (max 50/min)">API 0/50</span>
     <span id="spotifyPill" class="pill">Spotify: Off</span>
@@ -697,9 +24,9 @@
   <section id="view-scan" class="view active">
     <div id="setupNotice" class="card hidden" style="border-color: var(--yellow); background: var(--yellow-bg);">
       <div style="font-weight: 800; color: #fde68a; margin-bottom: 4px;">Finish Quick Setup First</div>
-      <p style="color: #fef3c7; font-size: 0.84rem; margin-bottom: 8px;">Add your Gemini API Key &amp; Discogs Token in Settings (takes ~3 minutes using the Guide tab).</p>
+      <p style="color: #fef3c7; font-size: 0.84rem; margin-bottom: 8px;">Add your Gemini API Key &amp; Discogs Token in Settings.</p>
       <div class="btn-row">
-        <button class="btn btn-sm btn-secondary" onclick="switchView('guide')">📖 Open Setup Guide</button>
+        <button class="btn btn-sm btn-secondary" onclick="switchView('guide')">📖 Open Guide</button>
         <button class="btn btn-sm" onclick="switchView('settings')">⚙️ Open Settings</button>
       </div>
     </div>
@@ -711,27 +38,45 @@
       <button class="seg-btn" data-fmt="Vinyl">Vinyl</button>
     </div>
 
+    <!-- Staged Capture Card -->
     <div class="card">
-      <input id="camPrimary" class="hidden-file" type="file" accept="image/*" capture="environment" />
-      <input id="camExtra" class="hidden-file" type="file" accept="image/*" capture="environment" />
+      <input id="camStage" class="hidden-file" type="file" accept="image/*" capture="environment" />
 
-      <button class="btn btn-primary-scan" onclick="document.getElementById('camPrimary').click()">
-        📷 Scan Item (Front / Shell)
-      </button>
-
-      <div class="btn-row-3">
-        <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="document.getElementById('camExtra').click()">
-          + Extra Photo
+      <div class="btn-row-3" style="margin-top:0;">
+        <button class="btn btn-secondary" style="min-height:54px; flex-direction:column; gap:2px; font-size:0.82rem;" onclick="document.getElementById('camStage').click()">
+          <span style="font-size:1.25rem;">📷</span><span>Add Photo</span>
         </button>
-        <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="openBarcodeScanner()">
-          ║▌ Scan UPC
+        <button class="btn btn-secondary" style="min-height:54px; flex-direction:column; gap:2px; font-size:0.82rem;" onclick="openBarcodeScanner()">
+          <span style="font-size:1.25rem;">║▌</span><span>Scan UPC</span>
         </button>
-        <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="toggleManualEntry()">
-          ⌨️ Type Info
+        <button class="btn btn-secondary" style="min-height:54px; flex-direction:column; gap:2px; font-size:0.82rem;" onclick="toggleManualEntry()">
+          <span style="font-size:1.25rem;">⌨️</span><span>Type Info</span>
         </button>
       </div>
 
-      <div id="previewStrip" class="preview-strip hidden"></div>
+      <div id="stagedSummary" class="staged-box hidden">
+        <div id="stagedUpcRow" class="hidden" style="margin-bottom:8px;"></div>
+        <div id="previewStrip" class="preview-strip"></div>
+      </div>
+
+      <div class="search-action-row">
+        <button id="btnRunSearch" class="btn btn-primary-scan" onclick="runFullScan()" disabled>
+          🔍 Search &amp; Analyze
+        </button>
+        <button id="btnClearStage" class="btn btn-secondary hidden" style="width:auto; min-width:74px;" onclick="resetScanner()">
+          Clear
+        </button>
+      </div>
+    </div>
+
+    <!-- Floating / Inline Audio Highlight Bar (plays even while scanning!) -->
+    <div id="audioBar" class="audio-bar hidden">
+      <button id="audioPlayBtn" class="audio-play-btn" onclick="toggleHighlightAudio()">▶</button>
+      <div class="audio-meta">
+        <div id="audioTitle" class="audio-title">Loading 30s highlight...</div>
+        <div class="audio-progress-wrap"><div id="audioProgress" class="audio-progress"></div></div>
+      </div>
+      <div id="audioExtLinks" class="inline-actions" style="gap:4px;"></div>
     </div>
 
     <div id="statusBanner" class="status-banner">
@@ -742,18 +87,18 @@
     <!-- AI Variant Detective Card -->
     <div id="detectiveCard" class="detective-card hidden">
       <div class="detective-header">
-        <strong style="font-size:0.95rem; color:#e9d5ff;">🕵️ AI Variant Detective</strong>
+        <strong style="font-size:0.95rem; color:#e9d5ff;">🕵️ AI Variant Match</strong>
         <span id="detectiveBadge"></span>
       </div>
       <div id="detectiveReasoning" style="font-size:0.86rem; color:#f1f5f9;"></div>
       <div id="detectiveQuestionBox" class="detective-q hidden"></div>
       <div class="inline-actions" style="margin-top:8px;">
-        <button id="btnShowAllCands" class="btn btn-secondary btn-sm hidden" onclick="showAllCandidates()">Show All Variants</button>
-        <button class="btn btn-secondary btn-sm" onclick="document.getElementById('camExtra').click()">📷 Add Back/Shell Photo to Refine</button>
+        <button id="btnToggleManualPick" class="btn btn-secondary btn-sm hidden" onclick="toggleCandidatesPanel()">Pick Manually</button>
+        <button class="btn btn-secondary btn-sm" onclick="document.getElementById('camStage').click()">📷 Add Another Photo</button>
       </div>
     </div>
 
-    <!-- Selected Item Inspector (placed high so auto-picked result is immediately visible!) -->
+    <!-- Selected Item Inspector -->
     <div id="inspectorCard" class="card hidden">
       <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:8px;">
         <div>
@@ -765,7 +110,7 @@
 
       <div id="inspAlerts"></div>
 
-      <div class="metrics-grid" id="inspMetrics">
+      <div class="metrics-grid">
         <div class="metric-box">
           <div class="metric-label">Lowest Listed</div>
           <div class="metric-val" id="mLowest">—</div>
@@ -786,19 +131,28 @@
 
       <div class="link-row" id="inspLinks"></div>
 
-      <!-- Spotify Taste & Hit Check -->
-      <div class="taste-box" id="tasteBox">
+      <!-- Spotify Taste, Test Song & Feedback -->
+      <div class="taste-box">
         <div class="taste-header">
-          <strong style="font-size:0.9rem;">🎧 Spotify Taste &amp; Hit Check</strong>
+          <strong style="font-size:0.9rem;">🎧 Taste &amp; Test Song</strong>
           <span class="taste-score" id="tasteScore">...</span>
         </div>
         <div id="tasteLocalBadges" style="margin-bottom:6px;"></div>
-        <div id="tasteBody" style="font-size:0.86rem; color:#e2e8f0;">Analyzing against your taste profile...</div>
+        <div id="tasteBody" style="font-size:0.86rem; color:#e2e8f0;">Analyzing against your Spotify &amp; ratings...</div>
         <div id="tasteHits" style="margin-top:8px; font-size:0.82rem; color:#cbd5e1;"></div>
+
+        <!-- Feedback Loop -->
+        <div id="tasteVoteRow" class="vote-row hidden">
+          <span style="font-size:0.78rem; color:var(--muted); font-weight:600;">Like this vibe?</span>
+          <div class="inline-actions" style="gap:6px;">
+            <button id="btnVoteUp" class="vote-btn" onclick="submitTasteVote(true)">👍 Liked It</button>
+            <button id="btnVoteDown" class="vote-btn" onclick="submitTasteVote(false)">👎 Not for Me</button>
+          </div>
+        </div>
       </div>
 
       <details id="pressingNotesDetails" class="hidden" style="margin-bottom:8px;">
-        <summary>🔎 Discogs Pressing Notes &amp; Identifiers</summary>
+        <summary>🔎 Discogs Pressing Notes</summary>
         <div class="notes-box" id="inspNotes"></div>
       </details>
 
@@ -820,40 +174,42 @@
           </button>
         </div>
       </div>
+
+      <button id="btnWrongPressing" class="link-toggle hidden" onclick="toggleCandidatesPanel()">
+        Wrong pressing? View other Discogs matches ▾
+      </button>
     </div>
 
-    <!-- Discogs Candidates -->
+    <!-- Discogs Candidates (Hidden by default unless needed or expanded) -->
     <div id="candidatesCard" class="card hidden">
       <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px;">
-        <h3 style="margin:0;">Discogs Matches (<span id="candCount">0</span>)</h3>
-        <button id="btnManualDetective" class="btn btn-purple btn-sm" onclick="runVariantDetective(true)">🕵️ AI Pick Variant</button>
+        <h3 style="margin:0;">Other Discogs Matches (<span id="candCount">0</span>)</h3>
+        <button id="btnManualDetective" class="btn btn-purple btn-sm" onclick="runVariantDetective()">🕵️ Re-Run AI Pick</button>
       </div>
       <div id="candidatesList"></div>
     </div>
 
-    <!-- Extracted Fields Card (Collapsible after scan so screen stays clean) -->
+    <!-- Scanned Details (Collapsed unless typing manually or tweaking) -->
     <div id="extractCard" class="card hidden">
-      <details id="extractDetails" open>
-        <summary style="display:flex; justify-content:space-between; align-items:center;">
-          <span>✏️ Scanned Details (Edit / Re-Search)</span>
-        </summary>
+      <details id="extractDetails">
+        <summary>✏️ Edit Details / Re-Search</summary>
         <div style="margin-top:10px;">
           <div class="field-grid">
             <div class="field-full">
               <label class="field-label">Album / Release Title</label>
-              <input id="fTitle" type="text" placeholder="e.g., Dawn Patrol" />
+              <input id="fTitle" type="text" placeholder="e.g., Dawn Patrol" oninput="updateStageUI()" />
             </div>
             <div class="field-full">
               <label class="field-label">Artist(s)</label>
-              <input id="fArtist" type="text" placeholder="e.g., Night Ranger" />
+              <input id="fArtist" type="text" placeholder="e.g., Night Ranger" oninput="updateStageUI()" />
             </div>
             <div>
               <label class="field-label">Catalog #</label>
-              <input id="fCatno" type="text" placeholder="e.g., MCAC-5460" />
+              <input id="fCatno" type="text" placeholder="e.g., MCAC-5460" oninput="updateStageUI()" />
             </div>
             <div>
               <label class="field-label">Barcode (UPC/EAN)</label>
-              <input id="fBarcode" type="text" placeholder="e.g., 07673254604" />
+              <input id="fBarcode" type="text" placeholder="e.g., 07673254604" oninput="updateStageUI()" />
             </div>
             <div>
               <label class="field-label">Format</label>
@@ -881,7 +237,6 @@
             <button class="btn btn-sm" style="width:100%;" onclick="runDiscogsSearch()">🔍 Re-Search Discogs</button>
             <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="inspectUnlistedItem()">🎧 Not on Discogs?</button>
           </div>
-          <button class="btn btn-secondary btn-sm" style="width:100%; margin-top:8px;" onclick="resetScanner()">Clear Scan</button>
         </div>
       </details>
     </div>
@@ -915,7 +270,7 @@
   <!-- ==================== SETTINGS VIEW ==================== -->
   <section id="view-settings" class="view">
     <div class="card">
-      <h2>1. Gemini Vision &amp; Variant AI</h2>
+      <h2>1. Gemini Vision &amp; Playback</h2>
       <div style="margin-bottom:10px;">
         <label class="field-label">Gemini API Key</label>
         <input id="cfgGeminiKey" type="password" placeholder="AIza..." />
@@ -930,8 +285,15 @@
       </div>
       <div class="toggle-row">
         <div>
-          <div style="font-size:0.9rem; font-weight:600;">🕵️ Auto AI Variant Detective</div>
-          <div style="font-size:0.76rem; color:var(--muted);">Auto-compares pressing notes vs your photo &amp; asks tie-breaker questions</div>
+          <div style="font-size:0.9rem; font-weight:600;">🔊 Auto-Play 30s Song Highlight</div>
+          <div style="font-size:0.76rem; color:var(--muted);">Plays a 30s clip right in the app during/after scanning (doesn't interrupt Spotify)</div>
+        </div>
+        <input id="cfgAutoPlay" type="checkbox" style="width:22px; height:22px;" />
+      </div>
+      <div class="toggle-row">
+        <div>
+          <div style="font-size:0.9rem; font-weight:600;">🕵️ Auto AI Variant Match</div>
+          <div style="font-size:0.76rem; color:var(--muted);">Picks the right pressing automatically &amp; hides duplicate listings</div>
         </div>
         <input id="cfgAutoDetective" type="checkbox" style="width:22px; height:22px;" />
       </div>
@@ -979,7 +341,7 @@
       <div class="toggle-row">
         <div>
           <div style="font-size:0.9rem; font-weight:600;">Fetch VG+ Seller Price Suggestions</div>
-          <div style="font-size:0.76rem; color:var(--muted);">Only works if Discogs Seller Settings are enabled (auto-disables if unsupported to save API calls)</div>
+          <div style="font-size:0.76rem; color:var(--muted);">Auto-disables if Seller Settings aren't enabled on Discogs</div>
         </div>
         <input id="cfgFetchVg" type="checkbox" style="width:22px; height:22px;" />
       </div>
@@ -991,26 +353,30 @@
     </div>
 
     <div class="card">
-      <h2>3. Spotify Taste Profile (Uncapped Sync)</h2>
-      <p>Syncs <strong>all</strong> of your Liked Songs, Top Artists, Saved Albums, and <strong>every</strong> owned/collaborative playlist locally onto your phone. Zero Spotify calls during scanning.</p>
+      <h2>3. Spotify Taste Profile &amp; Learned Ratings</h2>
+      <p>Syncs all Liked Songs, Top Artists, Saved Albums, and owned playlists locally onto your phone.</p>
       <div style="margin-bottom:10px;">
         <label class="field-label">Spotify Client ID</label>
         <input id="cfgSpotifyClientId" type="text" placeholder="32-char Client ID from developer.spotify.com" />
       </div>
-      <label class="field-label">Your Exact Redirect URI (paste into Spotify Dashboard)</label>
+      <label class="field-label">Your Exact Redirect URI</label>
       <div class="code-copy">
         <span id="redirectUriText" style="flex:1;"></span>
         <button class="btn btn-secondary btn-sm" onclick="copyRedirectUri()">Copy</button>
       </div>
       <div id="spotifySummary" style="font-size:0.84rem; color:var(--spotify); font-weight:700; margin:8px 0;">Not synced yet.</div>
+      <div id="feedbackSummary" style="font-size:0.8rem; color:var(--muted); margin-bottom:8px;"></div>
       <div id="settingsStatusBanner" class="status-banner" style="margin-bottom:10px;">
         <div class="spinner"></div>
         <div id="settingsStatusText">Syncing...</div>
       </div>
-      <button class="btn btn-spotify" onclick="startSpotifyAuth()">🎧 Connect &amp; Sync All Spotify Data</button>
+      <div class="inline-actions">
+        <button class="btn btn-spotify" style="flex:1;" onclick="startSpotifyAuth()">🎧 Connect &amp; Sync Spotify</button>
+        <button class="btn btn-danger btn-sm" onclick="clearTasteFeedback()">Reset 👍/👎</button>
+      </div>
 
       <details style="margin-top:12px;">
-        <summary>Optional: Merge Exportify CSV (for playlists made by others)</summary>
+        <summary>Optional: Merge Exportify CSV</summary>
         <p style="margin-top:6px;">Export any playlist at <strong>exportify.net</strong> and import the CSV here to merge into your taste profile.</p>
         <input id="csvImportInput" type="file" accept=".csv" onchange="importExportifyCSV(this.files[0])" />
       </details>
@@ -1018,7 +384,7 @@
 
     <div class="card">
       <h2>4. Data Backup &amp; Restore</h2>
-      <p>Android Chrome can clear browser storage if your phone gets full. Export a JSON backup after big scanning sessions.</p>
+      <p>Export a JSON backup after big scanning sessions (includes photos, stash, Spotify sync &amp; 👍/👎 ratings).</p>
       <div class="btn-row">
         <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="exportJSON()">⬇️ Export JSON</button>
         <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="document.getElementById('jsonRestoreInput').click()">⬆️ Restore JSON</button>
@@ -1030,48 +396,34 @@
   <!-- ==================== SETUP GUIDE VIEW ==================== -->
   <section id="view-guide" class="view">
     <div class="card">
-      <h2>Step-by-Step Setup &amp; Tips</h2>
-      <p>All keys stay strictly on your phone in <code>localStorage</code> and never touch any third-party server.</p>
-
+      <h2>Fast Workflow &amp; Setup</h2>
       <div class="guide-step">
-        <h3>Best Photo Trick for Exact Pressing ID</h3>
+        <h3>Recommended Fast Scanning Loop</h3>
         <ol>
-          <li>For cased cassettes, lay the <strong>cassette shell next to the J-card</strong> in one photo (showing shell color, timing window, and printed text/barcode).</li>
-          <li>The <strong>AI Variant Detective</strong> automatically reads Discogs pressing notes and compares them to your photo—or asks you 1 quick Yes/No question to lock down the exact edition.</li>
+          <li>Tap <strong>📷 Add Photo</strong> once or twice (shell + case) and/or tap <strong>║▌ Scan UPC</strong>. Nothing searches yet.</li>
+          <li>Tap <strong>🔍 Search &amp; Analyze</strong> once — the 30-second highlight clip starts playing while AI locks onto the exact Discogs pressing and checks your taste.</li>
+          <li>Vote <strong>👍 / 👎</strong> if you want to train future recommendations, then tap <strong>Confirm &amp; Add</strong> or <strong>Check Only / Next</strong>.</li>
         </ol>
       </div>
-
       <div class="guide-step">
-        <h3>1. Gemini API Key</h3>
+        <h3>API Setup Links</h3>
         <ol>
-          <li>Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> → <strong>Create API Key</strong> → paste in Settings → tap <strong>🧪 Test Gemini Key</strong>.</li>
-          <li><em>Google AI Pro subscribers:</em> You can also claim $10/month in Gemini API credits inside AI Studio's Billing/Plans menu.</li>
-        </ol>
-      </div>
-
-      <div class="guide-step">
-        <h3>2. Discogs Token &amp; Folders</h3>
-        <ol>
-          <li>Open <a href="https://www.discogs.com/settings/developers" target="_blank" rel="noopener">discogs.com/settings/developers</a> → <strong>Generate new token</strong> → paste in Settings → tap <strong>Verify Account &amp; Load Folders</strong>.</li>
-          <li>Create custom folders anytime at <a href="https://www.discogs.com/manage_folders" target="_blank" rel="noopener">discogs.com/manage_folders</a>, then tap Verify again.</li>
-        </ol>
-      </div>
-
-      <div class="guide-step">
-        <h3>3. Spotify Taste Sync</h3>
-        <ol>
-          <li>Copy your Redirect URI:
+          <li><strong>Gemini Key:</strong> <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> → Create API Key → paste in Settings → Test.</li>
+          <li><strong>Discogs Token:</strong> <a href="https://www.discogs.com/settings/developers" target="_blank" rel="noopener">discogs.com/settings/developers</a> → Generate token → Verify in Settings.</li>
+          <li><strong>Spotify Client ID:</strong> <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a> → check only <strong>Web API</strong> → paste this Redirect URI:
             <div class="code-copy">
               <span id="guideRedirectUri" style="flex:1;"></span>
               <button class="btn btn-secondary btn-sm" onclick="copyRedirectUri()">Copy</button>
             </div>
           </li>
-          <li>At <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a>, create an app, check <strong>only Web API</strong>, paste the Redirect URI, and paste the Client ID into Settings.</li>
         </ol>
       </div>
     </div>
   </section>
 </main>
+
+<!-- Persistent Audio Element (unlocked on Search click for Android autoplay) -->
+<audio id="previewAudio" preload="none" playsinline></audio>
 
 <!-- Live UPC Barcode Scanner Modal -->
 <div id="barcodeModal" class="modal-backdrop hidden">
@@ -1095,1789 +447,7 @@
 
 <div id="toast" class="toast"></div>
 
-<script>
-(() => {
-  'use strict';
-
-  // ==================== DYNAMIC PWA MANIFEST ====================
-  (function injectManifest() {
-    const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192"><rect width="192" height="192" rx="40" fill="#181c26"/><rect x="26" y="48" width="140" height="96" rx="14" fill="#3b82f6"/><circle cx="68" cy="96" r="18" fill="#0f1117"/><circle cx="124" cy="96" r="18" fill="#0f1117"/><rect x="64" y="122" width="64" height="14" rx="4" fill="#0f1117"/></svg>`;
-    const iconUrl = 'data:image/svg+xml;base64,' + btoa(iconSvg);
-    const manifest = {
-      name: 'CrateCheck Media Scanner',
-      short_name: 'CrateCheck',
-      start_url: location.origin + location.pathname,
-      display: 'standalone',
-      background_color: '#0f1117',
-      theme_color: '#0f1117',
-      icons: [{ src: iconUrl, sizes: '192x192', type: 'image/svg+xml' }]
-    };
-    const link = document.createElement('link');
-    link.rel = 'manifest';
-    link.href = URL.createObjectURL(new Blob([JSON.stringify(manifest)], { type: 'application/json' }));
-    document.head.appendChild(link);
-  })();
-
-  // ==================== STATE & CONFIG ====================
-  const REDIRECT_URI = location.origin + location.pathname;
-  const CFG_KEY = 'cratecheck_cfg_v1';
-
-  let cfg = Object.assign({
-    geminiKey: '',
-    geminiModel: 'gemini-3.5-flash-lite',
-    autoDetective: true,
-    discogsToken: '',
-    discogsUser: '',
-    discogsFolderId: '1',
-    discogsFolders: [{ id: 1, name: 'Uncategorized' }],
-    homeCountry: 'US',
-    fetchVgSuggestions: true,
-    threshold: 20,
-    voice: false,
-    spotifyClientId: '',
-    spotifyAccessToken: '',
-    spotifyRefreshToken: '',
-    spotifyExpiresAt: 0
-  }, JSON.parse(localStorage.getItem(CFG_KEY) || '{}'));
-
-  let db = null;
-  let spotifyProfile = null;
-  let stashCache = [];
-  let activeFormat = 'Auto';
-  let activeStashFilter = 'all';
-
-  let currentPhotos = { primaryB64: null, extraB64: null, thumbWebp: null };
-  let currentExtracted = null;
-  let currentCandidates = [];
-  let visibleCandidateIds = null; // null = show all
-  let detectiveDiffs = {};        // releaseId -> short_diff
-  let detectivePickId = null;
-  let detectiveEliminatedIds = new Set();
-  let currentInspected = null;
-
-  const releaseDetailCache = new Map(); // releaseId -> Discogs release JSON
-  const tasteCache = new Map();         // norm(artist|title) -> Gemini taste JSON
-
-  let barcodeStream = null;
-  let barcodeRaf = null;
-
-  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-  // ==================== INDEXEDDB ====================
-  function openDB() {
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open('CrateCheckDB', 1);
-      req.onupgradeneeded = (e) => {
-        const d = e.target.result;
-        if (!d.objectStoreNames.contains('stash')) d.createObjectStore('stash', { keyPath: 'id', autoIncrement: true });
-        if (!d.objectStoreNames.contains('meta')) d.createObjectStore('meta', { keyPath: 'key' });
-      };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-  }
-
-  function idbGet(store, key) {
-    return new Promise((resolve, reject) => {
-      const req = db.transaction(store, 'readonly').objectStore(store).get(key);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-  }
-
-  function idbPut(store, val) {
-    return new Promise((resolve, reject) => {
-      const req = db.transaction(store, 'readwrite').objectStore(store).put(val);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-  }
-
-  function idbDelete(store, key) {
-    return new Promise((resolve, reject) => {
-      const req = db.transaction(store, 'readwrite').objectStore(store).delete(key);
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    });
-  }
-
-  function idbGetAll(store) {
-    return new Promise((resolve, reject) => {
-      const req = db.transaction(store, 'readonly').objectStore(store).getAll();
-      req.onsuccess = () => resolve(req.result || []);
-      req.onerror = () => reject(req.error);
-    });
-  }
-
-  // ==================== UI HELPERS ====================
-  function toast(msg, ms = 2800) {
-    const el = document.getElementById('toast');
-    el.textContent = msg;
-    el.classList.add('show');
-    clearTimeout(el._t);
-    el._t = setTimeout(() => el.classList.remove('show'), ms);
-  }
-
-  function setStatus(text, show = true) {
-    const el = document.getElementById('statusBanner');
-    document.getElementById('statusText').textContent = text;
-    el.classList.toggle('show', show);
-
-    const sel = document.getElementById('settingsStatusBanner');
-    if (sel) {
-      document.getElementById('settingsStatusText').textContent = text;
-      sel.classList.toggle('show', show);
-    }
-  }
-
-  function esc(str) {
-    return String(str ?? '').replace(/[&<>"']/g, c => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-    }[c]));
-  }
-
-  function norm(s) {
-    return String(s || '')
-      .toLowerCase()
-      .replace(/\(.*?\)|\[.*?\]/g, ' ')
-      .replace(/[^a-z0-9]+/g, ' ')
-      .trim();
-  }
-
-  function similarity(a, b) {
-    const ta = new Set(norm(a).split(' ').filter(w => w.length > 1));
-    const tb = new Set(norm(b).split(' ').filter(w => w.length > 1));
-    if (!ta.size || !tb.size) return 0;
-    let inter = 0;
-    ta.forEach(w => { if (tb.has(w)) inter++; });
-    const jaccard = inter / (ta.size + tb.size - inter);
-    const na = norm(a), nb = norm(b);
-    const sub = (na && nb && (na.includes(nb) || nb.includes(na))) ? 0.25 : 0;
-    return Math.min(1, jaccard + sub);
-  }
-
-  function playChime() {
-    try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const now = ctx.currentTime;
-      [587.33, 880].forEach((freq, i) => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'triangle';
-        osc.frequency.setValueAtTime(freq, now + i * 0.12);
-        gain.gain.setValueAtTime(0.14, now + i * 0.12);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.12 + 0.35);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(now + i * 0.12);
-        osc.stop(now + i * 0.12 + 0.36);
-      });
-    } catch (_) {}
-  }
-
-  function speakText(text) {
-    if (!cfg.voice || !('speechSynthesis' in window)) return;
-    try {
-      speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.rate = 1.05;
-      speechSynthesis.speak(u);
-    } catch (_) {}
-  }
-
-  window.switchView = function(name) {
-    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-    document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === name));
-    document.getElementById('view-' + name).classList.add('active');
-    if (name === 'stash') renderStash();
-    window.scrollTo({ top: 0, behavior: 'instant' });
-  };
-
-  // ==================== DISCOGS RATE LIMITER (NO CORS PREFLIGHT) ====================
-  const discogsQueue = [];
-  let discogsBusy = false;
-  let lastDiscogsCall = 0;
-  let recentDiscogsCalls = [];
-
-  function updateRatePill() {
-    const now = Date.now();
-    recentDiscogsCalls = recentDiscogsCalls.filter(t => now - t < 60000);
-    const pill = document.getElementById('ratePill');
-    const c = recentDiscogsCalls.length;
-    pill.textContent = `API ${c}/50`;
-    pill.className = 'pill ' + (c >= 45 ? 'err' : c >= 35 ? 'warn' : 'ok');
-  }
-  setInterval(updateRatePill, 3000);
-
-  function discogsFetch(path, params = {}, method = 'GET') {
-    return new Promise((resolve, reject) => {
-      discogsQueue.push({ path, params, method, resolve, reject });
-      processDiscogsQueue();
-    });
-  }
-
-  async function processDiscogsQueue() {
-    if (discogsBusy || !discogsQueue.length) return;
-    discogsBusy = true;
-    const job = discogsQueue.shift();
-
-    try {
-      const now = Date.now();
-      recentDiscogsCalls = recentDiscogsCalls.filter(t => now - t < 60000);
-      if (recentDiscogsCalls.length >= 49) {
-        const waitMs = 60500 - (now - recentDiscogsCalls[0]);
-        setStatus(`Cooling down Discogs rate limit (${Math.ceil(waitMs/1000)}s)...`, true);
-        await sleep(Math.max(1000, waitMs));
-      }
-      const gap = Date.now() - lastDiscogsCall;
-      if (gap < 1200) await sleep(1200 - gap);
-
-      const url = new URL('https://api.discogs.com' + job.path);
-      Object.entries(job.params || {}).forEach(([k, v]) => {
-        if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v);
-      });
-      if (cfg.discogsToken) url.searchParams.set('token', cfg.discogsToken.trim());
-
-      lastDiscogsCall = Date.now();
-      recentDiscogsCalls.push(lastDiscogsCall);
-      updateRatePill();
-
-      const res = await fetch(url.toString(), { method: job.method });
-      if (res.status === 429) {
-        setStatus('Discogs rate limit hit — waiting 60s...', true);
-        await sleep(60000);
-        const retry = await fetch(url.toString(), { method: job.method });
-        if (!retry.ok) throw new Error(`Discogs HTTP ${retry.status}`);
-        job.resolve(await retry.json().catch(() => ({})));
-      } else if (!res.ok) {
-        const errTxt = await res.text().catch(() => '');
-        const err = new Error(`Discogs HTTP ${res.status}: ${errTxt.slice(0, 120)}`);
-        err.status = res.status;
-        throw err;
-      } else {
-        job.resolve(await res.json().catch(() => ({})));
-      }
-    } catch (e) {
-      job.reject(e);
-    } finally {
-      discogsBusy = false;
-      if (discogsQueue.length) processDiscogsQueue();
-    }
-  }
-
-  async function getReleaseCached(releaseId) {
-    if (releaseDetailCache.has(releaseId)) return releaseDetailCache.get(releaseId);
-    const data = await discogsFetch(`/releases/${releaseId}`);
-    releaseDetailCache.set(releaseId, data);
-    return data;
-  }
-
-  // ==================== LIVE BARCODE SCANNER (CHROME BarcodeDetector) ====================
-  window.openBarcodeScanner = async function() {
-    if (!('BarcodeDetector' in window) || !navigator.mediaDevices?.getUserMedia) {
-      toast('Live UPC scanner not supported here — snap a photo of the barcode instead!', 3500);
-      document.getElementById('camPrimary').click();
-      return;
-    }
-    const modal = document.getElementById('barcodeModal');
-    const video = document.getElementById('barcodeVideo');
-    const hint = document.getElementById('barcodeHint');
-    modal.classList.remove('hidden');
-    hint.textContent = 'Starting rear camera...';
-
-    try {
-      const detector = new BarcodeDetector({ formats: ['upc_a', 'upc_e', 'ean_13', 'ean_8', 'code_128'] });
-      barcodeStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }
-      });
-      video.srcObject = barcodeStream;
-      await video.play();
-      hint.textContent = 'Center the barcode on the red line...';
-
-      const scanLoop = async () => {
-        if (!barcodeStream) return;
-        try {
-          const codes = await detector.detect(video);
-          if (codes && codes.length && codes[0].rawValue) {
-            const code = codes[0].rawValue.replace(/\D/g, '');
-            if (code.length >= 8) {
-              closeBarcodeScanner();
-              playChime();
-              document.getElementById('extractCard').classList.remove('hidden');
-              document.getElementById('extractDetails').open = true;
-              document.getElementById('fBarcode').value = code;
-              if (activeFormat !== 'Auto') document.getElementById('fFormat').value = activeFormat;
-              toast(`║▌ Barcode read: ${code}`);
-              runDiscogsSearch();
-              return;
-            }
-          }
-        } catch (_) {}
-        barcodeRaf = requestAnimationFrame(scanLoop);
-      };
-      barcodeRaf = requestAnimationFrame(scanLoop);
-    } catch (err) {
-      closeBarcodeScanner();
-      toast('Camera error: ' + err.message);
-    }
-  };
-
-  window.closeBarcodeScanner = function() {
-    if (barcodeRaf) cancelAnimationFrame(barcodeRaf);
-    barcodeRaf = null;
-    if (barcodeStream) {
-      barcodeStream.getTracks().forEach(t => t.stop());
-      barcodeStream = null;
-    }
-    document.getElementById('barcodeVideo').srcObject = null;
-    document.getElementById('barcodeModal').classList.add('hidden');
-  };
-
-  // ==================== IMAGE COMPRESSION ====================
-  function processImageFile(file, maxDim, mime, quality) {
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      const url = URL.createObjectURL(file);
-      img.onload = () => {
-        URL.revokeObjectURL(url);
-        let { width, height } = img;
-        if (width > maxDim || height > maxDim) {
-          if (width >= height) { height = Math.round(height * (maxDim / width)); width = maxDim; }
-          else { width = Math.round(width * (maxDim / height)); height = maxDim; }
-        }
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
-        resolve(canvas.toDataURL(mime, quality));
-      };
-      img.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
-      img.src = url;
-    });
-  }
-
-  async function handlePhotoCapture(file, isExtra) {
-    if (!file) return;
-    if (!cfg.geminiKey) {
-      toast('Add your Gemini API Key in Settings first');
-      switchView('settings');
-      return;
-    }
-
-    setStatus('Compressing photo...', true);
-    try {
-      const apiDataUrl = await processImageFile(file, 1536, 'image/jpeg', 0.82);
-      const b64 = apiDataUrl.split(',')[1];
-      if (!isExtra) {
-        currentPhotos.primaryB64 = b64;
-        currentPhotos.extraB64 = null;
-        currentPhotos.thumbWebp = await processImageFile(file, 600, 'image/webp', 0.6);
-      } else {
-        currentPhotos.extraB64 = b64;
-        if (!currentPhotos.thumbWebp) {
-          currentPhotos.thumbWebp = await processImageFile(file, 600, 'image/webp', 0.6);
-        }
-      }
-      renderPhotoPreviews();
-      await runGeminiVision();
-    } catch (err) {
-      setStatus('', false);
-      toast('Photo error: ' + err.message);
-    }
-  }
-
-  function renderPhotoPreviews() {
-    const strip = document.getElementById('previewStrip');
-    let html = '';
-    if (currentPhotos.primaryB64) {
-      html += `<div class="preview-item"><img src="data:image/jpeg;base64,${currentPhotos.primaryB64}" /><span class="preview-label">Front</span></div>`;
-    }
-    if (currentPhotos.extraB64) {
-      html += `<div class="preview-item"><img src="data:image/jpeg;base64,${currentPhotos.extraB64}" /><span class="preview-label">Extra</span></div>`;
-    }
-    strip.innerHTML = html;
-    strip.classList.toggle('hidden', !html);
-  }
-
-  // ==================== GEMINI API CALLS ====================
-  async function callGeminiJSON(parts) {
-    const model = (cfg.geminiModel || 'gemini-3.5-flash-lite').trim();
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(cfg.geminiKey.trim())}`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts }],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          temperature: 0.15
-        }
-      })
-    });
-    if (!res.ok) {
-      const t = await res.text().catch(() => '');
-      throw new Error(`Gemini HTTP ${res.status}: ${t.slice(0, 140)}`);
-    }
-    const data = await res.json();
-    const raw = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
-    const cleaned = raw.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
-    try {
-      return JSON.parse(cleaned);
-    } catch (_) {
-      const m = cleaned.match(/\{[\s\S]*\}/);
-      if (m) return JSON.parse(m[0]);
-      throw new Error('Could not parse Gemini JSON response');
-    }
-  }
-
-  window.testGeminiKey = async function() {
-    saveSettings(true);
-    const badge = document.getElementById('geminiStatusBadge');
-    if (!cfg.geminiKey) {
-      badge.style.color = 'var(--red)';
-      badge.textContent = '❌ Paste key first';
-      toast('Paste your Gemini API Key first');
-      return;
-    }
-    badge.style.color = 'var(--muted)';
-    badge.textContent = 'Testing...';
-    try {
-      await callGeminiJSON([{ text: 'Return ONLY valid JSON: {"ok": true}' }]);
-      badge.style.color = 'var(--green)';
-      badge.textContent = `✅ Connected (${cfg.geminiModel})`;
-      toast(`✅ Gemini key verified (${cfg.geminiModel})!`);
-    } catch (err) {
-      badge.style.color = 'var(--red)';
-      badge.textContent = '❌ Key / model error';
-      toast('Gemini test failed: ' + err.message, 5000);
-    }
-  };
-
-  async function runGeminiVision() {
-    setStatus('Reading text, barcode & physical pressing clues with Gemini...', true);
-    const fmtHint = activeFormat === 'Auto' ? 'Auto-detect whether Cassette, CD, or Vinyl' : `User selected format: ${activeFormat}`;
-    const prompt = `You are a physical music media OCR & Discogs pressing-identification expert. Inspect ALL details in the image(s). ${fmtHint}.
-Return ONLY valid JSON with these exact keys:
-{
-  "detected_format": "Cassette" | "CD" | "Vinyl",
-  "raw_catalog_number": "exact catalog/ID code printed on spine/shell/disc hub/sleeve, or empty string",
-  "cleaned_catalog_variants": ["variations stripping hyphens/spaces/price prefixes"],
-  "barcode": "digits only UPC/EAN if clearly visible, else empty string",
-  "album_title": "album or release title",
-  "artists": ["main artist name(s)"],
-  "label": "record label name or empty string",
-  "year": "4-digit copyright/release year printed, else empty string",
-  "country_clues": "country printed (e.g. 'Printed in U.S.A.', 'Made in Canada', 'Made in Germany') or 'Not visible'",
-  "club_edition": "None" | "CRC" | "BMG" | "Unknown",
-  "physical_details": "concise description of pressing identifiers visible: shell color (solid white/beige/black/clear), paper label vs direct print, timing window markings (e.g. 100-50-0, dots, blank), screws vs welded, J-card color/border, Dolby/HX Pro logos, address text, or CD matrix/IFPI codes",
-  "condition_note": "short note like 'Loose cassette shell', 'Cracked jewel case', or 'Standard'",
-  "visible_tracks": ["any song titles visible on the shell or back cover"]
-}`;
-
-    const parts = [{ text: prompt }];
-    if (currentPhotos.primaryB64) parts.push({ inline_data: { mime_type: 'image/jpeg', data: currentPhotos.primaryB64 } });
-    if (currentPhotos.extraB64) parts.push({ inline_data: { mime_type: 'image/jpeg', data: currentPhotos.extraB64 } });
-
-    try {
-      const ext = await callGeminiJSON(parts);
-      currentExtracted = ext;
-      if (activeFormat !== 'Auto') ext.detected_format = activeFormat;
-
-      document.getElementById('fTitle').value = ext.album_title || '';
-      document.getElementById('fArtist').value = Array.isArray(ext.artists) ? ext.artists.join(', ') : (ext.artists || '');
-      document.getElementById('fCatno').value = ext.raw_catalog_number || '';
-      document.getElementById('fBarcode').value = (ext.barcode || '').replace(/\D/g, '');
-      document.getElementById('fFormat').value = ['Cassette', 'CD', 'Vinyl'].includes(ext.detected_format) ? ext.detected_format : 'Cassette';
-      document.getElementById('fLabel').value = ext.label || '';
-      document.getElementById('fYear').value = ext.year || '';
-      document.getElementById('fNote').value = ext.condition_note || 'Standard';
-
-      const clues = [
-        ext.country_clues && ext.country_clues !== 'Not visible' ? `Country: ${ext.country_clues}` : '',
-        ext.club_edition && ext.club_edition !== 'Unknown' ? `Club: ${ext.club_edition}` : '',
-        ext.physical_details ? `Clues: ${ext.physical_details}` : ''
-      ].filter(Boolean).join(' · ');
-      document.getElementById('detectedCluesLine').textContent = clues;
-
-      document.getElementById('extractCard').classList.remove('hidden');
-      document.getElementById('extractDetails').open = false;
-      speakText(`${ext.raw_catalog_number || ''} ${ext.artists?.[0] || ''} ${ext.album_title || ''}`);
-
-      await runDiscogsSearch();
-    } catch (err) {
-      setStatus('', false);
-      toast('Gemini error: ' + err.message, 4000);
-    }
-  }
-
-  window.toggleManualEntry = function() {
-    document.getElementById('extractCard').classList.remove('hidden');
-    document.getElementById('extractDetails').open = true;
-    if (activeFormat !== 'Auto') document.getElementById('fFormat').value = activeFormat;
-    document.getElementById('fCatno').focus();
-  };
-
-  // ==================== SMART DISCOGS SEARCH ====================
-  function inferCountryFromClues(clues) {
-    const c = String(clues || '').toLowerCase();
-    if (!c || c === 'not visible') return '';
-    if (c.includes('u.s.a') || c.includes('usa') || c.includes('united states') || c.includes('universal city') || c.includes('new york') || c.includes('los angeles')) return 'US';
-    if (c.includes('canada')) return 'Canada';
-    if (c.includes('uk') || c.includes('england') || c.includes('united kingdom')) return 'UK';
-    if (c.includes('germany')) return 'Germany';
-    if (c.includes('japan')) return 'Japan';
-    if (c.includes('india')) return 'India';
-    if (c.includes('turkey')) return 'Turkey';
-    if (c.includes('europe') || c.includes('holland') || c.includes('netherlands')) return 'Europe';
-    return '';
-  }
-
-  window.runDiscogsSearch = async function() {
-    if (!cfg.discogsToken) {
-      setStatus('', false);
-      toast('Add your Discogs Token in Settings to search Discogs');
-      return;
-    }
-
-    const title = document.getElementById('fTitle').value.trim();
-    const artist = document.getElementById('fArtist').value.trim();
-    const catno = document.getElementById('fCatno').value.trim();
-    const barcode = document.getElementById('fBarcode').value.replace(/\D/g, '').trim();
-    const format = document.getElementById('fFormat').value;
-    const label = document.getElementById('fLabel').value.trim();
-
-    if (!title && !artist && !catno && !barcode) {
-      toast('Enter at least a Barcode, Catalog #, Title, or Artist');
-      return;
-    }
-
-    document.getElementById('inspectorCard').classList.add('hidden');
-    document.getElementById('detectiveCard').classList.add('hidden');
-    detectiveDiffs = {};
-    detectivePickId = null;
-    detectiveEliminatedIds = new Set();
-    visibleCandidateIds = null;
-    setStatus('Searching Discogs...', true);
-
-    const pool = new Map();
-    const addResults = (res, sourceTier) => {
-      (res?.results || []).forEach(item => {
-        if (!pool.has(item.id)) pool.set(item.id, { ...item, _tier: sourceTier });
-      });
-    };
-
-    const photoCountry = inferCountryFromClues(currentExtracted?.country_clues);
-    const preferredCountry = photoCountry || cfg.homeCountry || '';
-    const clubDetected = currentExtracted?.club_edition || 'Unknown';
-
-    const scoreItem = (item) => {
-      const targetStr = `${artist} ${title}`.trim();
-      const sim = targetStr ? similarity(targetStr, item.title || '') : 0.7;
-      const itemCat = norm(item.catno || '').replace(/\s+/g, '');
-      const rawCat = norm(catno).replace(/\s+/g, '');
-      const catMatch = rawCat && itemCat && (itemCat === rawCat || itemCat.includes(rawCat) || rawCat.includes(itemCat));
-      const fmtList = (Array.isArray(item.format) ? item.format : [item.format || '']).join(' ').toLowerCase();
-      const isClub = fmtList.includes('club');
-      const have = item.community?.have || 0;
-
-      let score = sim * 0.58 + (catMatch ? 0.22 : 0);
-      if (item._tier === 'barcode') score += 0.14;
-      if (preferredCountry && item.country) {
-        if (norm(item.country) === norm(preferredCountry)) score += (photoCountry ? 0.18 : 0.09);
-        else if (photoCountry) score -= 0.12;
-      }
-      if (clubDetected === 'None' && isClub) score -= 0.12;
-      if ((clubDetected === 'CRC' || clubDetected === 'BMG') && isClub) score += 0.15;
-      score += Math.min(0.08, Math.log10(have + 1) * 0.035);
-
-      return { sim, catMatch, isClub, score };
-    };
-
-    try {
-      if (barcode) {
-        const bParams = { type: 'release', barcode, per_page: 10 };
-        if (activeFormat !== 'Auto' || document.getElementById('fFormat').value) bParams.format = format;
-        addResults(await discogsFetch('/database/search', bParams), 'barcode');
-        if (pool.size === 0 && bParams.format) {
-          addResults(await discogsFetch('/database/search', { type: 'release', barcode, per_page: 10 }), 'barcode');
-        }
-      }
-      if (catno && pool.size < 3) {
-        addResults(await discogsFetch('/database/search', { type: 'release', catno, format, per_page: 10 }), 'catno');
-      }
-
-      let bestSim = 0;
-      pool.forEach(item => { bestSim = Math.max(bestSim, scoreItem(item).sim); });
-
-      const variants = (currentExtracted?.cleaned_catalog_variants || []).filter(v => v && norm(v) !== norm(catno)).slice(0, 2);
-      if ((pool.size === 0 || bestSim < 0.45) && variants.length) {
-        for (const v of variants) {
-          addResults(await discogsFetch('/database/search', { type: 'release', catno: v, format, label, per_page: 8 }), 'variant');
-        }
-        pool.forEach(item => { bestSim = Math.max(bestSim, scoreItem(item).sim); });
-      }
-
-      if ((pool.size === 0 || bestSim < 0.45) && (title || artist)) {
-        const q = `${artist} ${title}`.trim();
-        addResults(await discogsFetch('/database/search', { type: 'release', q, format, per_page: 10 }), 'text');
-        if (pool.size === 0) {
-          addResults(await discogsFetch('/database/search', { type: 'release', q, per_page: 8 }), 'broad');
-        }
-      }
-
-      const ranked = Array.from(pool.values()).map(item => ({
-        ...item,
-        _check: scoreItem(item)
-      })).sort((a, b) => b._check.score - a._check.score).slice(0, 6);
-
-      currentCandidates = ranked;
-      renderCandidates();
-
-      if (ranked.length === 1) {
-        await inspectCandidate(0);
-      } else if (ranked.length > 1 && cfg.autoDetective && cfg.geminiKey) {
-        await runVariantDetective(false);
-      } else {
-        setStatus('', false);
-      }
-    } catch (err) {
-      setStatus('', false);
-      toast('Discogs search failed: ' + err.message, 4000);
-    }
-  };
-
-  function renderCandidates() {
-    const card = document.getElementById('candidatesCard');
-    const list = document.getElementById('candidatesList');
-    card.classList.remove('hidden');
-
-    const shown = visibleCandidateIds
-      ? currentCandidates.filter(c => visibleCandidateIds.has(c.id))
-      : currentCandidates;
-    document.getElementById('candCount').textContent = shown.length;
-    document.getElementById('btnManualDetective').classList.toggle('hidden', currentCandidates.length < 2);
-
-    if (!shown.length) {
-      list.innerHTML = `<p style="margin-bottom:8px;">No Discogs matches found. Open <strong>Scanned Details</strong> below to edit or tap <strong>Not on Discogs?</strong></p>`;
-      return;
-    }
-
-    list.innerHTML = shown.map(it => {
-      const idx = currentCandidates.indexOf(it);
-      const verified = it._check.sim >= 0.45 && (it._check.catMatch || it._tier === 'barcode' || !document.getElementById('fCatno').value.trim());
-      const isPick = detectivePickId === it.id;
-      const isElim = detectiveEliminatedIds.has(it.id);
-      const isSelected = currentInspected?.discogs_id === it.id;
-      const diffTxt = detectiveDiffs[it.id] || '';
-      const have = it.community?.have ?? 0;
-      const want = it.community?.want ?? 0;
-      const fmtText = Array.isArray(it.format) ? it.format.slice(0, 3).join(', ') : (it.format || '');
-      const lblText = Array.isArray(it.label) ? it.label[0] : (it.label || '');
-
-      return `
-        <div class="candidate-card ${isSelected ? 'selected' : ''} ${isPick ? 'ai-pick' : ''} ${isElim ? 'eliminated' : ''}" id="cand-${idx}" onclick="inspectCandidate(${idx})">
-          <img class="candidate-thumb" src="${esc(it.thumb || '')}" onerror="this.style.visibility='hidden'" />
-          <div class="candidate-meta">
-            <div class="candidate-title">${esc(it.title)}</div>
-            <div class="candidate-sub">${esc(it.year || '?')} · ${esc(lblText)} · <strong>${esc(it.catno || 'No Cat#')}</strong> · <strong>${esc(it.country || '?')}</strong></div>
-            ${diffTxt ? `<div class="candidate-diff">${esc(diffTxt)}</div>` : ''}
-            <div>
-              ${isPick ? `<span class="badge badge-purple">🎯 AI Pick</span>` : ''}
-              ${verified ? `<span class="badge badge-green">✅ Verified</span>` : `<span class="badge badge-yellow">⚠️ Check</span>`}
-              <span class="badge badge-blue">${esc(fmtText)}</span>
-              <span class="badge" style="background:#0d1017; color:var(--muted);">👥 ${have} have · ${want} want</span>
-            </div>
-          </div>
-        </div>
-      `;
-    }).join('');
-  }
-
-  // ==================== AI VARIANT DETECTIVE ====================
-  window.runVariantDetective = async function(forceAll = false, subsetIds = null) {
-    if (!cfg.geminiKey || currentCandidates.length < 2) return;
-
-    const pool = subsetIds
-      ? currentCandidates.filter(c => subsetIds.includes(c.id))
-      : (forceAll ? currentCandidates.slice(0, 4) : currentCandidates.slice(0, 4));
-
-    if (pool.length < 2) {
-      if (pool.length === 1) await inspectCandidate(currentCandidates.indexOf(pool[0]));
-      return;
-    }
-
-    setStatus(`🕵️ Detective: checking Discogs pressing notes for ${pool.length} variants...`, true);
-
-    try {
-      const dossiers = [];
-      for (let i = 0; i < pool.length; i++) {
-        setStatus(`🕵️ Reading pressing notes (${i + 1}/${pool.length})...`, true);
-        const rel = await getReleaseCached(pool[i].id);
-        const fmtSummary = (rel.formats || []).map(f =>
-          [f.name, ...(f.descriptions || []), f.text || ''].filter(Boolean).join(', ')
-        ).join(' | ');
-        const idsSummary = (rel.identifiers || []).slice(0, 8).map(x =>
-          `${x.type}${x.description ? ` (${x.description})` : ''}: ${x.value}`
-        ).join('; ');
-        const compSummary = (rel.companies || []).slice(0, 5).map(c => `${c.entity_type_name}: ${c.name}`).join('; ');
-
-        dossiers.push({
-          id: rel.id,
-          year: rel.year || '?',
-          country: rel.country || '?',
-          catno: rel.labels?.[0]?.catno || pool[i].catno || '',
-          label: rel.labels?.[0]?.name || '',
-          formats: fmtSummary,
-          notes: (rel.notes || '').slice(0, 450),
-          identifiers: idsSummary.slice(0, 350),
-          companies: compSummary.slice(0, 220),
-          have: rel.community?.have || 0,
-          want: rel.community?.want || 0
-        });
-      }
-
-      setStatus('🕵️ Comparing pressing notes against your photo...', true);
-
-      const prompt = `You are a Discogs Variant Detective. The user scanned a physical music item and Discogs returned ${dossiers.length} similar release variants.
-Your job:
-1. Carefully compare the user's photo(s) and extracted details against each Discogs variant's country, format/shell description, pressing notes, identifiers (barcode, matrix, CRC/BMG club stamps, timing window, shell color, copyright years), and community popularity.
-2. User's home country is "${cfg.homeCountry || 'Unknown'}". Eliminate obvious country mismatches (e.g. India/Turkey/Europe when photo says Printed in U.S.A. or has US address).
-3. If the photo clearly identifies ONE exact variant (or eliminates all others), set status="confident" and set best_release_id.
-4. If 2+ variants remain genuinely indistinguishable from the photo (for example: one is a white shell vs clear shell and shell isn't shown, or J-card back has/lacks a barcode, or CRC/BMG club edition vs retail), set status="needs_question" and write ONE ultra-clear, beginner-friendly differentiating question with concrete clickable options mapping to the exact release IDs!
-
-Extracted details: ${JSON.stringify({
-  title: document.getElementById('fTitle').value,
-  artist: document.getElementById('fArtist').value,
-  catno: document.getElementById('fCatno').value,
-  barcode: document.getElementById('fBarcode').value,
-  country_clues: currentExtracted?.country_clues || 'Not visible',
-  club_edition: currentExtracted?.club_edition || 'Unknown',
-  physical_details: currentExtracted?.physical_details || 'None (barcode/manual search)'
-})}
-
-Discogs Variants:
-${JSON.stringify(dossiers, null, 2)}
-
-Return ONLY valid JSON:
-{
-  "status": "confident" | "needs_question",
-  "best_release_id": number,
-  "confidence": "High" | "Medium" | "Low",
-  "eliminated_ids": [numbers of variants definitely ruled out],
-  "reasoning": "1-2 clear sentences explaining what matches the photo and why others were ruled out or what's still ambiguous.",
-  "candidate_diffs": [
-    { "id": number, "short_diff": "6-12 word summary of what makes this pressing unique (e.g. 'US retail, white shell, 100-50-0 window')" }
-  ],
-  "question": null or {
-    "prompt": "Short direct question to tell the remaining variants apart",
-    "how_to_check": "Exact 1-sentence instruction telling the user where to look on the tape/CD/cover",
-    "options": [
-      { "label": "Clear physical description (e.g. 'Solid white shell with 100-50-0 window')", "matching_ids": [number] }
-    ]
-  }
-}`;
-
-      const parts = [{ text: prompt }];
-      if (currentPhotos.primaryB64) parts.push({ inline_data: { mime_type: 'image/jpeg', data: currentPhotos.primaryB64 } });
-      if (currentPhotos.extraB64) parts.push({ inline_data: { mime_type: 'image/jpeg', data: currentPhotos.extraB64 } });
-
-      const verdict = await callGeminiJSON(parts);
-
-      // Apply short diffs to cards
-      (verdict.candidate_diffs || []).forEach(d => {
-        if (d.id && d.short_diff) detectiveDiffs[d.id] = d.short_diff;
-      });
-      detectiveEliminatedIds = new Set(verdict.eliminated_ids || []);
-      detectivePickId = verdict.best_release_id || null;
-
-      renderDetectiveCard(verdict);
-      renderCandidates();
-
-      const pickIdx = currentCandidates.findIndex(c => c.id === verdict.best_release_id);
-      if (verdict.status === 'confident' && pickIdx !== -1) {
-        await inspectCandidate(pickIdx);
-      } else {
-        setStatus('', false);
-        document.getElementById('detectiveCard').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      }
-    } catch (err) {
-      setStatus('', false);
-      toast('Variant Detective skipped: ' + err.message, 3500);
-    }
-  };
-
-  function renderDetectiveCard(verdict) {
-    const card = document.getElementById('detectiveCard');
-    card.classList.remove('hidden');
-
-    const confClass = verdict.status === 'confident' ? 'badge-green' : 'badge-yellow';
-    const confLabel = verdict.status === 'confident' ? `✅ ${verdict.confidence || 'High'} Match` : '❓ Quick Question';
-    document.getElementById('detectiveBadge').innerHTML = `<span class="badge ${confClass}" style="margin:0;">${esc(confLabel)}</span>`;
-    document.getElementById('detectiveReasoning').textContent = verdict.reasoning || '';
-
-    const qBox = document.getElementById('detectiveQuestionBox');
-    if (verdict.status === 'needs_question' && verdict.question && Array.isArray(verdict.question.options) && verdict.question.options.length) {
-      qBox.classList.remove('hidden');
-      window._detectiveOptions = verdict.question.options;
-      qBox.innerHTML = `
-        <div style="font-weight:800; font-size:0.92rem;">${esc(verdict.question.prompt)}</div>
-        ${verdict.question.how_to_check ? `<div class="detective-hint">💡 How to check: ${esc(verdict.question.how_to_check)}</div>` : ''}
-        <div>
-          ${verdict.question.options.map((opt, i) => `
-            <button class="opt-btn" onclick="answerDetective(${i})">${esc(opt.label)}</button>
-          `).join('')}
-        </div>
-      `;
-    } else {
-      qBox.classList.add('hidden');
-      qBox.innerHTML = '';
-    }
-
-    document.getElementById('btnShowAllCands').classList.toggle('hidden', !visibleCandidateIds);
-  }
-
-  window.answerDetective = async function(optIdx) {
-    const opt = (window._detectiveOptions || [])[optIdx];
-    if (!opt) return;
-    const ids = (opt.matching_ids || []).filter(id => currentCandidates.some(c => c.id === id));
-
-    if (ids.length === 1) {
-      visibleCandidateIds = new Set(ids);
-      detectivePickId = ids[0];
-      document.getElementById('detectiveQuestionBox').classList.add('hidden');
-      document.getElementById('detectiveBadge').innerHTML = `<span class="badge badge-green" style="margin:0;">✅ Narrowed Down</span>`;
-      document.getElementById('detectiveReasoning').textContent = `Matched based on: "${opt.label}"`;
-      document.getElementById('btnShowAllCands').classList.remove('hidden');
-      renderCandidates();
-      await inspectCandidate(currentCandidates.findIndex(c => c.id === ids[0]));
-    } else if (ids.length > 1) {
-      visibleCandidateIds = new Set(ids);
-      document.getElementById('btnShowAllCands').classList.remove('hidden');
-      renderCandidates();
-      toast(`Narrowed to ${ids.length} variants — checking next clue...`);
-      await runVariantDetective(false, ids);
-    } else {
-      visibleCandidateIds = null;
-      document.getElementById('detectiveQuestionBox').classList.add('hidden');
-      renderCandidates();
-      toast('Showing all Discogs matches — tap the closest one below');
-    }
-  };
-
-  window.showAllCandidates = function() {
-    visibleCandidateIds = null;
-    detectiveEliminatedIds = new Set();
-    document.getElementById('btnShowAllCands').classList.add('hidden');
-    renderCandidates();
-  };
-
-  // ==================== INSPECT CANDIDATE (PRICE + SCARCITY + SPOTIFY TASTE) ====================
-  window.inspectCandidate = async function(idx) {
-    const cand = currentCandidates[idx];
-    if (!cand) return;
-
-    setStatus('Fetching pricing & tracklist...', true);
-
-    try {
-      const release = await getReleaseCached(cand.id);
-      const stats = await discogsFetch(`/marketplace/stats/${cand.id}`).catch(() => ({}));
-
-      let suggestions = null;
-      if (cfg.fetchVgSuggestions) {
-        try {
-          suggestions = await discogsFetch(`/marketplace/price_suggestions/${cand.id}`);
-        } catch (err) {
-          suggestions = null;
-          if (err.status === 403 || err.status === 404) {
-            // Auto-disable to save 1 API call + 1.2s on every future scan
-            cfg.fetchVgSuggestions = false;
-            document.getElementById('cfgFetchVg').checked = false;
-            persistCfg();
-          }
-        }
-      }
-
-      const artistName = (release.artists || []).map(a => a.name.replace(/\s*\(\d+\)$/, '')).join(', ') ||
-                         (cand.title.includes(' - ') ? cand.title.split(' - ')[0] : '');
-      const albumTitle = release.title || (cand.title.includes(' - ') ? cand.title.split(' - ').slice(1).join(' - ') : cand.title);
-      const catno = release.labels?.[0]?.catno || cand.catno || document.getElementById('fCatno').value.trim();
-      const label = release.labels?.[0]?.name || (Array.isArray(cand.label) ? cand.label[0] : '');
-      const format = document.getElementById('fFormat').value;
-      const tracklist = (release.tracklist || []).filter(t => t.type_ !== 'heading').map(t => ({
-        pos: t.position || '',
-        title: t.title || ''
-      }));
-
-      const lowestPrice = stats?.lowest_price?.value ?? release.lowest_price ?? null;
-      const numForSale = stats?.num_for_sale ?? release.num_for_sale ?? 0;
-      const vgPlusPrice = suggestions?.['Very Good Plus (VG+)']?.value ?? null;
-      const estPrice = vgPlusPrice ?? lowestPrice;
-      const have = release.community?.have ?? 0;
-      const want = release.community?.want ?? 0;
-
-      const isHighValue = estPrice !== null && estPrice >= Number(cfg.threshold || 20);
-      const isScarce = numForSale === 0 && (want >= 10 || (want > have && want >= 5));
-
-      const notesParts = [];
-      if (release.formats?.length) {
-        notesParts.push('Format: ' + release.formats.map(f => [f.name, ...(f.descriptions || []), f.text || ''].filter(Boolean).join(', ')).join(' | '));
-      }
-      if (release.notes) notesParts.push('\nNotes:\n' + release.notes);
-      if (release.identifiers?.length) {
-        notesParts.push('\nIdentifiers:\n' + release.identifiers.map(x => `• ${x.type}${x.description ? ` (${x.description})` : ''}: ${x.value}`).join('\n'));
-      }
-
-      currentInspected = {
-        discogs_id: release.id,
-        title: albumTitle,
-        artist: artistName,
-        catno,
-        format,
-        year: release.year || cand.year || '',
-        label,
-        country: release.country || cand.country || '',
-        genres: [...(release.genres || []), ...(release.styles || [])],
-        condition_note: document.getElementById('fNote').value.trim() || 'Standard',
-        lowest_price: lowestPrice,
-        vg_plus_price: vgPlusPrice,
-        est_price: estPrice,
-        num_for_sale: numForSale,
-        have,
-        want,
-        is_high_value: isHighValue,
-        is_scarce: isScarce,
-        tracklist,
-        pressing_notes: notesParts.join('\n').trim(),
-        discogs_url: release.uri || `https://www.discogs.com/release/${release.id}`,
-        discogs_thumb: release.thumb || cand.thumb || '',
-        taste_score: null,
-        taste_verdict: null,
-        taste_summary: '',
-        notable_songs: [],
-        spotify_matches: { artistHit: false, matchedTracks: [] }
-      };
-
-      renderCandidates();
-      renderInspector(currentInspected, true);
-      setStatus('', false);
-      document.getElementById('inspectorCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
-
-      if (isHighValue || isScarce) playChime();
-      await runTasteAnalysis(currentInspected);
-    } catch (err) {
-      setStatus('', false);
-      toast('Error loading release: ' + err.message, 4000);
-    }
-  };
-
-  window.inspectUnlistedItem = async function() {
-    const title = document.getElementById('fTitle').value.trim() || 'Untitled Release';
-    const artist = document.getElementById('fArtist').value.trim() || 'Unknown Artist';
-    const catno = document.getElementById('fCatno').value.trim();
-    const format = document.getElementById('fFormat').value;
-    const tracks = (currentExtracted?.visible_tracks || []).map((t, i) => ({ pos: String(i + 1), title: t }));
-
-    currentInspected = {
-      discogs_id: null,
-      title,
-      artist,
-      catno,
-      format,
-      year: document.getElementById('fYear').value.trim(),
-      label: document.getElementById('fLabel').value.trim(),
-      country: '',
-      genres: [],
-      condition_note: document.getElementById('fNote').value.trim() || 'Standard',
-      lowest_price: null,
-      vg_plus_price: null,
-      est_price: null,
-      num_for_sale: null,
-      have: 0,
-      want: 0,
-      is_high_value: false,
-      is_scarce: false,
-      tracklist: tracks,
-      pressing_notes: '',
-      discogs_url: '',
-      discogs_thumb: '',
-      taste_score: null,
-      taste_verdict: null,
-      taste_summary: '',
-      notable_songs: [],
-      spotify_matches: { artistHit: false, matchedTracks: [] }
-    };
-
-    renderInspector(currentInspected, false);
-    document.getElementById('inspectorCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    await runTasteAnalysis(currentInspected);
-  };
-
-  function renderInspector(item, hasDiscogs) {
-    const card = document.getElementById('inspectorCard');
-    card.classList.remove('hidden');
-
-    document.getElementById('inspTitle').textContent = `${item.artist} — ${item.title}`;
-    document.getElementById('inspSub').textContent = `${item.format} · ${item.country || '?'} · ${item.year || '?'} · ${item.label || 'Unknown Label'} · ${item.catno || 'No Cat#'}`;
-    document.getElementById('inspBadge').innerHTML = hasDiscogs
-      ? `<span class="badge badge-blue">#${item.discogs_id}</span>`
-      : `<span class="badge badge-yellow">Unlisted</span>`;
-
-    let alertsHtml = '';
-    const dup = stashCache.find(s =>
-      (item.discogs_id && s.discogs_id === item.discogs_id) ||
-      (norm(s.artist) === norm(item.artist) && norm(s.title) === norm(item.title))
-    );
-    if (dup) {
-      alertsHtml += `<div class="alert-box alert-dup">⚠️ Already in your Local Stash (added ${new Date(dup.created_at).toLocaleDateString()}).</div>`;
-    }
-    if (item.is_high_value) {
-      alertsHtml += `<div class="alert-box alert-high-value">🔥 HIGH VALUE ($${Number(item.est_price).toFixed(2)}) — SET ASIDE!</div>`;
-    }
-    if (item.is_scarce) {
-      alertsHtml += `<div class="alert-box alert-scarce">💎 SCARCE (0 for sale, ${item.want} want / ${item.have} have) — CHECK SOLD PRICES!</div>`;
-    }
-    document.getElementById('inspAlerts').innerHTML = alertsHtml;
-
-    document.getElementById('mLowest').textContent = item.lowest_price !== null ? `$${Number(item.lowest_price).toFixed(2)}` : 'N/A';
-    document.getElementById('mVgPlus').textContent = item.vg_plus_price !== null ? `$${Number(item.vg_plus_price).toFixed(2)}` : '—';
-    document.getElementById('mForSale').textContent = item.num_for_sale !== null ? `${item.num_for_sale} listed` : '—';
-    document.getElementById('mHaveWant').textContent = hasDiscogs ? `${item.have} / ${item.want}` : '—';
-
-    const ebayQuery = encodeURIComponent(`${item.artist} ${item.title} ${item.format} ${item.catno}`.trim());
-    let links = `<a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="https://www.ebay.com/sch/i.html?_nkw=${ebayQuery}&LH_Sold=1&LH_Complete=1">💸 eBay Sold</a>`;
-    if (hasDiscogs) {
-      links = `
-        <a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="${esc(item.discogs_url)}">💿 Discogs</a>
-        <a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="https://www.discogs.com/sell/history/${item.discogs_id}">📈 Sales History</a>
-      ` + links;
-    }
-    document.getElementById('inspLinks').innerHTML = links;
-
-    const notesWrap = document.getElementById('pressingNotesDetails');
-    if (item.pressing_notes) {
-      notesWrap.classList.remove('hidden');
-      document.getElementById('inspNotes').textContent = item.pressing_notes;
-    } else {
-      notesWrap.classList.add('hidden');
-    }
-
-    const saveBothBtn = document.getElementById('btnSaveBoth');
-    saveBothBtn.disabled = !hasDiscogs || !cfg.discogsToken || !cfg.discogsUser;
-    saveBothBtn.textContent = !hasDiscogs
-      ? 'Not on Discogs (Use Save Local Only below)'
-      : (!cfg.discogsUser ? 'Verify Discogs in Settings to Enable Save' : '✅ Confirm & Add to Discogs + Local Stash');
-
-    const localMatch = checkLocalSpotifyMatch(item);
-    item.spotify_matches = localMatch;
-    renderTracklist(item.tracklist, localMatch.matchedTracks);
-
-    let localBadges = '';
-    if (localMatch.artistHit) localBadges += `<span class="badge badge-green">🎸 Artist in Your Spotify</span>`;
-    if (localMatch.matchedTracks.length) localBadges += `<span class="badge badge-green">🎵 ${localMatch.matchedTracks.length} Track(s) in Your Library</span>`;
-    if (!spotifyProfile) localBadges += `<span class="badge badge-yellow">Spotify not synced yet (using general hit check)</span>`;
-    document.getElementById('tasteLocalBadges').innerHTML = localBadges;
-    document.getElementById('tasteScore').textContent = '...';
-    document.getElementById('tasteBody').textContent = 'Asking Gemini to check your taste profile & famous tracks...';
-    document.getElementById('tasteHits').innerHTML = '';
-  }
-
-  function renderTracklist(tracks, matchedTitles = []) {
-    const matchedSet = new Set(matchedTitles.map(norm));
-    document.getElementById('trackCount').textContent = tracks.length;
-    const container = document.getElementById('inspTracklist');
-    if (!tracks.length) {
-      container.innerHTML = `<div style="color:var(--muted);">No tracklist available.</div>`;
-      return;
-    }
-    container.innerHTML = tracks.map(t => {
-      const hit = matchedSet.has(norm(t.title));
-      return `<div class="track-row ${hit ? 'track-hit' : ''}">
-        <span>${esc(t.pos ? t.pos + ' · ' : '')}${esc(t.title)}</span>
-        ${hit ? '<span class="badge badge-green" style="margin:0;">In Spotify</span>' : ''}
-      </div>`;
-    }).join('');
-  }
-
-  function checkLocalSpotifyMatch(item) {
-    if (!spotifyProfile) return { artistHit: false, matchedTracks: [] };
-    const artistNorms = String(item.artist || '').split(/,|&|\band\b|feat\.?/i).map(norm).filter(Boolean);
-    const artistHit = artistNorms.some(a => Boolean(spotifyProfile.allArtists?.[a]));
-
-    const matchedTracks = [];
-    const trackSet = new Set(spotifyProfile.trackTitles || []);
-    (item.tracklist || []).forEach(t => {
-      const nt = norm(t.title);
-      if (nt.length > 2 && trackSet.has(nt)) matchedTracks.push(t.title);
-    });
-    return { artistHit, matchedTracks };
-  }
-
-  function applyTasteResult(item, res) {
-    item.taste_score = res.score;
-    item.taste_verdict = res.verdict;
-    item.taste_summary = res.summary;
-    item.notable_songs = Array.isArray(res.notable_songs) ? res.notable_songs : [];
-
-    const vClass = res.verdict === 'KEEP' ? 'badge-green' : res.verdict === 'LISTEN' ? 'badge-blue' : 'badge-red';
-    document.getElementById('tasteScore').innerHTML = `${esc(res.score)}/10 <span class="badge ${vClass}" style="vertical-align:middle;">${esc(res.verdict)}</span>`;
-    document.getElementById('tasteBody').textContent = res.summary || '';
-    if (item.notable_songs.length) {
-      document.getElementById('tasteHits').innerHTML = `<strong>⭐ Notable / Recognizable Songs:</strong><br>` +
-        item.notable_songs.map(s => `• ${esc(s)}`).join('<br>');
-    } else {
-      document.getElementById('tasteHits').innerHTML = `<span style="color:var(--muted);">No major mainstream hits identified on this release.</span>`;
-    }
-  }
-
-  async function runTasteAnalysis(item) {
-    if (!cfg.geminiKey) {
-      document.getElementById('tasteScore').textContent = '—';
-      document.getElementById('tasteBody').textContent = 'Add Gemini API Key to enable taste & hit song analysis.';
-      return;
-    }
-
-    const cacheKey = `${norm(item.artist)}|${norm(item.title)}`;
-    if (tasteCache.has(cacheKey)) {
-      applyTasteResult(item, tasteCache.get(cacheKey));
-      return;
-    }
-
-    const topArtists = (spotifyProfile?.topArtists || []).slice(0, 60).join(', ');
-    const tracksStr = (item.tracklist || []).slice(0, 24).map(t => t.title).join('; ');
-    const prompt = `Evaluate whether the user would like this physical music release and identify any famous/popular songs on it. Speak directly to the user ("you", not "the user").
-Release: "${item.artist} - ${item.title}" (${item.year || 'unknown year'}, Format: ${item.format}, Genres: ${(item.genres || []).join(', ') || 'unknown'}).
-Tracklist: ${tracksStr || 'Unknown'}.
-Local Spotify Matches: Artist in library = ${item.spotify_matches.artistHit}, Exact tracks in library = ${item.spotify_matches.matchedTracks.join(', ') || 'None'}.
-User's Top Spotify Artists: ${topArtists || 'Not synced yet'}.
-
-Return ONLY valid JSON:
-{
-  "score": 1 to 10 integer (taste match for you; if Spotify not synced, rate general appeal 1-10),
-  "verdict": "KEEP" | "LISTEN" | "SELL / SKIP",
-  "summary": "1-2 punchy sentences speaking directly to 'you' explaining why you will or won't like this, referencing your actual Spotify artists when relevant.",
-  "notable_songs": ["Track Name — brief note on why it's famous/popular (max 3 items, or empty array if obscure)"]
-}`;
-
-    try {
-      const res = await callGeminiJSON([{ text: prompt }]);
-      tasteCache.set(cacheKey, res);
-      if (currentInspected !== item) return;
-      applyTasteResult(item, res);
-    } catch (err) {
-      document.getElementById('tasteScore').textContent = '?';
-      document.getElementById('tasteBody').textContent = 'Taste check error: ' + err.message;
-    }
-  }
-
-  // ==================== SAVE TO DISCOGS + LOCAL STASH ====================
-  window.saveCurrentItem = async function(syncToDiscogs) {
-    if (!currentInspected) return;
-    let synced = false;
-
-    if (syncToDiscogs) {
-      if (!cfg.discogsToken || !cfg.discogsUser || !currentInspected.discogs_id) {
-        toast('Verify Discogs in Settings first');
-        return;
-      }
-      setStatus('Adding release to your official Discogs collection...', true);
-      try {
-        const folderId = cfg.discogsFolderId || '1';
-        await discogsFetch(
-          `/users/${encodeURIComponent(cfg.discogsUser)}/collection/folders/${encodeURIComponent(folderId)}/releases/${currentInspected.discogs_id}`,
-          {},
-          'POST'
-        );
-        synced = true;
-      } catch (err) {
-        setStatus('', false);
-        toast('Discogs save failed: ' + err.message, 4500);
-        return;
-      }
-    }
-
-    const record = {
-      ...currentInspected,
-      synced_to_discogs: synced,
-      thumb_data_url: currentPhotos.thumbWebp || currentInspected.discogs_thumb || '',
-      created_at: Date.now()
-    };
-
-    try {
-      await idbPut('stash', record);
-      await loadStashCache();
-      setStatus('', false);
-      toast(synced ? '✅ Saved to Discogs & Local Stash!' : '💾 Saved to Local Stash!');
-      resetScanner();
-    } catch (err) {
-      setStatus('', false);
-      toast('Local save failed: ' + err.message);
-    }
-  };
-
-  window.resetScanner = function() {
-    currentPhotos = { primaryB64: null, extraB64: null, thumbWebp: null };
-    currentExtracted = null;
-    currentCandidates = [];
-    visibleCandidateIds = null;
-    detectiveDiffs = {};
-    detectivePickId = null;
-    detectiveEliminatedIds = new Set();
-    currentInspected = null;
-
-    document.getElementById('camPrimary').value = '';
-    document.getElementById('camExtra').value = '';
-    document.getElementById('previewStrip').classList.add('hidden');
-    document.getElementById('previewStrip').innerHTML = '';
-    document.getElementById('detectiveCard').classList.add('hidden');
-    document.getElementById('extractCard').classList.add('hidden');
-    document.getElementById('candidatesCard').classList.add('hidden');
-    document.getElementById('inspectorCard').classList.add('hidden');
-    document.getElementById('detectedCluesLine').textContent = '';
-    ['fTitle', 'fArtist', 'fCatno', 'fBarcode', 'fLabel', 'fYear', 'fNote'].forEach(id => document.getElementById(id).value = '');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
-
-  // ==================== LOCAL STASH ====================
-  async function loadStashCache() {
-    stashCache = (await idbGetAll('stash')).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
-    document.getElementById('navStashLabel').textContent = `Stash (${stashCache.length})`;
-  }
-
-  window.renderStash = function() {
-    const q = norm(document.getElementById('stashSearch').value);
-    const filtered = stashCache.filter(item => {
-      if (activeStashFilter === 'Cassette' || activeStashFilter === 'CD' || activeStashFilter === 'Vinyl') {
-        if (item.format !== activeStashFilter) return false;
-      } else if (activeStashFilter === 'highvalue') {
-        if (!item.is_high_value && !item.is_scarce) return false;
-      } else if (activeStashFilter === 'keep') {
-        if ((item.taste_score || 0) < 7) return false;
-      } else if (activeStashFilter === 'localonly') {
-        if (item.synced_to_discogs) return false;
-      }
-      if (!q) return true;
-      const hay = norm(`${item.artist} ${item.title} ${item.catno} ${item.label} ${item.condition_note} ${(item.tracklist || []).map(t => t.title).join(' ')}`);
-      return hay.includes(q);
-    });
-
-    const totalVal = filtered.reduce((sum, it) => sum + (Number(it.est_price) || 0), 0);
-    document.getElementById('stashStats').textContent = `${filtered.length} items · ~$${totalVal.toFixed(0)}`;
-
-    const list = document.getElementById('stashList');
-    if (!filtered.length) {
-      list.innerHTML = `<div class="card"><p>No matching items in your stash yet.</p></div>`;
-      return;
-    }
-
-    list.innerHTML = filtered.map(it => {
-      const priceBadge = it.est_price !== null && it.est_price !== undefined
-        ? `<span class="badge ${it.is_high_value ? 'badge-yellow' : 'badge-blue'}">$${Number(it.est_price).toFixed(2)}</span>` : '';
-      const scarceBadge = it.is_scarce ? `<span class="badge badge-purple">💎 Scarce</span>` : '';
-      const tasteBadge = it.taste_score ? `<span class="badge ${it.taste_score >= 7 ? 'badge-green' : 'badge-blue'}">🎧 ${it.taste_score}/10</span>` : '';
-      const syncBadge = it.synced_to_discogs
-        ? `<span class="badge badge-green">In Discogs</span>`
-        : `<span class="badge badge-yellow">Local Only</span>`;
-
-      return `
-        <div class="stash-item">
-          <img class="stash-thumb" src="${esc(it.thumb_data_url || '')}" onerror="this.style.visibility='hidden'" />
-          <div class="stash-body">
-            <div class="candidate-title">${esc(it.artist)} — ${esc(it.title)}</div>
-            <div class="candidate-sub">${esc(it.format)} · ${esc(it.country || '?')} · ${esc(it.year || '?')} · ${esc(it.catno || 'No Cat#')}</div>
-            <div style="margin-bottom:6px;">${priceBadge}${scarceBadge}${tasteBadge}${syncBadge}</div>
-            ${it.taste_summary ? `<div style="font-size:0.78rem; color:var(--muted); margin-bottom:6px;">${esc(it.taste_summary)}</div>` : ''}
-            <div style="display:flex; gap:6px; flex-wrap:wrap;">
-              ${it.discogs_url ? `<a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="${esc(it.discogs_url)}">Discogs</a>` : ''}
-              ${(!it.synced_to_discogs && it.discogs_id) ? `<button class="btn btn-green btn-sm" onclick="pushStashToDiscogs(${it.id})">Push to Discogs</button>` : ''}
-              <button class="btn btn-danger btn-sm" onclick="deleteStashItem(${it.id})">Delete</button>
-            </div>
-          </div>
-        </div>
-      `;
-    }).join('');
-  };
-
-  window.pushStashToDiscogs = async function(id) {
-    const it = stashCache.find(x => x.id === id);
-    if (!it || !it.discogs_id || !cfg.discogsUser) { toast('Verify Discogs in Settings first'); return; }
-    try {
-      await discogsFetch(`/users/${encodeURIComponent(cfg.discogsUser)}/collection/folders/${encodeURIComponent(cfg.discogsFolderId || '1')}/releases/${it.discogs_id}`, {}, 'POST');
-      it.synced_to_discogs = true;
-      await idbPut('stash', it);
-      await loadStashCache();
-      renderStash();
-      toast('✅ Added to Discogs!');
-    } catch (e) { toast('Failed: ' + e.message); }
-  };
-
-  window.deleteStashItem = async function(id) {
-    if (!confirm('Remove this item from your Local Stash?')) return;
-    await idbDelete('stash', id);
-    await loadStashCache();
-    renderStash();
-    toast('Deleted from local stash');
-  };
-
-  // ==================== EXPORT / IMPORT ====================
-  window.exportCSV = function() {
-    if (!stashCache.length) { toast('Nothing to export yet'); return; }
-    const cols = ['artist', 'title', 'format', 'country', 'catno', 'label', 'year', 'est_price', 'lowest_price', 'num_for_sale', 'have', 'want', 'is_high_value', 'is_scarce', 'taste_score', 'taste_verdict', 'synced_to_discogs', 'condition_note', 'discogs_url'];
-    const csvCell = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const rows = [cols.join(','), ...stashCache.map(it => cols.map(c => csvCell(it[c])).join(','))];
-    downloadFile(rows.join('\n'), `cratecheck-stash-${new Date().toISOString().slice(0,10)}.csv`, 'text/csv');
-  };
-
-  window.exportJSON = function() {
-    const payload = { version: 2, exportedAt: new Date().toISOString(), stash: stashCache, spotifyProfile };
-    downloadFile(JSON.stringify(payload), `cratecheck-backup-${new Date().toISOString().slice(0,10)}.json`, 'application/json');
-    toast('JSON backup downloaded');
-  };
-
-  window.importJSON = async function(file) {
-    if (!file) return;
-    try {
-      const data = JSON.parse(await file.text());
-      if (Array.isArray(data.stash)) {
-        for (const item of data.stash) {
-          const copy = { ...item };
-          delete copy.id;
-          await idbPut('stash', copy);
-        }
-      }
-      if (data.spotifyProfile) {
-        spotifyProfile = data.spotifyProfile;
-        await idbPut('meta', { key: 'spotify_profile', value: spotifyProfile });
-        updateSpotifyUI();
-      }
-      await loadStashCache();
-      renderStash();
-      toast('Backup restored!');
-    } catch (e) { toast('Invalid JSON backup: ' + e.message); }
-  };
-
-  function downloadFile(content, filename, type) {
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([content], { type }));
-    a.download = filename;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1500);
-  }
-
-  // ==================== SPOTIFY PKCE OAUTH & UNCAPPED 2026 SYNC ====================
-  function randomString(len) {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    const arr = new Uint8Array(len);
-    crypto.getRandomValues(arr);
-    return Array.from(arr, x => chars[x % chars.length]).join('');
-  }
-
-  async function sha256Base64Url(plain) {
-    const data = new TextEncoder().encode(plain);
-    const hash = await crypto.subtle.digest('SHA-256', data);
-    return btoa(String.fromCharCode(...new Uint8Array(hash)))
-      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  }
-
-  window.startSpotifyAuth = async function() {
-    saveSettings(true);
-    if (!cfg.spotifyClientId) { toast('Paste your Spotify Client ID first (see Guide tab)'); return; }
-    if (!window.crypto?.subtle) { toast('Spotify login requires HTTPS (host on GitHub Pages)'); return; }
-
-    if (cfg.spotifyRefreshToken) {
-      const ok = await refreshSpotifyToken();
-      if (ok) { await syncSpotifyLibrary(); return; }
-    }
-
-    const verifier = randomString(64);
-    const state = randomString(16);
-    const challenge = await sha256Base64Url(verifier);
-    localStorage.setItem('sp_pkce_verifier', verifier);
-    localStorage.setItem('sp_pkce_state', state);
-
-    const scopes = 'user-library-read user-top-read playlist-read-private playlist-read-collaborative user-read-private';
-    const authUrl = new URL('https://accounts.spotify.com/authorize');
-    authUrl.searchParams.set('client_id', cfg.spotifyClientId.trim());
-    authUrl.searchParams.set('response_type', 'code');
-    authUrl.searchParams.set('redirect_uri', REDIRECT_URI);
-    authUrl.searchParams.set('code_challenge_method', 'S256');
-    authUrl.searchParams.set('code_challenge', challenge);
-    authUrl.searchParams.set('scope', scopes);
-    authUrl.searchParams.set('state', state);
-    location.href = authUrl.toString();
-  };
-
-  async function handleSpotifyCallback() {
-    const params = new URLSearchParams(location.search);
-    const code = params.get('code');
-    const state = params.get('state');
-    const err = params.get('error');
-    if (err) { history.replaceState({}, '', location.pathname); toast('Spotify login cancelled: ' + err); return; }
-    if (!code) return;
-    history.replaceState({}, '', location.pathname);
-
-    const savedState = localStorage.getItem('sp_pkce_state');
-    const verifier = localStorage.getItem('sp_pkce_verifier');
-    if (!verifier || state !== savedState) { toast('Spotify state mismatch — try connecting again'); return; }
-
-    setStatus('Exchanging Spotify token...', true);
-    try {
-      const res = await fetch('https://accounts.spotify.com/api/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          client_id: cfg.spotifyClientId.trim(),
-          grant_type: 'authorization_code',
-          code,
-          redirect_uri: REDIRECT_URI,
-          code_verifier: verifier
-        })
-      });
-      const tok = await res.json();
-      if (!res.ok) throw new Error(tok.error_description || tok.error || 'Token exchange failed');
-      cfg.spotifyAccessToken = tok.access_token;
-      if (tok.refresh_token) cfg.spotifyRefreshToken = tok.refresh_token;
-      cfg.spotifyExpiresAt = Date.now() + (tok.expires_in - 60) * 1000;
-      persistCfg();
-      await syncSpotifyLibrary();
-    } catch (e) {
-      setStatus('', false);
-      toast('Spotify auth error: ' + e.message, 4500);
-    }
-  }
-
-  async function refreshSpotifyToken() {
-    if (!cfg.spotifyRefreshToken || !cfg.spotifyClientId) return false;
-    try {
-      const res = await fetch('https://accounts.spotify.com/api/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          client_id: cfg.spotifyClientId.trim(),
-          grant_type: 'refresh_token',
-          refresh_token: cfg.spotifyRefreshToken
-        })
-      });
-      if (!res.ok) return false;
-      const tok = await res.json();
-      cfg.spotifyAccessToken = tok.access_token;
-      if (tok.refresh_token) cfg.spotifyRefreshToken = tok.refresh_token;
-      cfg.spotifyExpiresAt = Date.now() + (tok.expires_in - 60) * 1000;
-      persistCfg();
-      return true;
-    } catch (_) { return false; }
-  }
-
-  async function spFetch(url) {
-    if (Date.now() > cfg.spotifyExpiresAt && cfg.spotifyRefreshToken) await refreshSpotifyToken();
-    const res = await fetch(url, { headers: { Authorization: 'Bearer ' + cfg.spotifyAccessToken } });
-    if (res.status === 429) {
-      const waitSec = Number(res.headers.get('Retry-After')) || 3;
-      setStatus(`Spotify rate limit — pausing ${waitSec}s...`, true);
-      await sleep(waitSec * 1000 + 250);
-      return spFetch(url);
-    }
-    if (!res.ok) throw new Error(`Spotify HTTP ${res.status}`);
-    return res.json();
-  }
-
-  async function syncSpotifyLibrary() {
-    switchView('settings');
-    setStatus('Starting uncapped Spotify sync...', true);
-    const artistCounts = {};
-    const trackTitles = new Set();
-
-    const recordArtist = (name, weight = 1) => {
-      const n = norm(name);
-      if (!n) return;
-      if (!artistCounts[n]) artistCounts[n] = { name, count: 0 };
-      artistCounts[n].count += weight;
-    };
-    const recordTrack = (trackObj, weight = 1) => {
-      if (!trackObj || !trackObj.name) return;
-      const nt = norm(trackObj.name);
-      if (nt) trackTitles.add(nt);
-      (trackObj.artists || []).forEach(a => recordArtist(a.name, weight));
-    };
-
-    try {
-      const me = await spFetch('https://api.spotify.com/v1/me');
-
-      for (const range of ['long_term', 'medium_term']) {
-        const topA = await spFetch(`https://api.spotify.com/v1/me/top/artists?limit=50&time_range=${range}`).catch(() => ({ items: [] }));
-        (topA.items || []).forEach((a, i) => recordArtist(a.name, Math.max(5, 25 - Math.floor(i / 2))));
-      }
-
-      const topT = await spFetch('https://api.spotify.com/v1/me/top/tracks?limit=50&time_range=long_term').catch(() => ({ items: [] }));
-      (topT.items || []).forEach(t => recordTrack(t, 4));
-
-      let next = 'https://api.spotify.com/v1/me/tracks?limit=50';
-      let likedCount = 0;
-      while (next) {
-        setStatus(`Syncing Liked Songs (${likedCount} scanned)...`, true);
-        const d = await spFetch(next);
-        const items = d.items || [];
-        items.forEach(it => recordTrack(it.track, 2));
-        likedCount += items.length;
-        next = d.next;
-        if (next) await sleep(80);
-      }
-
-      next = 'https://api.spotify.com/v1/me/albums?limit=50';
-      let albumCount = 0;
-      while (next) {
-        setStatus(`Syncing Saved Albums (${albumCount} scanned)...`, true);
-        const d = await spFetch(next).catch(() => ({ items: [], next: null }));
-        const items = d.items || [];
-        items.forEach(it => {
-          (it.album?.artists || []).forEach(a => recordArtist(a.name, 4));
-          (it.album?.tracks?.items || []).forEach(t => recordTrack(t, 1));
-        });
-        albumCount += items.length;
-        next = d.next;
-        if (next) await sleep(80);
-      }
-
-      const ownedPlaylists = [];
-      let plUrl = 'https://api.spotify.com/v1/me/playlists?limit=50';
-      while (plUrl) {
-        setStatus(`Finding your playlists (${ownedPlaylists.length} owned)...`, true);
-        const pls = await spFetch(plUrl).catch(() => ({ items: [], next: null }));
-        (pls.items || []).forEach(p => {
-          if (p && (p.owner?.id === me.id || p.collaborative)) ownedPlaylists.push(p);
-        });
-        plUrl = pls.next;
-        if (plUrl) await sleep(80);
-      }
-
-      for (let i = 0; i < ownedPlaylists.length; i++) {
-        const pl = ownedPlaylists[i];
-        let pNext = `https://api.spotify.com/v1/playlists/${pl.id}/items?limit=50`;
-        let pTracks = 0;
-        while (pNext) {
-          setStatus(`Playlist ${i + 1}/${ownedPlaylists.length}: ${pl.name} (${pTracks} songs)...`, true);
-          const pd = await spFetch(pNext).catch(() => ({ items: [], next: null }));
-          const entries = pd.items || [];
-          entries.forEach(entry => recordTrack(entry.item || entry.track, 1));
-          pTracks += entries.length;
-          pNext = pd.next;
-          if (pNext) await sleep(80);
-        }
-      }
-
-      const topArtists = Object.values(artistCounts).sort((a, b) => b.count - a.count).slice(0, 120).map(x => x.name);
-
-      spotifyProfile = {
-        syncedAt: Date.now(),
-        userDisplayName: me.display_name || me.id,
-        topArtists,
-        allArtists: artistCounts,
-        trackTitles: Array.from(trackTitles),
-        totalTracks: trackTitles.size,
-        totalArtists: Object.keys(artistCounts).length,
-        totalPlaylists: ownedPlaylists.length
-      };
-
-      await idbPut('meta', { key: 'spotify_profile', value: spotifyProfile });
-      tasteCache.clear();
-      updateSpotifyUI();
-      setStatus('', false);
-      toast(`🎧 Synced ${spotifyProfile.totalTracks} tracks, ${spotifyProfile.totalArtists} artists (${ownedPlaylists.length} playlists)!`, 4000);
-    } catch (err) {
-      setStatus('', false);
-      toast('Spotify sync error: ' + err.message, 5000);
-    }
-  }
-
-  window.importExportifyCSV = async function(file) {
-    if (!file) return;
-    const text = await file.text();
-    const rows = parseCSV(text);
-    if (rows.length < 2) { toast('CSV looks empty'); return; }
-    const headers = rows[0].map(h => h.toLowerCase());
-    const tIdx = headers.findIndex(h => h.includes('track name'));
-    const aIdx = headers.findIndex(h => h.includes('artist'));
-    if (tIdx === -1 || aIdx === -1) { toast('Could not find Track Name / Artist columns'); return; }
-
-    const artistCounts = Object.assign({}, spotifyProfile?.allArtists || {});
-    const trackSet = new Set(spotifyProfile?.trackTitles || []);
-
-    for (let i = 1; i < rows.length; i++) {
-      const tr = rows[i][tIdx], ar = rows[i][aIdx];
-      if (tr) trackSet.add(norm(tr));
-      if (ar) {
-        ar.split(/;|,/).forEach(name => {
-          const clean = name.trim();
-          const n = norm(clean);
-          if (!n) return;
-          if (!artistCounts[n]) artistCounts[n] = { name: clean, count: 0 };
-          artistCounts[n].count += 1;
-        });
-      }
-    }
-
-    const topArtists = Object.values(artistCounts).sort((a, b) => b.count - a.count).slice(0, 120).map(x => x.name);
-    spotifyProfile = {
-      syncedAt: Date.now(),
-      userDisplayName: spotifyProfile?.userDisplayName || 'Exportify CSV',
-      topArtists,
-      allArtists: artistCounts,
-      trackTitles: Array.from(trackSet),
-      totalTracks: trackSet.size,
-      totalArtists: Object.keys(artistCounts).length,
-      totalPlaylists: spotifyProfile?.totalPlaylists || 0
-    };
-    await idbPut('meta', { key: 'spotify_profile', value: spotifyProfile });
-    tasteCache.clear();
-    updateSpotifyUI();
-    toast(`Merged! Total: ${spotifyProfile.totalTracks} tracks & ${spotifyProfile.totalArtists} artists.`);
-  };
-
-  function parseCSV(text) {
-    const out = [];
-    let row = [], cur = '', inQ = false;
-    for (let i = 0; i < text.length; i++) {
-      const c = text[i], next = text[i + 1];
-      if (inQ) {
-        if (c === '"' && next === '"') { cur += '"'; i++; }
-        else if (c === '"') inQ = false;
-        else cur += c;
-      } else {
-        if (c === '"') inQ = true;
-        else if (c === ',') { row.push(cur); cur = ''; }
-        else if (c === '\n' || c === '\r') {
-          if (c === '\r' && next === '\n') i++;
-          row.push(cur);
-          if (row.some(x => x !== '')) out.push(row);
-          row = []; cur = '';
-        } else cur += c;
-      }
-    }
-    if (cur || row.length) { row.push(cur); out.push(row); }
-    return out;
-  }
-
-  function updateSpotifyUI() {
-    const pill = document.getElementById('spotifyPill');
-    const summary = document.getElementById('spotifySummary');
-    if (spotifyProfile) {
-      pill.textContent = `Spotify: ${spotifyProfile.totalArtists} art`;
-      pill.className = 'pill ok';
-      const plTxt = spotifyProfile.totalPlaylists ? ` · ${spotifyProfile.totalPlaylists} playlists` : '';
-      summary.textContent = `✅ Synced (${spotifyProfile.userDisplayName}): ${spotifyProfile.totalTracks} tracks · ${spotifyProfile.totalArtists} artists${plTxt} (${new Date(spotifyProfile.syncedAt).toLocaleDateString()})`;
-    } else {
-      pill.textContent = 'Spotify: Off';
-      pill.className = 'pill';
-      summary.textContent = 'Not synced yet.';
-    }
-  }
-
-  // ==================== SETTINGS ====================
-  function persistCfg() {
-    localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
-    document.getElementById('setupNotice').classList.toggle('hidden', Boolean(cfg.geminiKey && cfg.discogsToken));
-  }
-
-  window.saveSettings = function(silent = false) {
-    cfg.geminiKey = document.getElementById('cfgGeminiKey').value.trim();
-    cfg.geminiModel = document.getElementById('cfgGeminiModel').value;
-    cfg.autoDetective = document.getElementById('cfgAutoDetective').checked;
-    cfg.discogsToken = document.getElementById('cfgDiscogsToken').value.trim();
-    cfg.discogsFolderId = document.getElementById('cfgDiscogsFolder').value || '1';
-    cfg.homeCountry = document.getElementById('cfgHomeCountry').value;
-    cfg.fetchVgSuggestions = document.getElementById('cfgFetchVg').checked;
-    cfg.threshold = Number(document.getElementById('cfgThreshold').value) || 20;
-    cfg.voice = document.getElementById('cfgVoice').checked;
-    cfg.spotifyClientId = document.getElementById('cfgSpotifyClientId').value.trim();
-    persistCfg();
-    if (!silent) toast('Settings saved!');
-  };
-
-  window.verifyDiscogsAccount = async function() {
-    saveSettings(true);
-    if (!cfg.discogsToken) { toast('Paste your Discogs Token first'); return; }
-    setStatus('Verifying Discogs account & loading folders...', true);
-    try {
-      const id = await discogsFetch('/oauth/identity');
-      cfg.discogsUser = id.username;
-      const fRes = await discogsFetch(`/users/${encodeURIComponent(id.username)}/collection/folders`);
-      cfg.discogsFolders = (fRes.folders || []).filter(f => f.id !== 0);
-      if (!cfg.discogsFolders.length) cfg.discogsFolders = [{ id: 1, name: 'Uncategorized' }];
-      populateFolders();
-      persistCfg();
-      setStatus('', false);
-      toast(`✅ Connected as ${id.username} (${cfg.discogsFolders.length} folder(s))`);
-    } catch (err) {
-      setStatus('', false);
-      toast('Discogs verify failed: ' + err.message, 4000);
-    }
-  };
-
-  function populateFolders() {
-    const sel = document.getElementById('cfgDiscogsFolder');
-    sel.innerHTML = (cfg.discogsFolders || [{ id: 1, name: 'Uncategorized' }]).map(f =>
-      `<option value="${f.id}">${esc(f.name)} (${f.count ?? 0})</option>`
-    ).join('');
-    sel.value = cfg.discogsFolderId || '1';
-    if (!sel.value && sel.options.length) sel.selectedIndex = 0;
-    document.getElementById('discogsUserBadge').textContent = cfg.discogsUser ? `Connected: @${cfg.discogsUser}` : '';
-  }
-
-  window.copyRedirectUri = async function() {
-    try {
-      await navigator.clipboard.writeText(REDIRECT_URI);
-      toast('Redirect URI copied!');
-    } catch (_) {
-      prompt('Copy this Redirect URI:', REDIRECT_URI);
-    }
-  };
-
-  // ==================== INIT ====================
-  async function init() {
-    db = await openDB();
-    await loadStashCache();
-    const spRec = await idbGet('meta', 'spotify_profile');
-    if (spRec?.value) spotifyProfile = spRec.value;
-
-    document.getElementById('cfgGeminiKey').value = cfg.geminiKey || '';
-    document.getElementById('cfgGeminiModel').value = cfg.geminiModel || 'gemini-3.5-flash-lite';
-    document.getElementById('cfgAutoDetective').checked = cfg.autoDetective !== false;
-    document.getElementById('cfgDiscogsToken').value = cfg.discogsToken || '';
-    document.getElementById('cfgHomeCountry').value = cfg.homeCountry ?? 'US';
-    document.getElementById('cfgFetchVg').checked = cfg.fetchVgSuggestions !== false;
-    document.getElementById('cfgThreshold').value = cfg.threshold ?? 20;
-    document.getElementById('cfgVoice').checked = Boolean(cfg.voice);
-    document.getElementById('cfgSpotifyClientId').value = cfg.spotifyClientId || '';
-    document.getElementById('redirectUriText').textContent = REDIRECT_URI;
-    document.getElementById('guideRedirectUri').textContent = REDIRECT_URI;
-    populateFolders();
-    updateSpotifyUI();
-    persistCfg();
-
-    document.querySelectorAll('#formatSeg .seg-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('#formatSeg .seg-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        activeFormat = btn.dataset.fmt;
-      });
-    });
-
-    document.querySelectorAll('#stashFilters .chip').forEach(ch => {
-      ch.addEventListener('click', () => {
-        document.querySelectorAll('#stashFilters .chip').forEach(c => c.classList.remove('active'));
-        ch.classList.add('active');
-        activeStashFilter = ch.dataset.filter;
-        renderStash();
-      });
-    });
-
-    document.getElementById('camPrimary').addEventListener('change', (e) => handlePhotoCapture(e.target.files[0], false));
-    document.getElementById('camExtra').addEventListener('change', (e) => handlePhotoCapture(e.target.files[0], true));
-
-    await handleSpotifyCallback();
-  }
-
-  init();
-})();
-</script>
+<script src="apis.js?v=1.3"></script>
+<script src="app.js?v=1.3"></script>
 </body>
 </html>
