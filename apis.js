@@ -130,8 +130,13 @@
   });
 
   CC.esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  CC.norm = (s) => String(s || '').toLowerCase().replace(/\(.*?\)|\[.*?\]/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
-  CC.normFull = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  CC.foldText = (s) => String(s || '')
+    .replace(/ı/g, 'i')
+    .replace(/İ/g, 'I')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  CC.norm = (s) => CC.foldText(s).toLowerCase().replace(/\(.*?\)|\[.*?\]/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
+  CC.normFull = (s) => CC.foldText(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
   function tokenSim(na, nb) {
     const ta = new Set(na.split(' ').filter(w => w.length > 1));
@@ -262,10 +267,16 @@
     return data;
   };
 
-  CC.findDiscogsInstances = async (releaseId) => {
+  CC.findDiscogsInstances = async (releaseId, opts = {}) => {
+    const { throwOnError = false } = opts || {};
     if (!CC.cfg.discogsUser || !releaseId) return [];
-    const data = await CC.discogsFetch(`/users/${encodeURIComponent(CC.cfg.discogsUser)}/collection/releases/${releaseId}`).catch(() => null);
-    return Array.isArray(data?.releases) ? data.releases : [];
+    try {
+      const data = await CC.discogsFetch(`/users/${encodeURIComponent(CC.cfg.discogsUser)}/collection/releases/${releaseId}`);
+      return Array.isArray(data?.releases) ? data.releases : [];
+    } catch (err) {
+      if (throwOnError) throw err;
+      return [];
+    }
   };
 
   CC.deleteDiscogsInstance = async (folderId, releaseId, instanceId) => {
@@ -534,13 +545,15 @@
         const reqDistinct = reqV.split(' ').filter(w => w.length > 2 && !stop.has(w));
         const distinctHits = reqDistinct.filter(w => candFull.includes(w)).length;
         const distinctRatio = reqDistinct.length ? (distinctHits / reqDistinct.length) : vSim;
+        const isLenientEdit = /^(radio(\s+edit|\s+version|\s+mix)?|single(\s+version|\s+edit)?|edit|album(\s+version)?|original(\s+version|\s+mix)?)$/i.test(reqV);
+        const candIsNonStudio = /remix|line dance|dub|club|extended|karaoke|instrumental/i.test(candV || '');
 
         if (distinctRatio >= 0.5 || vSim >= 0.55) {
           score += 0.45 + distinctRatio * 0.25;
           versionMatched = true;
-        } else if (reqV.includes('radio') && (candV.includes('radio') || (!candV && !/remix|mix|extended|club|dub/i.test(candFull)))) {
+        } else if (isLenientEdit && !candIsNonStudio) {
           score += 0.30;
-          versionMatched = candV.includes('radio');
+          versionMatched = true;
         } else if (candV && /remix|mix|line dance|dub|club|extended|karaoke/i.test(candV)) {
           score -= 0.25;
         }
@@ -652,7 +665,10 @@
     const primaryQ = (base && version) ? `${prefix}${base} ${version}`.trim()
       : (base ? `${prefix}${base}`.trim() : `${prefix}${album}`.trim());
     const baseQ = base ? `${prefix}${base}`.trim() : primaryQ;
+    const foldedBaseQ = CC.foldText(baseQ).trim();
     const ytUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(primaryQ)}`;
+
+    const pickBetter = (cur, next) => (!cur || (next && ((next.exactVersion && !cur.exactVersion) || (next.exactVersion === cur.exactVersion && next.score > cur.score)))) ? next : cur;
 
     const [ap1, dz1, sp1] = await Promise.all([
       queryApple(primaryQ, artist, rawTrack, album, strictTrack),
@@ -662,13 +678,28 @@
 
     let apBest = ap1, dzBest = dz1, spBest = sp1;
 
-    if (version && !ap1?.exactVersion && !dz1?.exactVersion) {
-      const [ap2, dz2] = await Promise.all([
-        queryApple(baseQ, artist, rawTrack, album, strictTrack),
-        queryDeezerJSONP(baseQ, artist, rawTrack, album, strictTrack)
+    // Fallback 1: parentheticals/brackets stripped (baseQ) across ALL enabled services lacking an exact match
+    if (baseQ && baseQ !== primaryQ && (!apBest?.exactVersion || !dzBest?.exactVersion || (CC.cfg.showSpotify && !spBest?.exactVersion))) {
+      const [ap2, dz2, sp2] = await Promise.all([
+        !apBest?.exactVersion ? queryApple(baseQ, artist, rawTrack, album, strictTrack) : Promise.resolve(null),
+        !dzBest?.exactVersion ? queryDeezerJSONP(baseQ, artist, rawTrack, album, strictTrack) : Promise.resolve(null),
+        (CC.cfg.showSpotify && !spBest?.exactVersion) ? querySpotifyExact(baseQ, artist, rawTrack, album, strictTrack) : Promise.resolve(null)
       ]);
-      if (!apBest || (ap2 && ap2.score > apBest.score)) apBest = ap2;
-      if (!dzBest || (dz2 && dz2.score > dzBest.score)) dzBest = dz2;
+      apBest = pickBetter(apBest, ap2);
+      dzBest = pickBetter(dzBest, dz2);
+      spBest = pickBetter(spBest, sp2);
+    }
+
+    // Fallback 2: ASCII-folded query (e.g., Turkish/accented titles) across ALL enabled services lacking an exact match
+    if (foldedBaseQ && foldedBaseQ !== baseQ && foldedBaseQ !== primaryQ && (!apBest?.exactVersion || !dzBest?.exactVersion || (CC.cfg.showSpotify && !spBest?.exactVersion))) {
+      const [ap3, dz3, sp3] = await Promise.all([
+        !apBest?.exactVersion ? queryApple(foldedBaseQ, artist, rawTrack, album, strictTrack) : Promise.resolve(null),
+        !dzBest?.exactVersion ? queryDeezerJSONP(foldedBaseQ, artist, rawTrack, album, strictTrack) : Promise.resolve(null),
+        (CC.cfg.showSpotify && !spBest?.exactVersion) ? querySpotifyExact(foldedBaseQ, artist, rawTrack, album, strictTrack) : Promise.resolve(null)
+      ]);
+      apBest = pickBetter(apBest, ap3);
+      dzBest = pickBetter(dzBest, dz3);
+      spBest = pickBetter(spBest, sp3);
     }
 
     const streamCandidates = [apBest, dzBest].filter(x => x && x.previewUrl);
@@ -689,6 +720,15 @@
   };
 
   // ==================== SPOTIFY PKCE OAUTH & 100% FULL LIBRARY SYNC ====================
+  let activeSpCtrl = null;
+
+  CC.cancelSpotifySync = () => {
+    if (activeSpCtrl) {
+      try { activeSpCtrl.abort(); } catch (_) {}
+      activeSpCtrl = null;
+    }
+  };
+
   function randomStr(len) {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     const arr = new Uint8Array(len);
@@ -723,14 +763,23 @@
     } catch (_) { return false; }
   };
 
-  async function spFetch(url) {
+  async function spFetch(url, signal = null, attempt = 0) {
+    if (signal?.aborted) throw new DOMException('Cancelled by user', 'AbortError');
     if (Date.now() > CC.cfg.spotifyExpiresAt && CC.cfg.spotifyRefreshToken) await CC.refreshSpotifyToken();
-    const res = await fetch(url, { headers: { Authorization: 'Bearer ' + CC.cfg.spotifyAccessToken } });
+    const res = await fetch(url, {
+      headers: { Authorization: 'Bearer ' + CC.cfg.spotifyAccessToken },
+      ...(signal ? { signal } : {})
+    });
     if (res.status === 429) {
-      const waitSec = Number(res.headers.get('Retry-After')) || 3;
-      statusCb(`Spotify rate limit — pausing ${waitSec}s...`, true);
-      await CC.sleep(waitSec * 1000 + 250);
-      return spFetch(url);
+      const nextAttempt = attempt + 1;
+      const headerWaitSec = Number(res.headers.get('Retry-After')) || 0;
+      const waitSec = Math.max(headerWaitSec, Math.min(60, 5 * Math.pow(2, nextAttempt - 1)));
+      for (let rem = Math.ceil(waitSec); rem > 0; rem--) {
+        if (signal?.aborted) throw new DOMException('Cancelled by user', 'AbortError');
+        statusCb(`Spotify rate limit — resuming in ${rem}s (retry #${nextAttempt})...`, true, { cancellable: true });
+        await CC.sleep(1000, signal);
+      }
+      return spFetch(url, signal, nextAttempt);
     }
     if (!res.ok) throw new Error(`Spotify HTTP ${res.status}`);
     return res.json();
@@ -777,7 +826,22 @@
   };
 
   CC.syncSpotifyAll = async (existingDna = '', existingSoftSpots = '') => {
-    statusCb('Starting complete Spotify library sync...', true);
+    CC.cancelSpotifySync();
+    const ctrl = new AbortController();
+    activeSpCtrl = ctrl;
+    const signal = ctrl.signal;
+    const SP_GAP_MS = 350;
+
+    const spFetchSafe = async (url) => {
+      try {
+        return await spFetch(url, signal);
+      } catch (err) {
+        if (err.name === 'AbortError' || signal.aborted) throw err;
+        return { items: [], next: null };
+      }
+    };
+
+    statusCb('Starting complete Spotify library sync...', true, { cancellable: true });
     const artistMap = {};
     const trackPairs = new Set();
     const trackTitles = new Set();
@@ -814,101 +878,115 @@
       });
     };
 
-    const me = await spFetch('https://api.spotify.com/v1/me');
+    try {
+      const me = await spFetch('https://api.spotify.com/v1/me', signal);
 
-    for (const range of ['long_term', 'medium_term', 'short_term']) {
-      statusCb(`Syncing Top Artists & Tracks (${range})...`, true);
-      const topA = await spFetch(`https://api.spotify.com/v1/me/top/artists?limit=50&time_range=${range}`).catch(() => ({ items: [] }));
-      (topA.items || []).forEach((a, i) => {
-        const rec = ensureArtist(a.name);
-        if (rec) rec.count += Math.max(4, 20 - Math.floor(i / 3));
-      });
-      const topT = await spFetch(`https://api.spotify.com/v1/me/top/tracks?limit=50&time_range=${range}`).catch(() => ({ items: [] }));
-      (topT.items || []).forEach(t => addTrack(t, 3));
-    }
-
-    let next = 'https://api.spotify.com/v1/me/tracks?limit=50';
-    let count = 0;
-    while (next) {
-      statusCb(`Syncing Liked Songs (${count} scanned)...`, true);
-      const d = await spFetch(next);
-      (d.items || []).forEach(it => addTrack(it.track, 2));
-      count += (d.items || []).length;
-      next = d.next;
-      if (next) await CC.sleep(70);
-    }
-
-    next = 'https://api.spotify.com/v1/me/albums?limit=50';
-    count = 0;
-    while (next) {
-      statusCb(`Syncing Saved Albums (${count} scanned)...`, true);
-      const d = await spFetch(next).catch(() => ({ items: [], next: null }));
-      (d.items || []).forEach(it => {
-        if (it.album?.release_date) addDecade(it.album.release_date);
-        (it.album?.artists || []).forEach(a => {
+      for (const range of ['long_term', 'medium_term', 'short_term']) {
+        statusCb(`Syncing Top Artists & Tracks (${range})...`, true, { cancellable: true });
+        await CC.sleep(SP_GAP_MS, signal);
+        const topA = await spFetchSafe(`https://api.spotify.com/v1/me/top/artists?limit=50&time_range=${range}`);
+        (topA.items || []).forEach((a, i) => {
           const rec = ensureArtist(a.name);
-          if (rec) rec.count += 4;
+          if (rec) rec.count += Math.max(4, 20 - Math.floor(i / 3));
         });
-        (it.album?.tracks?.items || []).forEach(t => addTrack(t, 1));
-      });
-      count += (d.items || []).length;
-      next = d.next;
-      if (next) await CC.sleep(70);
-    }
-
-    const owned = [];
-    let plUrl = 'https://api.spotify.com/v1/me/playlists?limit=50';
-    while (plUrl) {
-      statusCb(`Finding your playlists (${owned.length} owned)...`, true);
-      const pls = await spFetch(plUrl).catch(() => ({ items: [], next: null }));
-      (pls.items || []).forEach(p => { if (p && (p.owner?.id === me.id || p.collaborative)) owned.push(p); });
-      plUrl = pls.next;
-      if (plUrl) await CC.sleep(70);
-    }
-
-    for (let i = 0; i < owned.length; i++) {
-      const pl = owned[i];
-      let pNext = `https://api.spotify.com/v1/playlists/${pl.id}/items?limit=50`;
-      let pTracks = 0;
-      while (pNext) {
-        statusCb(`Playlist ${i + 1}/${owned.length}: ${pl.name} (${pTracks} songs)...`, true);
-        const pd = await spFetch(pNext).catch(() => ({ items: [], next: null }));
-        (pd.items || []).forEach(e => addTrack(e.item || e.track, 1, pl.name));
-        pTracks += (pd.items || []).length;
-        pNext = pd.next;
-        if (pNext) await CC.sleep(70);
+        await CC.sleep(SP_GAP_MS, signal);
+        const topT = await spFetchSafe(`https://api.spotify.com/v1/me/top/tracks?limit=50&time_range=${range}`);
+        (topT.items || []).forEach(t => addTrack(t, 3));
       }
-      playlistSummaries.push({ name: pl.name, count: pTracks });
-    }
 
-    const allArtists = {};
-    Object.entries(artistMap).forEach(([k, v]) => {
-      allArtists[k] = {
-        name: v.name,
-        count: v.count,
-        tracks: Array.from(v.tracks),
-        playlists: Array.from(v.playlists)
+      let next = 'https://api.spotify.com/v1/me/tracks?limit=50';
+      let count = 0;
+      while (next) {
+        statusCb(`Syncing Liked Songs (${count} scanned)...`, true, { cancellable: true });
+        await CC.sleep(SP_GAP_MS, signal);
+        const d = await spFetch(next, signal);
+        (d.items || []).forEach(it => addTrack(it.track, 2));
+        count += (d.items || []).length;
+        next = d.next;
+      }
+
+      next = 'https://api.spotify.com/v1/me/albums?limit=50';
+      count = 0;
+      while (next) {
+        statusCb(`Syncing Saved Albums (${count} scanned)...`, true, { cancellable: true });
+        await CC.sleep(SP_GAP_MS, signal);
+        const d = await spFetchSafe(next);
+        (d.items || []).forEach(it => {
+          if (it.album?.release_date) addDecade(it.album.release_date);
+          (it.album?.artists || []).forEach(a => {
+            const rec = ensureArtist(a.name);
+            if (rec) rec.count += 4;
+          });
+          (it.album?.tracks?.items || []).forEach(t => addTrack(t, 1));
+        });
+        count += (d.items || []).length;
+        next = d.next;
+      }
+
+      const owned = [];
+      const seenPlaylistIds = new Set();
+      let plUrl = 'https://api.spotify.com/v1/me/playlists?limit=50';
+      while (plUrl) {
+        statusCb(`Finding your playlists (${owned.length} non-empty)...`, true, { cancellable: true });
+        await CC.sleep(SP_GAP_MS, signal);
+        const pls = await spFetchSafe(plUrl);
+        (pls.items || []).forEach(p => {
+          if (!p || !p.id || seenPlaylistIds.has(p.id)) return;
+          if (!(p.owner?.id === me.id || p.collaborative)) return;
+          seenPlaylistIds.add(p.id);
+          const reportedTotal = p.tracks?.total ?? p.items?.total;
+          if (reportedTotal === 0) return; // skip 0-track playlists
+          owned.push(p);
+        });
+        plUrl = pls.next;
+      }
+
+      for (let i = 0; i < owned.length; i++) {
+        const pl = owned[i];
+        let pNext = `https://api.spotify.com/v1/playlists/${pl.id}/items?limit=50`;
+        let pTracks = 0;
+        while (pNext) {
+          statusCb(`Playlist ${i + 1}/${owned.length}: ${pl.name} (${pTracks} songs)...`, true, { cancellable: true });
+          await CC.sleep(SP_GAP_MS, signal);
+          const pd = await spFetchSafe(pNext);
+          (pd.items || []).forEach(e => addTrack(e.item || e.track, 1, pl.name));
+          pTracks += (pd.items || []).length;
+          pNext = pd.next;
+        }
+        if (pTracks > 0) playlistSummaries.push({ name: pl.name, count: pTracks });
+      }
+
+      const allArtists = {};
+      Object.entries(artistMap).forEach(([k, v]) => {
+        allArtists[k] = {
+          name: v.name,
+          count: v.count,
+          tracks: Array.from(v.tracks),
+          playlists: Array.from(v.playlists)
+        };
+      });
+
+      const topArtists = Object.values(allArtists).sort((a, b) => b.count - a.count).map(x => x.name);
+
+      return {
+        syncedAt: Date.now(),
+        userDisplayName: me.display_name || me.id,
+        topArtists,
+        allArtists,
+        trackPairs: Array.from(trackPairs),
+        trackTitles: Array.from(trackTitles),
+        playlistSummaries,
+        decades,
+        totalTracks: trackPairs.size || trackTitles.size,
+        totalArtists: Object.keys(allArtists).length,
+        totalPlaylists: owned.length,
+        tasteDna: existingDna || '',
+        softSpots: existingSoftSpots || '',
+        dnaUpdatedAt: existingDna ? Date.now() : 0
       };
-    });
-
-    const topArtists = Object.values(allArtists).sort((a, b) => b.count - a.count).map(x => x.name);
-
-    return {
-      syncedAt: Date.now(),
-      userDisplayName: me.display_name || me.id,
-      topArtists,
-      allArtists,
-      trackPairs: Array.from(trackPairs),
-      trackTitles: Array.from(trackTitles),
-      playlistSummaries,
-      decades,
-      totalTracks: trackPairs.size || trackTitles.size,
-      totalArtists: Object.keys(allArtists).length,
-      totalPlaylists: owned.length,
-      tasteDna: existingDna || '',
-      softSpots: existingSoftSpots || '',
-      dnaUpdatedAt: existingDna ? Date.now() : 0
-    };
+    } finally {
+      if (activeSpCtrl === ctrl) activeSpCtrl = null;
+    }
   };
 
   CC.parseCSV = (text) => {

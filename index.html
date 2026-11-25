@@ -7,12 +7,12 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>CrateCheck — Media Scanner</title>
-  <link rel="stylesheet" href="style.css?v=1.9.1" />
+  <link rel="stylesheet" href="style.css?v=1.9.2" />
 </head>
 <body>
 
 <header>
-  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.9.1</span></div>
+  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.9.2</span></div>
   <div class="status-pills">
     <span id="aiPill" class="pill" title="Gemini Cloud AI status" onclick="switchView('settings')">Gemini: Off</span>
     <span id="ratePill" class="pill" title="Discogs API sliding window (max 58/min)">API 0/58</span>
@@ -323,6 +323,7 @@
         <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="exportCSV()">⬇️ Export CSV</button>
         <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="exportJSON()">💾 Backup JSON</button>
       </div>
+      <button id="btnRecalibrateStash" type="button" class="btn btn-purple btn-sm" style="width:100%; margin-top:8px;" onclick="recalibrateStashBatch()">🔄 Recalibrate Taste</button>
     </div>
     <div id="stashList"></div>
   </section>
@@ -368,7 +369,7 @@
         <div class="toggle-row">
           <div>
             <div style="font-size:0.9rem; font-weight:600;">🕵️ Auto Zero-Guessing Verification</div>
-            <div style="font-size:0.76rem; color:var(--muted);">Sweeps up to 45 pressings + [r=ID] siblings, respects loose tapes &amp; flags conservative ties</div>
+            <div style="font-size:0.76rem; color:var(--muted);">Fast Top-10 sweep + [r=ID] siblings, optional Deep Search for all remaining pressings</div>
           </div>
           <input id="cfgAutoDetective" type="checkbox" style="width:22px; height:22px;" />
         </div>
@@ -721,7 +722,7 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="apis.js?v=1.9.1"></script>
-<script src="app.js?v=1.9.1"></script>
+<script src="apis.js?v=1.9.2"></script>
+<script src="app.js?v=1.9.2"></script>
 </body>
 </html>
