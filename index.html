@@ -58,10 +58,19 @@
     .brand {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 6px;
       font-weight: 800;
-      font-size: 1.08rem;
+      font-size: 1.05rem;
       letter-spacing: -0.02em;
+    }
+    .ver-tag {
+      font-size: 0.68rem;
+      font-weight: 700;
+      color: var(--muted);
+      background: var(--card-2);
+      border: 1px solid var(--border);
+      padding: 1px 6px;
+      border-radius: 6px;
     }
 
     .status-pills {
@@ -169,6 +178,13 @@
       grid-template-columns: 1fr 1fr;
       gap: 8px;
       margin-top: 8px;
+    }
+
+    .inline-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
     }
 
     .hidden-file { display: none; }
@@ -545,7 +561,7 @@
 <body>
 
 <header>
-  <div class="brand">📼 CrateCheck</div>
+  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.1</span></div>
   <div class="status-pills">
     <span id="ratePill" class="pill" title="Discogs API sliding window (max 50/min)">API 0/50</span>
     <span id="spotifyPill" class="pill">Spotify: Off</span>
@@ -755,7 +771,11 @@
           <option value="gemini-3.6-flash">gemini-3.6-flash (Balanced)</option>
         </select>
       </div>
-      <button class="btn btn-sm" onclick="saveSettings()">Save Settings</button>
+      <div class="inline-actions">
+        <button class="btn btn-sm" onclick="saveSettings()">Save Settings</button>
+        <button class="btn btn-secondary btn-sm" onclick="testGeminiKey()">🧪 Test Gemini Key</button>
+        <span id="geminiStatusBadge" style="font-size:0.82rem; font-weight:700;"></span>
+      </div>
     </div>
 
     <div class="card">
@@ -764,12 +784,13 @@
         <label class="field-label">Discogs Personal Access Token</label>
         <input id="cfgDiscogsToken" type="password" placeholder="Paste token from discogs.com/settings/developers" />
       </div>
-      <div style="margin-bottom:10px;">
+      <div class="inline-actions" style="margin-bottom:10px;">
         <button class="btn btn-secondary btn-sm" onclick="verifyDiscogsAccount()">🔗 Verify Account &amp; Load Folders</button>
-        <span id="discogsUserBadge" style="margin-left:8px; font-size:0.82rem; color:var(--green); font-weight:700;"></span>
+        <a class="btn btn-secondary btn-sm" href="https://www.discogs.com/manage_folders" target="_blank" rel="noopener">📁 Manage Folders ↗</a>
+        <span id="discogsUserBadge" style="font-size:0.82rem; color:var(--green); font-weight:700;"></span>
       </div>
       <div style="margin-bottom:10px;">
-        <label class="field-label">Target Discogs Folder</label>
+        <label class="field-label">Target Discogs Folder (create new ones via Manage Folders ↗, then tap Verify again)</label>
         <select id="cfgDiscogsFolder">
           <option value="1">Uncategorized (Default)</option>
         </select>
@@ -786,8 +807,8 @@
     </div>
 
     <div class="card">
-      <h2>3. Spotify Taste Profile</h2>
-      <p>Syncs your Liked Songs, Top Artists, Saved Albums &amp; owned playlists locally onto your phone once. Zero Spotify calls during scanning.</p>
+      <h2>3. Spotify Taste Profile (Uncapped Sync)</h2>
+      <p>Syncs <strong>all</strong> of your Liked Songs, Top Artists, Saved Albums, and <strong>every</strong> owned/collaborative playlist locally onto your phone. Zero Spotify calls during scanning.</p>
       <div style="margin-bottom:10px;">
         <label class="field-label">Spotify Client ID</label>
         <input id="cfgSpotifyClientId" type="text" placeholder="32-char Client ID from developer.spotify.com" />
@@ -798,11 +819,15 @@
         <button class="btn btn-secondary btn-sm" onclick="copyRedirectUri()">Copy</button>
       </div>
       <div id="spotifySummary" style="font-size:0.84rem; color:var(--spotify); font-weight:700; margin:8px 0;">Not synced yet.</div>
-      <button class="btn btn-spotify" onclick="startSpotifyAuth()">🎧 Connect &amp; Sync Spotify</button>
+      <div id="settingsStatusBanner" class="status-banner" style="margin-bottom:10px;">
+        <div class="spinner"></div>
+        <div id="settingsStatusText">Syncing...</div>
+      </div>
+      <button class="btn btn-spotify" onclick="startSpotifyAuth()">🎧 Connect &amp; Sync All Spotify Data</button>
 
       <details style="margin-top:12px;">
-        <summary>Alternative: Import Exportify CSV</summary>
-        <p style="margin-top:6px;">Export any playlist or Liked Songs at <strong>exportify.net</strong> and import the CSV here to feed your taste profile without Spotify Developer setup.</p>
+        <summary>Optional: Merge Exportify CSV (for playlists made by others)</summary>
+        <p style="margin-top:6px;">Export any playlist at <strong>exportify.net</strong> and import the CSV here to merge into your taste profile.</p>
         <input id="csvImportInput" type="file" accept=".csv" onchange="importExportifyCSV(this.files[0])" />
       </details>
     </div>
@@ -829,7 +854,7 @@
         <ol>
           <li>Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio (aistudio.google.com/apikey)</a> and sign in with Google.</li>
           <li>Tap <strong>Create API Key</strong>, select or create a project, and copy the key starting with <code>AIza...</code>.</li>
-          <li>Paste it into <strong>Settings → Gemini API Key</strong> and tap Save.</li>
+          <li>Paste it into <strong>Settings → Gemini API Key</strong> and tap <strong>🧪 Test Gemini Key</strong>.</li>
         </ol>
       </div>
 
@@ -838,8 +863,8 @@
         <ol>
           <li>Log into Discogs and open <a href="https://www.discogs.com/settings/developers" target="_blank" rel="noopener">discogs.com/settings/developers</a>.</li>
           <li>Tap <strong>Generate new token</strong> and copy it.</li>
-          <li>Paste it into <strong>Settings → Discogs Personal Access Token</strong>, then tap <strong>Verify Account &amp; Load Folders</strong> to pick which folder new scans go into.</li>
-          <li><em>Tip for VG+ estimates:</em> Discogs only returns VG+ price suggestions if you have a default seller currency set in Discogs Seller Settings—otherwise the app cleanly uses Lowest Listed Price + Scarcity.</li>
+          <li>Paste it into <strong>Settings → Discogs Personal Access Token</strong>, then tap <strong>Verify Account &amp; Load Folders</strong>.</li>
+          <li>To organize into custom folders (e.g. Cassettes / To Sell), create them at <a href="https://www.discogs.com/manage_folders" target="_blank" rel="noopener">discogs.com/manage_folders</a>, then tap <strong>Verify Account &amp; Load Folders</strong> again.</li>
         </ol>
       </div>
 
@@ -852,10 +877,9 @@
               <button class="btn btn-secondary btn-sm" onclick="copyRedirectUri()">Copy</button>
             </div>
           </li>
-          <li>Open <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a> (requires your Spotify Premium account).</li>
-          <li>Tap <strong>Create app</strong> → name it <code>CrateCheck</code> → paste the Redirect URI above → check <strong>Web API</strong> → Save.</li>
-          <li>Open your app's <strong>Settings</strong>, copy the <strong>Client ID</strong> (you do NOT need the Client Secret).</li>
-          <li>Paste the Client ID into <strong>Settings → Spotify Client ID</strong> and tap <strong>Connect &amp; Sync Spotify</strong>.</li>
+          <li>Open <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a> (requires Spotify Premium).</li>
+          <li>Tap <strong>Create app</strong> → name it <code>CrateCheck</code> → paste the Redirect URI above → check <strong>only Web API</strong> → Save.</li>
+          <li>Copy the <strong>Client ID</strong> from Settings, paste it into <strong>Settings → Spotify Client ID</strong>, and tap <strong>Connect &amp; Sync All Spotify Data</strong>.</li>
         </ol>
       </div>
 
@@ -863,7 +887,7 @@
         <h3>4. Install as a Home-Screen App on Android</h3>
         <ol>
           <li>Open your GitHub Pages URL in <strong>Chrome</strong> on your phone.</li>
-          <li>Tap the <strong>⋮ menu</strong> (top-right) → <strong>Add to Home screen</strong> → <strong>Install</strong>.</li>
+          <li>Tap the <strong>⋮ menu</strong> (top-right) → <strong>Install / Add to Home screen</strong>.</li>
           <li>It now launches full-screen like a native app and works on 5G at Goodwill.</li>
         </ol>
       </div>
@@ -933,6 +957,8 @@
   let currentCandidates = [];
   let currentInspected = null;
 
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
   // ==================== INDEXEDDB ====================
   function openDB() {
     return new Promise((resolve, reject) => {
@@ -1000,6 +1026,12 @@
     const el = document.getElementById('statusBanner');
     document.getElementById('statusText').textContent = text;
     el.classList.toggle('show', show);
+
+    const sel = document.getElementById('settingsStatusBanner');
+    if (sel) {
+      document.getElementById('settingsStatusText').textContent = text;
+      sel.classList.toggle('show', show);
+    }
   }
 
   function esc(str) {
@@ -1094,16 +1126,15 @@
     const job = discogsQueue.shift();
 
     try {
-      // Sliding window check (max 50/min) + 1200ms spacing
       const now = Date.now();
       recentDiscogsCalls = recentDiscogsCalls.filter(t => now - t < 60000);
       if (recentDiscogsCalls.length >= 49) {
         const waitMs = 60500 - (now - recentDiscogsCalls[0]);
         setStatus(`Cooling down Discogs rate limit (${Math.ceil(waitMs/1000)}s)...`, true);
-        await new Promise(r => setTimeout(r, Math.max(1000, waitMs)));
+        await sleep(Math.max(1000, waitMs));
       }
       const gap = Date.now() - lastDiscogsCall;
-      if (gap < 1200) await new Promise(r => setTimeout(r, 1200 - gap));
+      if (gap < 1200) await sleep(1200 - gap);
 
       const url = new URL('https://api.discogs.com' + job.path);
       Object.entries(job.params || {}).forEach(([k, v]) => {
@@ -1115,11 +1146,10 @@
       recentDiscogsCalls.push(lastDiscogsCall);
       updateRatePill();
 
-      // Intentionally omit custom headers so browser skips OPTIONS preflight
       const res = await fetch(url.toString(), { method: job.method });
       if (res.status === 429) {
         setStatus('Discogs rate limit hit — waiting 60s...', true);
-        await new Promise(r => setTimeout(r, 60000));
+        await sleep(60000);
         const retry = await fetch(url.toString(), { method: job.method });
         if (!retry.ok) throw new Error(`Discogs HTTP ${retry.status}`);
         job.resolve(await retry.json().catch(() => ({})));
@@ -1237,6 +1267,29 @@
     }
   }
 
+  window.testGeminiKey = async function() {
+    saveSettings(true);
+    const badge = document.getElementById('geminiStatusBadge');
+    if (!cfg.geminiKey) {
+      badge.style.color = 'var(--red)';
+      badge.textContent = '❌ Paste key first';
+      toast('Paste your Gemini API Key first');
+      return;
+    }
+    badge.style.color = 'var(--muted)';
+    badge.textContent = 'Testing...';
+    try {
+      await callGeminiJSON([{ text: 'Return ONLY valid JSON: {"ok": true}' }]);
+      badge.style.color = 'var(--green)';
+      badge.textContent = `✅ Connected (${cfg.geminiModel})`;
+      toast(`✅ Gemini key verified (${cfg.geminiModel})!`);
+    } catch (err) {
+      badge.style.color = 'var(--red)';
+      badge.textContent = '❌ Key / model error';
+      toast('Gemini test failed: ' + err.message, 5000);
+    }
+  };
+
   async function runGeminiVision() {
     setStatus('Reading cover, artist, title & catalog # with Gemini...', true);
     const fmtHint = activeFormat === 'Auto' ? 'Auto-detect whether Cassette, CD, or Vinyl' : `User selected format: ${activeFormat}`;
@@ -1335,7 +1388,6 @@ Return ONLY valid JSON with these exact keys:
     };
 
     try {
-      // Tier 1: Barcode or Raw Cat#
       if (barcode) {
         addResults(await discogsFetch('/database/search', { type: 'release', barcode, format, per_page: 10 }), 'barcode');
       }
@@ -1343,11 +1395,9 @@ Return ONLY valid JSON with these exact keys:
         addResults(await discogsFetch('/database/search', { type: 'release', catno, format, per_page: 10 }), 'catno');
       }
 
-      // Check whether Tier 1 actually matches the extracted Artist/Title (prevents PB2126 false collisions!)
       let bestSim = 0;
       pool.forEach(item => { bestSim = Math.max(bestSim, scoreItem(item).sim); });
 
-      // Tier 2: Cleaned catalog variants if 0 results or weak title/artist match
       const variants = (currentExtracted?.cleaned_catalog_variants || []).filter(v => v && norm(v) !== norm(catno)).slice(0, 2);
       if ((pool.size === 0 || bestSim < 0.45) && variants.length) {
         for (const v of variants) {
@@ -1356,12 +1406,10 @@ Return ONLY valid JSON with these exact keys:
         pool.forEach(item => { bestSim = Math.max(bestSim, scoreItem(item).sim); });
       }
 
-      // Tier 3: Artist + Title fallback (also runs if cat# collided with a totally different album!)
       if ((pool.size === 0 || bestSim < 0.45) && (title || artist)) {
         const q = `${artist} ${title}`.trim();
         addResults(await discogsFetch('/database/search', { type: 'release', q, format, per_page: 10 }), 'text');
         if (pool.size === 0) {
-          // Broaden without format filter as last resort
           addResults(await discogsFetch('/database/search', { type: 'release', q, per_page: 8 }), 'broad');
         }
       }
@@ -1425,7 +1473,7 @@ Return ONLY valid JSON with these exact keys:
       try {
         suggestions = await discogsFetch(`/marketplace/price_suggestions/${cand.id}`);
       } catch (_) {
-        suggestions = null; // Gracefully ignore if seller settings disabled
+        suggestions = null;
       }
 
       const artistName = (release.artists || []).map(a => a.name.replace(/\s*\(\d+\)$/, '')).join(', ') ||
@@ -1541,7 +1589,6 @@ Return ONLY valid JSON with these exact keys:
       ? `<span class="badge badge-blue">#${item.discogs_id}</span>`
       : `<span class="badge badge-yellow">Unlisted</span>`;
 
-    // Alerts
     let alertsHtml = '';
     const dup = stashCache.find(s =>
       (item.discogs_id && s.discogs_id === item.discogs_id) ||
@@ -1558,13 +1605,11 @@ Return ONLY valid JSON with these exact keys:
     }
     document.getElementById('inspAlerts').innerHTML = alertsHtml;
 
-    // Metrics
     document.getElementById('mLowest').textContent = item.lowest_price !== null ? `$${Number(item.lowest_price).toFixed(2)}` : 'N/A';
     document.getElementById('mVgPlus').textContent = item.vg_plus_price !== null ? `$${Number(item.vg_plus_price).toFixed(2)}` : '—';
     document.getElementById('mForSale').textContent = item.num_for_sale !== null ? `${item.num_for_sale} listed` : '—';
     document.getElementById('mHaveWant').textContent = hasDiscogs ? `${item.have} / ${item.want}` : '—';
 
-    // External Links
     const ebayQuery = encodeURIComponent(`${item.artist} ${item.title} ${item.format} ${item.catno}`.trim());
     let links = `<a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="https://www.ebay.com/sch/i.html?_nkw=${ebayQuery}&LH_Sold=1&LH_Complete=1">💸 eBay Sold</a>`;
     if (hasDiscogs) {
@@ -1575,14 +1620,12 @@ Return ONLY valid JSON with these exact keys:
     }
     document.getElementById('inspLinks').innerHTML = links;
 
-    // Button visibility
     const saveBothBtn = document.getElementById('btnSaveBoth');
     saveBothBtn.disabled = !hasDiscogs || !cfg.discogsToken || !cfg.discogsUser;
     saveBothBtn.textContent = !hasDiscogs
       ? 'Not on Discogs (Use Save Local Only below)'
       : (!cfg.discogsUser ? 'Verify Discogs in Settings to Enable Save' : '✅ Confirm & Add to Discogs + Local Stash');
 
-    // Initial local Spotify match + tracklist render
     const localMatch = checkLocalSpotifyMatch(item);
     item.spotify_matches = localMatch;
     renderTracklist(item.tracklist, localMatch.matchedTracks);
@@ -1861,7 +1904,7 @@ Return ONLY valid JSON:
     setTimeout(() => URL.revokeObjectURL(a.href), 1500);
   }
 
-  // ==================== SPOTIFY PKCE OAUTH & 2026 SYNC ====================
+  // ==================== SPOTIFY PKCE OAUTH & UNCAPPED 2026 SYNC ====================
   function randomString(len) {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     const arr = new Uint8Array(len);
@@ -1887,7 +1930,6 @@ Return ONLY valid JSON:
       return;
     }
 
-    // If we already have a valid/refreshable token, just re-sync directly!
     if (cfg.spotifyRefreshToken) {
       const ok = await refreshSpotifyToken();
       if (ok) { await syncSpotifyLibrary(); return; }
@@ -1986,8 +2028,9 @@ Return ONLY valid JSON:
     }
     const res = await fetch(url, { headers: { Authorization: 'Bearer ' + cfg.spotifyAccessToken } });
     if (res.status === 429) {
-      const wait = (Number(res.headers.get('Retry-After')) || 3) * 1000;
-      await new Promise(r => setTimeout(r, wait));
+      const waitSec = Number(res.headers.get('Retry-After')) || 3;
+      setStatus(`Spotify rate limit — pausing ${waitSec}s...`, true);
+      await sleep(waitSec * 1000 + 250);
       return spFetch(url);
     }
     if (!res.ok) throw new Error(`Spotify HTTP ${res.status}`);
@@ -1996,7 +2039,7 @@ Return ONLY valid JSON:
 
   async function syncSpotifyLibrary() {
     switchView('settings');
-    setStatus('Syncing Spotify profile (Top Artists, Liked Songs, Playlists)...', true);
+    setStatus('Starting uncapped Spotify sync...', true);
     const artistCounts = {};
     const trackTitles = new Set();
 
@@ -2026,42 +2069,60 @@ Return ONLY valid JSON:
       const topT = await spFetch('https://api.spotify.com/v1/me/top/tracks?limit=50&time_range=long_term').catch(() => ({ items: [] }));
       (topT.items || []).forEach(t => recordTrack(t, 4));
 
-      // 3. Liked Songs (up to 1500)
+      // 3. ALL Liked Songs (no cap)
       let next = 'https://api.spotify.com/v1/me/tracks?limit=50';
-      let pages = 0;
-      while (next && pages < 30) {
-        pages++;
-        setStatus(`Syncing Spotify Liked Songs (page ${pages})...`, true);
+      let likedCount = 0;
+      while (next) {
+        setStatus(`Syncing Liked Songs (${likedCount} scanned)...`, true);
         const d = await spFetch(next);
-        (d.items || []).forEach(it => recordTrack(it.track, 2));
+        const items = d.items || [];
+        items.forEach(it => recordTrack(it.track, 2));
+        likedCount += items.length;
         next = d.next;
+        if (next) await sleep(80);
       }
 
-      // 4. Saved Albums (up to 300)
+      // 4. ALL Saved Albums (no cap)
       next = 'https://api.spotify.com/v1/me/albums?limit=50';
-      pages = 0;
-      while (next && pages < 6) {
-        pages++;
-        const d = await spFetch(next).catch(() => ({ items: [] }));
-        (d.items || []).forEach(it => {
+      let albumCount = 0;
+      while (next) {
+        setStatus(`Syncing Saved Albums (${albumCount} scanned)...`, true);
+        const d = await spFetch(next).catch(() => ({ items: [], next: null }));
+        const items = d.items || [];
+        items.forEach(it => {
           (it.album?.artists || []).forEach(a => recordArtist(a.name, 4));
           (it.album?.tracks?.items || []).forEach(t => recordTrack(t, 1));
         });
+        albumCount += items.length;
         next = d.next;
+        if (next) await sleep(80);
       }
 
-      // 5. Owned / Collaborative Playlists (2026 API uses /playlists/{id}/items & entry.item)
-      const pls = await spFetch('https://api.spotify.com/v1/me/playlists?limit=50').catch(() => ({ items: [] }));
-      const owned = (pls.items || []).filter(p => p && (p.owner?.id === me.id || p.collaborative)).slice(0, 20);
-      for (let i = 0; i < owned.length; i++) {
-        setStatus(`Syncing playlist ${i + 1}/${owned.length}: ${owned[i].name}...`, true);
-        let pNext = `https://api.spotify.com/v1/playlists/${owned[i].id}/items?limit=50`;
-        let pPages = 0;
-        while (pNext && pPages < 4) {
-          pPages++;
-          const pd = await spFetch(pNext).catch(() => ({ items: [] }));
-          (pd.items || []).forEach(entry => recordTrack(entry.item || entry.track, 1));
+      // 5. ALL Owned / Collaborative Playlists & ALL Songs inside them (no caps)
+      const ownedPlaylists = [];
+      let plUrl = 'https://api.spotify.com/v1/me/playlists?limit=50';
+      while (plUrl) {
+        setStatus(`Finding your playlists (${ownedPlaylists.length} owned)...`, true);
+        const pls = await spFetch(plUrl).catch(() => ({ items: [], next: null }));
+        (pls.items || []).forEach(p => {
+          if (p && (p.owner?.id === me.id || p.collaborative)) ownedPlaylists.push(p);
+        });
+        plUrl = pls.next;
+        if (plUrl) await sleep(80);
+      }
+
+      for (let i = 0; i < ownedPlaylists.length; i++) {
+        const pl = ownedPlaylists[i];
+        let pNext = `https://api.spotify.com/v1/playlists/${pl.id}/items?limit=50`;
+        let pTracks = 0;
+        while (pNext) {
+          setStatus(`Playlist ${i + 1}/${ownedPlaylists.length}: ${pl.name} (${pTracks} songs)...`, true);
+          const pd = await spFetch(pNext).catch(() => ({ items: [], next: null }));
+          const entries = pd.items || [];
+          entries.forEach(entry => recordTrack(entry.item || entry.track, 1));
+          pTracks += entries.length;
           pNext = pd.next;
+          if (pNext) await sleep(80);
         }
       }
 
@@ -2077,13 +2138,14 @@ Return ONLY valid JSON:
         allArtists: artistCounts,
         trackTitles: Array.from(trackTitles),
         totalTracks: trackTitles.size,
-        totalArtists: Object.keys(artistCounts).length
+        totalArtists: Object.keys(artistCounts).length,
+        totalPlaylists: ownedPlaylists.length
       };
 
       await idbPut('meta', { key: 'spotify_profile', value: spotifyProfile });
       updateSpotifyUI();
       setStatus('', false);
-      toast(`🎧 Synced ${spotifyProfile.totalTracks} tracks & ${spotifyProfile.totalArtists} artists!`);
+      toast(`🎧 Synced ${spotifyProfile.totalTracks} tracks, ${spotifyProfile.totalArtists} artists (${ownedPlaylists.length} playlists)!`, 4000);
     } catch (err) {
       setStatus('', false);
       toast('Spotify sync error: ' + err.message, 5000);
@@ -2120,16 +2182,17 @@ Return ONLY valid JSON:
     const topArtists = Object.values(artistCounts).sort((a, b) => b.count - a.count).slice(0, 120).map(x => x.name);
     spotifyProfile = {
       syncedAt: Date.now(),
-      userDisplayName: 'Exportify CSV',
+      userDisplayName: spotifyProfile?.userDisplayName || 'Exportify CSV',
       topArtists,
       allArtists: artistCounts,
       trackTitles: Array.from(trackSet),
       totalTracks: trackSet.size,
-      totalArtists: Object.keys(artistCounts).length
+      totalArtists: Object.keys(artistCounts).length,
+      totalPlaylists: spotifyProfile?.totalPlaylists || 0
     };
     await idbPut('meta', { key: 'spotify_profile', value: spotifyProfile });
     updateSpotifyUI();
-    toast(`Imported ${spotifyProfile.totalTracks} tracks & ${spotifyProfile.totalArtists} artists!`);
+    toast(`Merged! Total: ${spotifyProfile.totalTracks} tracks & ${spotifyProfile.totalArtists} artists.`);
   };
 
   function parseCSV(text) {
@@ -2162,7 +2225,8 @@ Return ONLY valid JSON:
     if (spotifyProfile) {
       pill.textContent = `Spotify: ${spotifyProfile.totalArtists} art`;
       pill.className = 'pill ok';
-      summary.textContent = `✅ Synced (${spotifyProfile.userDisplayName}): ${spotifyProfile.totalTracks} tracks · ${spotifyProfile.totalArtists} artists (${new Date(spotifyProfile.syncedAt).toLocaleDateString()})`;
+      const plTxt = spotifyProfile.totalPlaylists ? ` · ${spotifyProfile.totalPlaylists} playlists` : '';
+      summary.textContent = `✅ Synced (${spotifyProfile.userDisplayName}): ${spotifyProfile.totalTracks} tracks · ${spotifyProfile.totalArtists} artists${plTxt} (${new Date(spotifyProfile.syncedAt).toLocaleDateString()})`;
     } else {
       pill.textContent = 'Spotify: Off';
       pill.className = 'pill';
@@ -2196,12 +2260,12 @@ Return ONLY valid JSON:
       const id = await discogsFetch('/oauth/identity');
       cfg.discogsUser = id.username;
       const fRes = await discogsFetch(`/users/${encodeURIComponent(id.username)}/collection/folders`);
-      cfg.discogsFolders = (fRes.folders || []).filter(f => f.id !== 0); // Exclude virtual "All" folder
+      cfg.discogsFolders = (fRes.folders || []).filter(f => f.id !== 0);
       if (!cfg.discogsFolders.length) cfg.discogsFolders = [{ id: 1, name: 'Uncategorized' }];
       populateFolders();
       persistCfg();
       setStatus('', false);
-      toast(`✅ Connected as ${id.username}`);
+      toast(`✅ Connected as ${id.username} (${cfg.discogsFolders.length} folder(s))`);
     } catch (err) {
       setStatus('', false);
       toast('Discogs verify failed: ' + err.message, 4000);
@@ -2214,6 +2278,7 @@ Return ONLY valid JSON:
       `<option value="${f.id}">${esc(f.name)} (${f.count ?? 0})</option>`
     ).join('');
     sel.value = cfg.discogsFolderId || '1';
+    if (!sel.value && sel.options.length) sel.selectedIndex = 0;
     document.getElementById('discogsUserBadge').textContent = cfg.discogsUser ? `Connected: @${cfg.discogsUser}` : '';
   }
 
@@ -2233,7 +2298,6 @@ Return ONLY valid JSON:
     const spRec = await idbGet('meta', 'spotify_profile');
     if (spRec?.value) spotifyProfile = spRec.value;
 
-    // Populate settings inputs
     document.getElementById('cfgGeminiKey').value = cfg.geminiKey || '';
     document.getElementById('cfgGeminiModel').value = cfg.geminiModel || 'gemini-3.5-flash-lite';
     document.getElementById('cfgDiscogsToken').value = cfg.discogsToken || '';
@@ -2246,7 +2310,6 @@ Return ONLY valid JSON:
     updateSpotifyUI();
     persistCfg();
 
-    // Format toggle
     document.querySelectorAll('#formatSeg .seg-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         document.querySelectorAll('#formatSeg .seg-btn').forEach(b => b.classList.remove('active'));
@@ -2255,7 +2318,6 @@ Return ONLY valid JSON:
       });
     });
 
-    // Stash filter chips
     document.querySelectorAll('#stashFilters .chip').forEach(ch => {
       ch.addEventListener('click', () => {
         document.querySelectorAll('#stashFilters .chip').forEach(c => c.classList.remove('active'));
@@ -2265,11 +2327,9 @@ Return ONLY valid JSON:
       });
     });
 
-    // Camera inputs
     document.getElementById('camPrimary').addEventListener('change', (e) => handlePhotoCapture(e.target.files[0], false));
     document.getElementById('camExtra').addEventListener('change', (e) => handlePhotoCapture(e.target.files[0], true));
 
-    // Check Spotify OAuth redirect return
     await handleSpotifyCallback();
   }
 
