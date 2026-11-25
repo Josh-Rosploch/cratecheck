@@ -40,8 +40,10 @@
   let scanRunId = 0;
   let clipReqId = 0;
   let activeRecognition = null;
+  let pendingRetryFn = null;
+  let pendingVoiceRetry = null; // { source, spoken, btnId }
 
-  // ==================== UI HELPERS ====================
+  // ==================== UI HELPERS & RETRY BANNER ====================
   function toast(msg, ms = 2800) {
     const el = document.getElementById('toast');
     el.textContent = msg;
@@ -51,14 +53,36 @@
   }
 
   function setStatus(text, show = true) {
-    document.getElementById('statusText').textContent = text;
-    document.getElementById('statusBanner').classList.toggle('show', show);
+    pendingRetryFn = null;
+    const banner = document.getElementById('statusBanner');
+    banner.style.borderColor = '';
+    banner.innerHTML = `<div class="spinner"></div><div id="statusText">${esc(text)}</div>`;
+    banner.classList.toggle('show', show);
     const st = document.getElementById('settingsStatusBanner');
     if (st) {
       document.getElementById('settingsStatusText').textContent = text;
       st.classList.toggle('show', show);
     }
   }
+
+  function showRetryBanner(msg, retryFn) {
+    pendingRetryFn = retryFn;
+    const banner = document.getElementById('statusBanner');
+    banner.style.borderColor = 'var(--yellow)';
+    banner.innerHTML = `
+      <div style="flex:1; font-size:0.85rem; color:#fde68a;">⚠️ ${esc(msg)}</div>
+      <button type="button" class="btn btn-sm" style="flex:0 0 auto;" onclick="triggerPendingRetry()">🔄 Tap to Retry</button>
+    `;
+    banner.classList.add('show');
+  }
+
+  window.triggerPendingRetry = () => {
+    if (typeof pendingRetryFn === 'function') {
+      const fn = pendingRetryFn;
+      pendingRetryFn = null;
+      fn();
+    }
+  };
 
   function updateRatePill(count = CC.getRateCount()) {
     const pill = document.getElementById('ratePill');
@@ -112,6 +136,7 @@
   // ==================== NAVIGATION & ANDROID BACK GESTURE ====================
   function hideStashDetailUI() {
     activeStashItem = null;
+    pendingVoiceRetry = null;
     document.getElementById('stashDetailModal').classList.add('hidden');
   }
 
@@ -162,11 +187,20 @@
     }
   });
 
-  // ==================== 1-TAP AI VOICE RE-GRADE ====================
+  // ==================== 1-TAP AI VOICE RE-GRADE (WITH RETRY MEMORY) ====================
   const VOICE_BTN_IDLE = "🎤 Don't Agree? AI Voice Re-Grade";
 
   window.voiceRegrade = (source, btnId) => {
     if (!cfg.geminiKey) { toast('Add your Gemini API Key in Settings first'); return; }
+
+    // If last voice re-grade failed on Gemini 503, tapping retries without re-speaking!
+    if (pendingVoiceRetry && pendingVoiceRetry.source === source && pendingVoiceRetry.btnId === btnId) {
+      const saved = pendingVoiceRetry;
+      pendingVoiceRetry = null;
+      regradeWithAI(saved.source, saved.spoken, saved.btnId);
+      return;
+    }
+
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
       toast('Voice mic not supported in this browser — use Chrome on Android!', 3800);
@@ -273,6 +307,7 @@ Return ONLY valid JSON:
 
     try {
       const res = await CC.callGeminiJSON(parts, 'MEDIUM');
+      pendingVoiceRetry = null;
       const newMedia = normalizeGrade(res.media_condition, MEDIA_GRADES, mediaEl.value);
       const newSleeve = normalizeGrade(res.sleeve_condition, SLEEVE_GRADES, sleeveEl.value);
       mediaEl.value = newMedia;
@@ -285,11 +320,17 @@ Return ONLY valid JSON:
 
       const hint = !isStash ? document.getElementById('aiGradeHint') : null;
       if (hint) hint.textContent = '✅ Voice Re-Graded';
+      setStatus('', false);
       toast(`✅ Re-graded: ${shortGrade(newMedia)} / ${shortGrade(newSleeve)}`, 3400);
-    } catch (err) {
-      toast('Re-grade error: ' + err.message, 4000);
-    } finally {
       if (btn) { btn.disabled = false; btn.textContent = VOICE_BTN_IDLE; }
+    } catch (err) {
+      setStatus('', false);
+      pendingVoiceRetry = { source, spoken: spokenDescription, btnId };
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '🔄 Gemini Busy (3/3) — Tap to Retry Re-Grade';
+      }
+      toast(err.message, 4500);
     }
   }
 
@@ -554,6 +595,7 @@ Return ONLY valid JSON:
     const myRunId = scanRunId;
     stopHighlightAudio();
     unlockAudioForAutoplay(false);
+    pendingVoiceRetry = null;
 
     document.getElementById('inspectorCard').classList.add('hidden');
     document.getElementById('detectiveCard').classList.add('hidden');
@@ -573,6 +615,8 @@ Return ONLY valid JSON:
     const fmtHint = activeFormat === 'Auto' ? 'Auto-detect Cassette, CD, or Vinyl' : `User selected format: ${activeFormat}`;
     const upcHint = stagedUpc ? `User also scanned UPC barcode: ${stagedUpc}.` : '';
     const prompt = `You are a physical music media OCR, Discogs pressing-ID, and strict Goldmine/Discogs visual grading expert. Inspect ALL attached photos carefully (often Photo 1 = Front/Side A, Photo 2 = Back/Side B). ${fmtHint}. ${upcHint}
+
+OCR NOTE: Ignore non-catalog manufacturing/tax/standard codes (such as Dolby, HX Pro, TSE, TS-2240, KTB, JASRAC, GEMA, BIEM) when extracting "raw_catalog_number".
 
 STRICT DISCOGS SELLER GRADING RULES (Be brutally honest and conservative — never over-grade!):
 1. FIRST scan every square inch of the photo(s) for flaws and list every single one in "media_defects" and "sleeve_defects": scratches, scuffs, peeling/bubbling/warped/stained labels, faded ink, yellowing, cracks, paint/ink/water stains, creases, rips, stickers, missing felt pressure pad, or dirty/cloudy plastic.
@@ -594,7 +638,7 @@ STRICT DISCOGS SELLER GRADING RULES (Be brutally honest and conservative — nev
 Return ONLY valid JSON (list defects BEFORE grades):
 {
   "detected_format": "Cassette" | "CD" | "Vinyl",
-  "raw_catalog_number": "exact catalog code printed on shell/spine/disc, or empty string",
+  "raw_catalog_number": "exact record-label catalog code printed on shell/spine/disc, or empty string",
   "cleaned_catalog_variants": ["catalog variations stripping hyphens/spaces/price prefixes"],
   "barcode": "digits only UPC/EAN if visible, else empty string",
   "album_title": "album or release title",
@@ -641,8 +685,12 @@ Return ONLY valid JSON (list defects BEFORE grades):
       speakText(`${ext.artists?.[0] || ''} ${ext.album_title || ''}`);
       return true;
     } catch (err) {
-      setStatus('', false);
-      toast('Gemini error: ' + err.message, 4000);
+      if (err.isRetryable) {
+        showRetryBanner(err.message, () => runFullScan());
+      } else {
+        setStatus('', false);
+        toast('Gemini error: ' + err.message, 4500);
+      }
       return false;
     }
   }
@@ -657,6 +705,7 @@ Return ONLY valid JSON (list defects BEFORE grades):
     if (c.includes('germany')) return 'Germany';
     if (c.includes('japan')) return 'Japan';
     if (c.includes('europe')) return 'Europe';
+    if (c.includes('turkey') || c.includes('türkiye') || c.includes('istanbul')) return 'Turkey';
     return '';
   }
 
@@ -1180,6 +1229,9 @@ Return ONLY valid JSON:
     document.getElementById('gNotes').value = item.condition_note || '';
     document.getElementById('aiGradeHint').textContent = stagedPhotos.length ? `AI Graded (${stagedPhotos.length} photo${stagedPhotos.length > 1 ? 's' : ''})` : 'Manual Grade';
 
+    const vBtn = document.getElementById('btnVoiceRegradeScan');
+    if (vBtn) { vBtn.disabled = false; vBtn.textContent = VOICE_BTN_IDLE; }
+
     const btnWrong = document.getElementById('btnWrongPressing');
     if (currentCandidates.length > 1) {
       btnWrong.classList.remove('hidden');
@@ -1371,6 +1423,13 @@ Return ONLY valid JSON:
     }
   }
 
+  window.retryCurrentTaste = () => {
+    if (!currentInspected) return;
+    document.getElementById('tasteScore').textContent = '...';
+    document.getElementById('tasteBody').textContent = 'Retrying Taste & Cultural Check...';
+    runTasteAnalysis(currentInspected, scanRunId);
+  };
+
   async function runTasteAnalysis(item, myRunId) {
     if (!cfg.geminiKey) {
       document.getElementById('tasteScore').textContent = '—';
@@ -1378,7 +1437,7 @@ Return ONLY valid JSON:
       return;
     }
 
-    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v151`;
+    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v153`;
     if (tasteCache.has(cacheKey)) { applyTasteUI(item, tasteCache.get(cacheKey), myRunId); return; }
 
     const topArtists = (spotifyProfile?.topArtists || []).slice(0, 60).join(', ');
@@ -1421,12 +1480,18 @@ Include ALL genuinely famous/recognizable songs on the release in notable_songs 
 
     try {
       const res = await CC.callGeminiJSON([{ text: prompt }]);
+      setStatus('', false);
       tasteCache.set(cacheKey, res);
       if (myRunId !== scanRunId || currentInspected !== item) return;
       applyTasteUI(item, res, myRunId);
     } catch (err) {
-      document.getElementById('tasteScore').textContent = '?';
-      document.getElementById('tasteBody').textContent = 'Taste check error: ' + err.message;
+      setStatus('', false);
+      if (myRunId !== scanRunId || currentInspected !== item) return;
+      document.getElementById('tasteScore').textContent = '⚠️';
+      document.getElementById('tasteBody').innerHTML = `
+        <div style="margin-bottom:8px; color:#fde68a;">${esc(err.message)}</div>
+        <button type="button" class="btn btn-secondary btn-sm" onclick="retryCurrentTaste()">🔄 Tap to Retry Taste Check</button>
+      `;
     }
   }
 
@@ -1492,6 +1557,8 @@ Include ALL genuinely famous/recognizable songs on the release in notable_songs 
   window.resetScanner = () => {
     scanRunId++;
     stopHighlightAudio();
+    setStatus('', false);
+    pendingVoiceRetry = null;
     stagedPhotos = [];
     stagedUpc = '';
     currentExtracted = null;
@@ -1568,6 +1635,7 @@ Include ALL genuinely famous/recognizable songs on the release in notable_songs 
     const it = stashCache.find(x => x.id === id);
     if (!it) return;
     activeStashItem = it;
+    pendingVoiceRetry = null;
 
     if (!fromPop) {
       try {
@@ -1811,8 +1879,10 @@ Include ALL genuinely famous/recognizable songs on the release in notable_songs 
     try {
       await CC.callGeminiJSON([{ text: 'Return ONLY valid JSON: {"ok": true}' }]);
       badge.style.color = 'var(--green)'; badge.textContent = `✅ Connected (${cfg.geminiModel})`;
+      setStatus('', false);
       toast('✅ Gemini key verified!');
     } catch (err) {
+      setStatus('', false);
       badge.style.color = 'var(--red)'; badge.textContent = '❌ Error';
       toast('Gemini test failed: ' + err.message, 5000);
     }

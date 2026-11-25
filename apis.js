@@ -204,10 +204,11 @@
     return okCount;
   };
 
-  // ==================== GEMINI API (WITH THINKING LEVEL + AUTO FALLBACK) ====================
+  // ==================== GEMINI API (3x AUTO-RETRY ON 503 + THINKING FALLBACK) ====================
   CC.callGeminiJSON = async (parts, thinkingLevel = null) => {
     const model = (CC.cfg.geminiModel || 'gemini-3.5-flash-lite').trim();
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(CC.cfg.geminiKey.trim())}`;
+
     const send = (useThinking) => {
       const genCfg = { responseMimeType: 'application/json', temperature: 0.1 };
       if (useThinking && thinkingLevel) genCfg.thinkingConfig = { thinkingLevel };
@@ -218,21 +219,64 @@
       });
     };
 
-    let res = await send(true);
-    if (res.status === 400 && thinkingLevel) res = await send(false);
-    if (!res.ok) {
-      const t = await res.text().catch(() => '');
-      throw new Error(`Gemini HTTP ${res.status}: ${t.slice(0, 140)}`);
+    const maxAttempts = 3;
+    const retryDelays = [2500, 4500];
+    let lastStatus = 0;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let res = null;
+      try {
+        res = await send(true);
+        if (res.status === 400 && thinkingLevel) res = await send(false);
+      } catch (netErr) {
+        if (attempt < maxAttempts) {
+          statusCb(`Connection hiccup — retrying (${attempt + 1}/${maxAttempts})...`, true);
+          await CC.sleep(retryDelays[attempt - 1]);
+          continue;
+        }
+        const e = new Error('Network error after 3/3 tries — check signal & tap Retry.');
+        e.isRetryable = true;
+        throw e;
+      }
+
+      lastStatus = res.status;
+
+      // Transient Gemini server overload (503 / 502 / 504 / 500) -> auto-retry up to 3x
+      if ([500, 502, 503, 504].includes(res.status)) {
+        if (attempt < maxAttempts) {
+          const sec = (retryDelays[attempt - 1] / 1000).toFixed(1).replace(/\.0$/, '');
+          statusCb(`Gemini busy (${res.status}) — retrying (${attempt + 1}/${maxAttempts}) in ${sec}s...`, true);
+          await CC.sleep(retryDelays[attempt - 1]);
+          continue;
+        }
+        const e = new Error(`Gemini still busy after 3/3 tries (HTTP ${res.status}) — wait a moment & tap Retry.`);
+        e.isRetryable = true;
+        e.status = res.status;
+        throw e;
+      }
+
+      if (!res.ok) {
+        const t = await res.text().catch(() => '');
+        const e = new Error(`Gemini HTTP ${res.status}: ${t.slice(0, 140)}`);
+        e.status = res.status;
+        e.isRetryable = res.status === 429;
+        throw e;
+      }
+
+      const data = await res.json();
+      const raw = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+      const cleaned = raw.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+      try { return JSON.parse(cleaned); }
+      catch (_) {
+        const m = cleaned.match(/\{[\s\S]*\}/);
+        if (m) return JSON.parse(m[0]);
+        throw new Error('Could not parse Gemini JSON');
+      }
     }
-    const data = await res.json();
-    const raw = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
-    const cleaned = raw.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
-    try { return JSON.parse(cleaned); }
-    catch (_) {
-      const m = cleaned.match(/\{[\s\S]*\}/);
-      if (m) return JSON.parse(m[0]);
-      throw new Error('Could not parse Gemini JSON');
-    }
+
+    const e = new Error(`Gemini busy after 3/3 tries (HTTP ${lastStatus}) — wait a moment & tap Retry.`);
+    e.isRetryable = true;
+    throw e;
   };
 
   // ==================== REMIX/VERSION-AWARE 30s AUDIO HIGHLIGHT FETCHER ====================
@@ -243,7 +287,6 @@
     if (parens) parens.forEach(p => parts.push(p.slice(1, -1).trim()));
     let base = str.replace(/[\(\[][^\)\]]*[\)\]]/g, '').trim();
 
-    // Also catch trailing "- Mad Cow Mix" / "- Radio Version"
     const dashMatch = base.match(/^(.*?)\s+[-–—]\s+(.*\b(?:mix|remix|version|edit|dub|extended|radio|club|instrumental|acoustic|live|remaster\w*)\b.*)$/i);
     if (dashMatch) {
       base = dashMatch[1].trim();
@@ -276,7 +319,6 @@
         const candV = CC.normFull(cand.version || '');
         const vSim = Math.max(CC.simFull(req.version, cand.version || ''), CC.simFull(req.version, candTrack || ''));
 
-        // Check specific distinctive words (ignore generic words like mix/version/remix)
         const stop = new Set(['mix', 'remix', 'version', 'edit', 'the', 'and', 'original', 'single']);
         const reqDistinct = reqV.split(' ').filter(w => w.length > 2 && !stop.has(w));
         const distinctHits = reqDistinct.filter(w => candFull.includes(w)).length;
@@ -289,11 +331,9 @@
           score += 0.30;
           versionMatched = candV.includes('radio');
         } else if (candV && /remix|mix|line dance|dub|club|extended|karaoke/i.test(candV)) {
-          // Different remix than what was asked for -> penalize so real match wins
           score -= 0.22;
         }
       } else {
-        // User asked for standard album track (no remix requested) -> prefer non-remix original
         if (cand.version && /remix|line dance|dub|club mix|extended|karaoke|instrumental/i.test(cand.version)) {
           score -= 0.20;
         } else {
@@ -395,7 +435,6 @@
       if (cand.exactVersion === bestOverall.exactVersion && cand.score > bestOverall.score) bestOverall = cand;
     };
 
-    // Pass 1: Specific version/remix query on Apple & (if needed) Deezer
     const firstQ = queries[0];
     consider(await queryApple(firstQ, artist, rawTrack, album, strictTrack));
     if (bestOverall?.exactVersion) return bestOverall;
@@ -403,7 +442,6 @@
     consider(await queryDeezerJSONP(firstQ, artist, rawTrack, album, strictTrack));
     if (bestOverall?.exactVersion) return bestOverall;
 
-    // Pass 2: Base track fallback if exact cassette-only mix wasn't found
     if (queries.length > 1) {
       consider(await queryApple(queries[1], artist, rawTrack, album, strictTrack));
       if (bestOverall?.exactVersion) return bestOverall;
