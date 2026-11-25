@@ -412,19 +412,33 @@
     activeAiCtrl = ctrl;
     const signal = ctrl.signal;
 
-    const send = (useThinking, useMediaRes) => {
+    const send = (useThinking, resMode) => {
       const genCfg = { temperature: 0.1 };
       if (expectJSON) genCfg.responseMimeType = 'application/json';
       if (maxOutputTokens) genCfg.maxOutputTokens = maxOutputTokens;
-      if (useMediaRes && mediaResolution) genCfg.mediaResolution = mediaResolution;
       if (useThinking && thinkingLevel) genCfg.thinkingConfig = { thinkingLevel };
+
+      let reqParts = parts;
+      if (resMode === 'per_part_ultra') {
+        reqParts = parts.map(p => (p && p.inline_data)
+          ? { ...p, mediaResolution: { level: 'MEDIA_RESOLUTION_ULTRA_HIGH' } }
+          : p
+        );
+      } else if (resMode === 'global_high') {
+        genCfg.mediaResolution = 'MEDIA_RESOLUTION_HIGH';
+      } else if (resMode === 'global_opt' && mediaResolution) {
+        genCfg.mediaResolution = mediaResolution;
+      }
+
       return fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents: [{ parts }], generationConfig: genCfg }),
+        body: JSON.stringify({ contents: [{ parts: reqParts }], generationConfig: genCfg }),
         signal
       });
     };
+
+    const isUltra = mediaResolution === 'MEDIA_RESOLUTION_ULTRA_HIGH';
 
     let attempt = 0;
     try {
@@ -433,9 +447,21 @@
         attempt++;
         let res = null;
         try {
-          res = await send(true, true);
-          if (res.status === 400 && mediaResolution) res = await send(true, false);
-          if (res.status === 400 && thinkingLevel) res = await send(false, false);
+          if (isUltra) {
+            // Clean 4-step 400 cascade:
+            // 1) Per-part ULTRA_HIGH + thinking -> 2) Global HIGH + thinking -> 3) No mediaResolution + thinking -> 4) No mediaResolution + no thinking
+            res = await send(true, 'per_part_ultra');
+            if (res.status === 400) res = await send(true, 'global_high');
+            if (res.status === 400) res = await send(true, 'none');
+            if (res.status === 400 && thinkingLevel) res = await send(false, 'none');
+          } else if (mediaResolution) {
+            res = await send(true, 'global_opt');
+            if (res.status === 400) res = await send(true, 'none');
+            if (res.status === 400 && thinkingLevel) res = await send(false, 'none');
+          } else {
+            res = await send(true, 'none');
+            if (res.status === 400 && thinkingLevel) res = await send(false, 'none');
+          }
         } catch (netErr) {
           if (netErr.name === 'AbortError' || signal.aborted) throw new DOMException('Cancelled by user', 'AbortError');
           statusCb(`${retryLabel}: connection hiccup — retrying in 5s (try #${attempt + 1})...`, true, { cancellable: true });

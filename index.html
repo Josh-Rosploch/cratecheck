@@ -7,12 +7,12 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>CrateCheck — Media Scanner</title>
-  <link rel="stylesheet" href="style.css?v=1.9" />
+  <link rel="stylesheet" href="style.css?v=1.9.1" />
 </head>
 <body>
 
 <header>
-  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.9</span></div>
+  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.9.1</span></div>
   <div class="status-pills">
     <span id="aiPill" class="pill" title="Gemini Cloud AI status" onclick="switchView('settings')">Gemini: Off</span>
     <span id="ratePill" class="pill" title="Discogs API sliding window (max 58/min)">API 0/58</span>
@@ -147,6 +147,7 @@
         <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap;">
           <h2 style="margin:0;">📚 Pull List (<span id="pileCount">0</span>)</h2>
           <div class="inline-actions" style="gap:6px;">
+            <button id="btnPileRetryTaste" type="button" class="btn btn-purple btn-sm hidden" style="min-height:30px; padding:4px 10px;" onclick="retryPileTasteScoring()">🔄 Retry Taste</button>
             <button id="btnPileCheckPrices" type="button" class="btn btn-secondary btn-sm" style="min-height:30px; padding:4px 10px;" onclick="fetchAllPilePrices()">💰 Check Prices</button>
             <span class="badge badge-yellow" style="margin:0;">Tap to Spotlight</span>
           </div>
@@ -720,7 +721,7 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="apis.js?v=1.9"></script>
-<script src="app.js?v=1.9"></script>
+<script src="apis.js?v=1.9.1"></script>
+<script src="app.js?v=1.9.1"></script>
 </body>
 </html>

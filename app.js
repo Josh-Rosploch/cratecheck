@@ -432,14 +432,94 @@
     return canvasToDataUrl(c, mime, quality);
   }
 
+  async function readJpegDimensions(blob) {
+    if (!blob || typeof blob.slice !== 'function') return null;
+    const buf = await blob.slice(0, 131072).arrayBuffer();
+    const view = new DataView(buf);
+    const len = view.byteLength;
+    if (len < 4 || view.getUint16(0, false) !== 0xFFD8) return null;
+
+    let orientation = 1;
+    let offset = 2;
+
+    while (offset + 4 <= len) {
+      while (offset < len && view.getUint8(offset) === 0xFF) offset++;
+      if (offset >= len) break;
+      const marker = view.getUint8(offset++);
+
+      // Standalone markers without length
+      if (marker === 0xD9 || marker === 0xDA) break;
+      if (marker === 0x01 || (marker >= 0xD0 && marker <= 0xD8)) continue;
+      if (offset + 2 > len) break;
+
+      const segLen = view.getUint16(offset, false);
+      if (segLen < 2 || offset + segLen > len) break;
+
+      // APP1 EXIF orientation check (handles rotated phone/Sony JPEGs accurately)
+      if (marker === 0xE1 && segLen >= 16 && offset + 8 <= len) {
+        if (view.getUint32(offset + 2, false) === 0x45786966 && view.getUint16(offset + 6, false) === 0x0000) {
+          const tiffStart = offset + 8;
+          if (tiffStart + 8 <= len) {
+            const little = view.getUint16(tiffStart, false) === 0x4949;
+            const firstIfd = view.getUint32(tiffStart + 4, little);
+            const ifdOff = tiffStart + firstIfd;
+            if (ifdOff + 2 <= len) {
+              const entries = view.getUint16(ifdOff, little);
+              for (let i = 0; i < entries; i++) {
+                const eOff = ifdOff + 2 + i * 12;
+                if (eOff + 12 > len) break;
+                if (view.getUint16(eOff, little) === 0x0112) {
+                  orientation = view.getUint16(eOff + 8, little);
+                  break;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // SOF0..SOF3, SOF5..SOF7, SOF9..SOF11, SOF13..SOF15
+      const isSof = (marker >= 0xC0 && marker <= 0xC3) ||
+                    (marker >= 0xC5 && marker <= 0xC7) ||
+                    (marker >= 0xC9 && marker <= 0xCB) ||
+                    (marker >= 0xCD && marker <= 0xCF);
+      if (isSof && offset + 7 <= len) {
+        let height = view.getUint16(offset + 3, false);
+        let width = view.getUint16(offset + 5, false);
+        if (width > 0 && height > 0) {
+          if (orientation >= 5 && orientation <= 8) return { width: height, height: width };
+          return { width, height };
+        }
+        return null;
+      }
+
+      offset += segLen;
+    }
+    return null;
+  }
+
   async function decodeViaImageBitmap(blob, opts) {
     const { aiMaxDim, aiQuality, saveMaxDim, saveQuality } = opts;
+    const dims = await readJpegDimensions(blob).catch(() => null);
+    const isLargeFile = (blob.size || 0) > 3.5 * 1024 * 1024;
+
     let probe = null;
-    try {
-      probe = await createImageBitmap(blob);
-    } catch (_) {
-      // High-MP (e.g. 24MP–61MP Sony) fallback: resize directly during decode to avoid OOM
+    if (dims && (dims.width > aiMaxDim || dims.height > aiMaxDim)) {
+      const target = fitDims(dims.width, dims.height, aiMaxDim);
+      probe = await createImageBitmap(blob, {
+        resizeWidth: target.width,
+        resizeHeight: target.height,
+        resizeQuality: 'high'
+      });
+    } else if (!dims && isLargeFile) {
+      // Avoid allocating a full 24MP–61MP bitmap in mobile Chrome RAM when dimensions weren't parsed
       probe = await createImageBitmap(blob, { resizeWidth: aiMaxDim, resizeQuality: 'high' });
+    } else {
+      try {
+        probe = await createImageBitmap(blob);
+      } catch (_) {
+        probe = await createImageBitmap(blob, { resizeWidth: aiMaxDim, resizeQuality: 'high' });
+      }
     }
 
     try {
@@ -2357,13 +2437,12 @@ Return ONLY valid JSON:
       return;
     }
 
-    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v19`;
+    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v191`;
     if (tasteCache.has(cacheKey)) { applyTasteUI(item, tasteCache.get(cacheKey), myRunId); return; }
 
     const tracksStr = (item.tracklist || []).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title).join('; ');
     const dna = spotifyProfile?.tasteDna || '';
     const softSpots = spotifyProfile?.softSpots || '';
-    const fallbackTop = !dna && spotifyProfile ? (spotifyProfile.topArtists || []).slice(0, 200).join(', ') : '';
 
     const prompt = `Evaluate this physical music release strictly against the user's musical taste profile and provide brief musical/pop-culture context. Speak directly to "you".
 
@@ -2374,7 +2453,7 @@ Exact Local Matches Across ALL ${spotifyProfile?.totalTracks || 0} Spotify Track
 - Exact / Matching Songs Already in Library: ${item.spotify_matches.matchedTracks.join(', ') || 'None'}
 
 User's Taste Profile:
-${dna || (fallbackTop ? `Top Spotify artists: ${fallbackTop}` : 'No written Taste Profile yet.')}
+${dna || 'No written Taste Profile yet.'}
 
 User's Explicit Soft Spots & Niche Pockets (FIRST-CLASS WEIGHT — treat these with EQUAL importance to Core Obsessions so smaller 5–15 song favorite pockets are NEVER averaged out of a large library):
 ${softSpots || 'None specified yet.'}
@@ -2525,6 +2604,8 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
     let panOriginTx = 0;
     let panOriginTy = 0;
     let dragged = false;
+    let hadMultiTouch = false;
+    let pinDownIdx = null;
 
     function clampAndApply() {
       state.scale = Math.max(1, Math.min(6, state.scale));
@@ -2543,6 +2624,7 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
         state.ty = Math.max(-maxTy, Math.min(maxTy, state.ty));
       }
       contentEl.style.transform = `translate3d(${state.tx}px, ${state.ty}px, 0) scale(${state.scale})`;
+      contentEl.style.setProperty('--zoom-scale', state.scale.toFixed(3));
       contentEl.style.setProperty('--pin-damp', Math.pow(state.scale, 0.72).toFixed(3));
       if (labelEl) labelEl.textContent = `${Math.round(state.scale * 100)}%`;
     }
@@ -2552,16 +2634,23 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
     }
 
     viewportEl.addEventListener('pointerdown', (e) => {
-      if (e.target.closest('.pile-pin')) return;
-      viewportEl.setPointerCapture(e.pointerId);
+      try { viewportEl.setPointerCapture(e.pointerId); } catch (_) {}
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      dragged = false;
+
       if (pointers.size === 1) {
+        dragged = false;
+        hadMultiTouch = false;
+        const pinBtn = e.target.closest?.('.pile-pin');
+        const rawIdx = pinBtn?.dataset?.pileIdx;
+        pinDownIdx = rawIdx !== undefined && rawIdx !== '' ? Number(rawIdx) : null;
         panStartX = e.clientX;
         panStartY = e.clientY;
         panOriginTx = state.tx;
         panOriginTy = state.ty;
-      } else if (pointers.size === 2) {
+      } else if (pointers.size >= 2) {
+        hadMultiTouch = true;
+        dragged = true;
+        pinDownIdx = null;
         const pts = Array.from(pointers.values());
         pinchStartDist = Math.max(1, dist(pts[0], pts[1]));
         pinchStartScale = state.scale;
@@ -2572,23 +2661,26 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
       if (!pointers.has(e.pointerId)) return;
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
-      if (pointers.size === 2) {
+      if (pointers.size >= 2) {
+        hadMultiTouch = true;
         dragged = true;
         const pts = Array.from(pointers.values());
         const d = dist(pts[0], pts[1]);
         state.scale = pinchStartScale * (d / pinchStartDist);
         clampAndApply();
-      } else if (pointers.size === 1 && state.scale > 1.01) {
+      } else if (pointers.size === 1) {
         const dx = e.clientX - panStartX;
         const dy = e.clientY - panStartY;
-        if (Math.hypot(dx, dy) > 6) dragged = true;
-        state.tx = panOriginTx + dx;
-        state.ty = panOriginTy + dy;
-        clampAndApply();
+        if (Math.hypot(dx, dy) >= 8) dragged = true;
+        if (state.scale > 1.01) {
+          state.tx = panOriginTx + dx;
+          state.ty = panOriginTy + dy;
+          clampAndApply();
+        }
       }
     });
 
-    const endPtr = (e) => {
+    const releasePtr = (e) => {
       if (!pointers.has(e.pointerId)) return;
       pointers.delete(e.pointerId);
       if (pointers.size === 1) {
@@ -2597,17 +2689,25 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
         panStartY = rem.y;
         panOriginTx = state.tx;
         panOriginTy = state.ty;
+      } else if (pointers.size === 0) {
+        pinDownIdx = null;
+        hadMultiTouch = false;
       }
     };
 
     viewportEl.addEventListener('pointerup', (e) => {
-      const wasSingleTap = pointers.size === 1 && !dragged;
-      endPtr(e);
-      if (wasSingleTap && !e.target.closest('.pile-pin') && activePileIdx !== null) {
-        clearPileHighlight();
+      const wasCleanSingleTap = pointers.size === 1 && !hadMultiTouch && !dragged;
+      const tappedPinIdx = pinDownIdx;
+      releasePtr(e);
+      if (wasCleanSingleTap) {
+        if (tappedPinIdx !== null && Number.isFinite(tappedPinIdx)) {
+          selectPileItem(tappedPinIdx, true);
+        } else if (activePileIdx !== null) {
+          clearPileHighlight();
+        }
       }
     });
-    viewportEl.addEventListener('pointercancel', endPtr);
+    viewportEl.addEventListener('pointercancel', releasePtr);
 
     viewportEl.addEventListener('wheel', (e) => {
       e.preventDefault();
@@ -2925,6 +3025,26 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
     }
   };
 
+  function checkPileOwnedMatch(artist, title) {
+    const na = norm(artist);
+    const nt = norm(title);
+    if (!na || !nt) return '';
+    const key = `${na}|${nt}`;
+    const inDiscogs = Boolean(discogsCollectionIndex?.albumKeys?.[key]?.length);
+    const inStash = stashCache.some(s => norm(s.artist) === na && norm(s.title) === nt);
+    if (inDiscogs && inStash) return 'Discogs + Stash';
+    if (inDiscogs) return 'Discogs';
+    if (inStash) return 'Stash';
+    return '';
+  }
+
+  function updatePileRetryTasteBtn() {
+    const btn = document.getElementById('btnPileRetryTaste');
+    if (!btn) return;
+    const hasErr = pileResults.some(r => r.tasteStatus === 'error');
+    btn.classList.toggle('hidden', !hasErr);
+  }
+
   function renderPileOverlayInto(svgEl, pinsEl, maskId) {
     if (!svgEl || !pinsEl) return;
     const sel = (activePileIdx !== null && pileResults[activePileIdx]) ? pileResults[activePileIdx] : null;
@@ -2937,11 +3057,11 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
       if (sel.poly && sel.poly.length >= 4) {
         const ptsAttr = sel.poly.map(([y, x]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
         cutout = `<polygon points="${ptsAttr}" fill="black" />`;
-        outline = `<polygon points="${ptsAttr}" fill="none" stroke="${strokeColor}" stroke-width="6" stroke-linejoin="round" />`;
+        outline = `<polygon class="pile-spotlight-stroke" vector-effect="non-scaling-stroke" points="${ptsAttr}" fill="none" stroke="${strokeColor}" stroke-linejoin="round" />`;
       } else if (sel.point) {
         const [py, px] = sel.point;
         cutout = `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="48" fill="black" />`;
-        outline = `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="48" fill="none" stroke="${strokeColor}" stroke-width="6" />`;
+        outline = `<circle class="pile-spotlight-stroke" vector-effect="non-scaling-stroke" cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="48" fill="none" stroke="${strokeColor}" />`;
       }
       svgEl.innerHTML = `
         <defs>
@@ -2963,20 +3083,25 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
       const [py, px] = r.point;
       const cls = [
         'pile-pin',
-        r.highVal ? 'hot' : (r.taste_score >= 7 ? 'good' : ''),
+        r.highVal ? 'hot' : (r.taste_score !== null && r.taste_score >= 7 ? 'good' : (r.ownedMatch ? 'owned' : '')),
         activePileIdx === i ? 'active' : ''
       ].filter(Boolean).join(' ');
-      return `<button type="button" class="${cls}" style="left:${(px / 10).toFixed(2)}%; top:${(py / 10).toFixed(2)}%;" onclick="selectPileItem(${i}, true, event)" title="#${i + 1}: ${esc(r.artist || '')} - ${esc(r.title || '')}">${i + 1}</button>`;
+      return `<button type="button" class="${cls}" data-pile-idx="${i}" style="left:${(px / 10).toFixed(2)}%; top:${(py / 10).toFixed(2)}%;" title="#${i + 1}: ${esc(r.artist || '')} - ${esc(r.title || '')}">${i + 1}</button>`;
     }).join('');
   }
 
   function buildHighlightBarHtml(r, idx) {
     const priceSummary = formatPilePriceSummary(r);
+    const tasteSummary = r.tasteStatus === 'loading'
+      ? '⏳ Scoring taste...'
+      : r.tasteStatus === 'error'
+        ? '⚠️ Taste unavailable'
+        : `🎧 ${r.taste_score}/10`;
     return `
       <div>
         <div style="font-weight:800; font-size:0.9rem; color:#f1f5f9;">#${idx + 1}: ${esc(r.artist || '?')} — ${esc(r.title || '?')}</div>
         <div style="font-size:0.78rem; color:#cbd5e1; margin-top:2px;">
-          🎧 ${r.taste_score}/10${priceSummary ? ` · ${esc(priceSummary)}` : ''}${r.taste_reason ? ` · ${esc(r.taste_reason)}` : ''}${(!r.point && !r.poly) ? ' · (position not detected)' : ''}
+          ${tasteSummary}${r.ownedMatch ? ` · 📀 Owned (${esc(r.ownedMatch)})` : ''}${priceSummary ? ` · ${esc(priceSummary)}` : ''}${r.taste_reason ? ` · ${esc(r.taste_reason)}` : ''}${(!r.point && !r.poly) ? ' · (position not detected)' : ''}
         </div>
       </div>
       <div class="inline-actions" style="gap:6px;">
@@ -2991,6 +3116,7 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
   function renderPileUI() {
     renderPileOverlayInto(document.getElementById('pileSvg'), document.getElementById('pilePins'), 'pileMaskInline');
     renderPileOverlayInto(document.getElementById('pileFsSvg'), document.getElementById('pileFsPins'), 'pileMaskFs');
+    updatePileRetryTasteBtn();
 
     const bar = document.getElementById('pileHighlightBar');
     const fsBar = document.getElementById('pileFsHighlightBar');
@@ -3009,6 +3135,12 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
 
     const list = document.getElementById('pileResultsList');
     list.innerHTML = pileResults.map((r, i) => {
+      const tasteBadge = r.tasteStatus === 'loading'
+        ? `<span class="badge" style="background:#0d1017; color:#fde68a;">⏳ Scoring...</span>`
+        : r.tasteStatus === 'error'
+          ? `<span class="badge badge-red">⚠️ Taste failed</span>`
+          : `<span class="badge ${r.taste_score >= 7 ? 'badge-green' : r.taste_score >= 5 ? 'badge-blue' : 'badge-red'}">🎧 ${r.taste_score}/10</span>`;
+      const ownedBadge = r.ownedMatch ? `<span class="badge badge-purple">📀 Owned</span>` : '';
       const askBadge = r.roughAskVal !== null
         ? `<span class="badge ${r.highVal && r.roughVgVal === null ? 'badge-yellow' : 'badge-blue'}">~Ask: ${esc(formatMoneyWithUsd(r.roughAskVal, r.roughAskCur))}</span>`
         : '';
@@ -3034,7 +3166,8 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
             <div class="candidate-title"><span style="color:#93c5fd;">#${i + 1}</span> ${esc(r.artist || '?')} — ${esc(r.title || '?')}</div>
             <div class="candidate-sub">${esc(r.format || 'Cassette')}${r.catno ? ` · ${esc(r.catno)}` : ''}${r.taste_reason ? ` · ${esc(r.taste_reason)}` : ''}</div>
             <div>
-              <span class="badge ${r.taste_score >= 7 ? 'badge-green' : r.taste_score >= 5 ? 'badge-blue' : 'badge-red'}">🎧 ${r.taste_score}/10</span>
+              ${tasteBadge}
+              ${ownedBadge}
               ${r.localArtistHit ? `<span class="badge badge-green">In Spotify</span>` : ''}
               ${askBadge}${vgBadge}${statusBadge}${histLink}
               ${(r.roughWant > r.roughHave && r.roughWant >= 15) ? `<span class="badge badge-purple">💎 High Want (${r.roughWant})</span>` : ''}
@@ -3047,6 +3180,84 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
     }).join('');
   }
 
+  async function runPileTasteBatch(myPileRunId) {
+    if (!pileResults.length || !CC.isAiReady()) return;
+
+    pileResults.forEach(r => { r.tasteStatus = 'loading'; });
+    renderPileUI();
+
+    const dna = spotifyProfile?.tasteDna || 'No written Taste Profile yet.';
+    const softSpots = spotifyProfile?.softSpots || 'None specified';
+
+    const enrichedForPrompt = pileResults.map((x, i) => ({
+      idx: i,
+      artist: x.artist,
+      title: x.title,
+      format: x.format,
+      artist_in_spotify_library: Boolean(x.localArtistHit),
+      owned_in_collection: Boolean(x.ownedMatch)
+    }));
+
+    const tastePrompt = `Batch-score these ${pileResults.length} music releases for a collector based on their Taste Profile and explicit Soft Spots.
+
+User's Taste Profile:
+${dna}
+
+User's Explicit Soft Spots & Niche Pockets (FIRST-CLASS WEIGHT — treat these with EQUAL importance to Core Obsessions so smaller 5–15 song favorite pockets are NEVER averaged out):
+${softSpots}
+
+CRITICAL SCORING RULES:
+1. EVALUATE BOTH THE SPECIFIC ALBUM/RELEASE AND THE ARTIST: Do NOT lazily give an automatic 8–10 just because an artist appears once in Spotify! Consider the specific album's era, genre/sound, whether it is an essential studio album vs a weak late-era album, budget compilation, greatest hits, holiday, or novelty release, and how closely THAT specific release matches the user's Taste Profile and Soft Spots.
+2. Still fairly credit genuine Spotify library matches ("artist_in_spotify_library": true) and NEVER dismiss a library artist as "outside your taste" — just distinguish classic/prime releases (8–10) from weaker/mismatching releases by that artist (5–7).
+3. Treat Soft Spots & Niche Pockets as equal-weight favorites.
+
+Items:
+${JSON.stringify(enrichedForPrompt)}
+
+Return ONLY valid JSON:
+{
+  "scores": [
+    { "idx": number, "score": 1 to 10 integer, "reason": "short 6-12 word reason referencing both album and fit" }
+  ]
+}`;
+
+    try {
+      const tasteBatch = await CC.callAI([{ text: tastePrompt }], null, { retryLabel: 'Pile Taste', maxOutputTokens: 8192 });
+      if (myPileRunId !== pileRunId) return;
+
+      const selectedObj = activePileIdx !== null ? pileResults[activePileIdx] : null;
+      const scoreMap = new Map((tasteBatch.scores || []).map(s => [s.idx, s]));
+
+      pileResults.forEach((r, i) => {
+        const sc = scoreMap.get(i) || { score: 5, reason: '' };
+        r.taste_score = sc.score;
+        r.taste_reason = sc.reason;
+        r.tasteStatus = 'done';
+      });
+
+      pileResults.sort((a, b) => ((b.taste_score || 0) - (a.taste_score || 0)) || (Number(b.localArtistHit) - Number(a.localArtistHit)));
+      if (selectedObj) {
+        const nextIdx = pileResults.indexOf(selectedObj);
+        activePileIdx = nextIdx !== -1 ? nextIdx : null;
+      }
+
+      setStatus('', false);
+      renderPileUI();
+      updatePilePriceBtn();
+    } catch (err) {
+      if (myPileRunId !== pileRunId) return;
+      setStatus('', false);
+      pileResults.forEach(r => { if (r.tasteStatus === 'loading') r.tasteStatus = 'error'; });
+      renderPileUI();
+      if (err.name !== 'AbortError') toast('Taste scoring paused (' + err.message + ') — shelf pins & prices still ready!', 4500);
+    }
+  }
+
+  window.retryPileTasteScoring = () => {
+    if (!pileResults.length) return;
+    runPileTasteBatch(pileRunId);
+  };
+
   window.runPileScan = async () => {
     if (!pilePhoto) return;
     if (!CC.isAiReady()) { toast('Add your Gemini API Key in Settings first'); switchView('settings'); return; }
@@ -3058,7 +3269,7 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
     document.getElementById('pileResultsCard').classList.add('hidden');
     activePileIdx = null;
     const fmtLabel = activeFormat === 'Auto' ? 'all formats' : `${activeFormat}s only`;
-    setStatus(`📚 Step 1/2: Reading & locating ${fmtLabel} (ultra-high detail)...`, true, { cancellable: true });
+    setStatus(`📚 Reading & locating ${fmtLabel} (ultra-high detail)...`, true, { cancellable: true });
 
     const formatRule = activeFormat === 'Auto'
       ? '- Extract legible Cassettes, CDs, and Vinyl — from BOTH spines AND visible front covers/faces.'
@@ -3111,53 +3322,20 @@ Return ONLY valid JSON:
         return;
       }
 
-      setStatus(`📚 Step 2/2: Scoring ${items.length} item(s) against your Taste Profile & Soft Spots...`, true, { cancellable: true });
-      const dna = spotifyProfile?.tasteDna || (spotifyProfile?.topArtists || []).slice(0, 150).join(', ') || 'Not specified';
-      const softSpots = spotifyProfile?.softSpots || 'None specified';
-
-      const enrichedForPrompt = items.map((x, i) => {
-        const localArtistHit = Boolean(spotifyProfile && x.artist && spotifyProfile.allArtists?.[norm(x.artist)]);
-        return { idx: i, artist: x.artist, title: x.title, format: x.format, artist_in_spotify_library: localArtistHit };
-      });
-
-      const tastePrompt = `Batch-score these ${items.length} music releases for a collector based on their Taste Profile and explicit Soft Spots.
-
-User's Taste Profile:
-${dna}
-
-User's Explicit Soft Spots & Niche Pockets (FIRST-CLASS WEIGHT — treat these with EQUAL importance to Core Obsessions so smaller 5–15 song favorite pockets are NEVER averaged out):
-${softSpots}
-
-CRITICAL SCORING RULES:
-1. EVALUATE BOTH THE SPECIFIC ALBUM/RELEASE AND THE ARTIST: Do NOT lazily give an automatic 8–10 just because an artist appears once in Spotify! Consider the specific album's era, genre/sound, whether it is an essential studio album vs a weak late-era album, budget compilation, greatest hits, holiday, or novelty release, and how closely THAT specific release matches the user's Taste Profile and Soft Spots.
-2. Still fairly credit genuine Spotify library matches ("artist_in_spotify_library": true) and NEVER dismiss a library artist as "outside your taste" — just distinguish classic/prime releases (8–10) from weaker/mismatching releases by that artist (5–7).
-3. Treat Soft Spots & Niche Pockets as equal-weight favorites.
-
-Items:
-${JSON.stringify(enrichedForPrompt)}
-
-Return ONLY valid JSON:
-{
-  "scores": [
-    { "idx": number, "score": 1 to 10 integer, "reason": "short 6-12 word reason referencing both album and fit" }
-  ]
-}`;
-      const tasteBatch = await CC.callAI([{ text: tastePrompt }], null, { retryLabel: 'Pile Taste', maxOutputTokens: 8192 });
-      if (myPileRunId !== pileRunId) return;
-
-      const scoreMap = new Map((tasteBatch.scores || []).map(s => [s.idx, s]));
-
-      pileResults = items.map((it, i) => {
-        const sc = scoreMap.get(i) || { score: 5, reason: '' };
+      // PROGRESSIVE RENDERING: Show all pins, owned badges & Pull List IMMEDIATELY after OCR!
+      pileResults = items.map(it => {
         const localArtistHit = Boolean(spotifyProfile && it.artist && spotifyProfile.allArtists?.[norm(it.artist)]);
+        const ownedMatch = checkPileOwnedMatch(it.artist, it.title);
         const geom = normalizePileGeometry(it);
         return {
           ...it,
           point: geom.point,
           poly: geom.poly,
-          taste_score: sc.score,
-          taste_reason: sc.reason,
+          tasteStatus: 'loading',
+          taste_score: null,
+          taste_reason: '',
           localArtistHit,
+          ownedMatch,
           priceStatus: 'idle',
           roughId: null,
           roughHave: 0,
@@ -3173,8 +3351,6 @@ Return ONLY valid JSON:
         };
       });
 
-      pileResults.sort((a, b) => ((b.taste_score || 0) - (a.taste_score || 0)) || (Number(b.localArtistHit) - Number(a.localArtistHit)));
-
       setStatus('', false);
       document.getElementById('pileCount').textContent = pileResults.length;
       document.getElementById('pilePhotoHint').textContent = 'Pinch or use +/− to zoom · Tap any numbered pin to spotlight';
@@ -3186,6 +3362,9 @@ Return ONLY valid JSON:
       updatePilePriceBtn();
       document.getElementById('pileResultsCard').classList.remove('hidden');
       document.getElementById('pileResultsCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+      // Kick off Step 2 (Taste scoring) non-blockingly while pins & prices are already interactive
+      runPileTasteBatch(myPileRunId);
     } catch (err) {
       setStatus('', false);
       if (err.name !== 'AbortError') toast('Pile scan error: ' + err.message, 4500);
@@ -3246,7 +3425,8 @@ Return ONLY valid JSON:
   window.saveCurrentItem = async (syncToDiscogs) => {
     if (!currentInspected) return;
 
-    if (syncToDiscogs && currentInspected.is_conservative_tiebreak && !document.getElementById('chkConfirmTiebreak')?.checked) {
+    const tiebreakChecked = Boolean(document.getElementById('chkConfirmTiebreak')?.checked);
+    if (syncToDiscogs && currentInspected.is_conservative_tiebreak && !tiebreakChecked) {
       toast('Please check the confirmation box for this conservative tie-breaker pick first', 3800);
       return;
     }
@@ -3270,18 +3450,26 @@ Return ONLY valid JSON:
     let instanceId = isEditing ? (oldItem.discogs_instance_id || null) : null;
     let pendingDiscogsSync = isEditing ? Boolean(oldItem.pending_discogs_sync) : false;
     let pendingDeleteOld = isEditing ? (oldItem.pending_delete_old || null) : null;
+    let pendingFieldSync = isEditing ? Boolean(oldItem.pending_field_sync) : false;
 
     let fieldRes = { okCount: 0, failedCount: 0, errors: [] };
     let allFieldsFailed = false;
+    let sameReleaseSkippedRemote = false;
+    let sameReleaseRemoteCopies = 0;
 
     const newThumbs = stagedPhotos.map(p => p.saveWebp);
     const finalThumbs = newThumbs.length ? newThumbs : (isEditing ? (oldItem.thumbs || (oldItem.thumb_data_url ? [oldItem.thumb_data_url] : [])) : []);
 
     const buildRecord = () => {
+      const cleanInspected = { ...currentInspected };
+      delete cleanInspected._pendingDiscogsAdd;
       const rec = {
-        ...currentInspected,
+        ...cleanInspected,
+        is_conservative_tiebreak: Boolean(currentInspected.is_conservative_tiebreak),
+        tiebreak_confirmed: Boolean(!currentInspected.is_conservative_tiebreak || tiebreakChecked),
         synced_to_discogs: synced,
         pending_discogs_sync: pendingDiscogsSync,
+        pending_field_sync: pendingFieldSync,
         pending_delete_old: pendingDeleteOld,
         discogs_folder_id: synced ? folderId : null,
         discogs_instance_id: synced ? instanceId : null,
@@ -3305,34 +3493,64 @@ Return ONLY valid JSON:
           setStatus('Updating grades & notes on your existing Discogs item...', true);
           if (!instanceId) {
             const insts = await CC.findDiscogsInstances(oldItem.discogs_id);
-            if (insts.length === 1) { instanceId = insts[0].instance_id; folderId = String(insts[0].folder_id || folderId); }
+            if (insts.length === 1) {
+              instanceId = insts[0].instance_id;
+              folderId = String(insts[0].folder_id || folderId);
+            } else {
+              sameReleaseSkippedRemote = true;
+              sameReleaseRemoteCopies = insts.length;
+            }
           }
           if (instanceId) {
             fieldRes = await CC.syncDiscogsInstanceFields(folderId, currentInspected.discogs_id, instanceId, mediaCond, sleeveCond, condNote);
+            pendingFieldSync = fieldRes.failedCount > 0;
           }
           synced = true;
           pendingDiscogsSync = false;
         } else {
-          // 1. Add new verified pressing to Discogs FIRST & require a valid newInstanceId
-          folderId = cfg.discogsFolderId || '1';
-          setStatus(`Adding verified pressing #${currentInspected.discogs_id} to Discogs...`, true);
-          const addRes = await CC.discogsFetch(
-            `/users/${encodeURIComponent(cfg.discogsUser)}/collection/folders/${encodeURIComponent(folderId)}/releases/${currentInspected.discogs_id}`,
-            {},
-            'POST'
-          );
-          const newInstanceId = addRes?.instance_id || null;
-          if (!newInstanceId) {
-            throw new Error('Discogs did not return a new instance_id — old copy kept untouched');
+          // 1. Add new verified pressing to Discogs FIRST (reusing pendingCreatedInstance if a prior local save failed!)
+          const pendingAdd = currentInspected._pendingDiscogsAdd;
+          if (pendingAdd && Number(pendingAdd.discogs_id) === Number(currentInspected.discogs_id) && pendingAdd.instanceId) {
+            folderId = pendingAdd.folderId;
+            instanceId = pendingAdd.instanceId;
+            if (pendingAdd.fieldRes && pendingAdd.fieldRes.failedCount === 0) {
+              fieldRes = pendingAdd.fieldRes;
+            } else {
+              setStatus('Retrying Media/Sleeve grade & notes sync on Discogs...', true);
+              fieldRes = await CC.syncDiscogsInstanceFields(folderId, currentInspected.discogs_id, instanceId, mediaCond, sleeveCond, condNote);
+              pendingAdd.fieldRes = fieldRes;
+            }
+          } else {
+            folderId = cfg.discogsFolderId || '1';
+            setStatus(`Adding verified pressing #${currentInspected.discogs_id} to Discogs...`, true);
+            const addRes = await CC.discogsFetch(
+              `/users/${encodeURIComponent(cfg.discogsUser)}/collection/folders/${encodeURIComponent(folderId)}/releases/${currentInspected.discogs_id}`,
+              {},
+              'POST'
+            );
+            const newInstanceId = addRes?.instance_id || null;
+            if (!newInstanceId) {
+              throw new Error('Discogs did not return a new instance_id — old copy kept untouched');
+            }
+
+            instanceId = newInstanceId;
+
+            // 2. Sync Media/Sleeve/Notes fields on the new instance
+            setStatus('Saving Media/Sleeve grade & notes to Discogs...', true);
+            fieldRes = await CC.syncDiscogsInstanceFields(folderId, currentInspected.discogs_id, instanceId, mediaCond, sleeveCond, condNote);
+
+            // Cache created instance in memory so a local IDB failure never causes duplicate Discogs POSTs on retry
+            currentInspected._pendingDiscogsAdd = {
+              discogs_id: currentInspected.discogs_id,
+              folderId,
+              instanceId,
+              fieldRes
+            };
           }
 
-          instanceId = newInstanceId;
           synced = true;
           pendingDiscogsSync = false;
-
-          // 2. Sync Media/Sleeve/Notes fields on the new instance
-          setStatus('Saving Media/Sleeve grade & notes to Discogs...', true);
-          fieldRes = await CC.syncDiscogsInstanceFields(folderId, currentInspected.discogs_id, instanceId, mediaCond, sleeveCond, condNote);
+          pendingFieldSync = fieldRes.failedCount > 0;
           allFieldsFailed = fieldRes.okCount === 0 && fieldRes.failedCount > 0;
 
           if (swappedRelease) {
@@ -3361,6 +3579,7 @@ Return ONLY valid JSON:
       folderId = null;
       synced = false;
       pendingDiscogsSync = true;
+      pendingFieldSync = false;
     }
 
     // 3. IMMEDIATELY persist updated Stash record to IndexedDB BEFORE deleting any old Discogs copy
@@ -3368,9 +3587,10 @@ Return ONLY valid JSON:
     try {
       const savedKey = await CC.idbPut('stash', record);
       if (!record.id) record.id = savedKey;
+      delete currentInspected._pendingDiscogsAdd;
     } catch (err) {
       setStatus('', false);
-      toast('Local save failed: ' + err.message, 4500);
+      toast('Local save failed — tap Save again to retry locally without duplicating on Discogs: ' + err.message, 5600);
       return;
     }
 
@@ -3391,6 +3611,8 @@ Return ONLY valid JSON:
 
     if (oldDeleteWarning) {
       toast(`⚠️ ${oldDeleteWarning}`, 6000);
+    } else if (sameReleaseSkippedRemote) {
+      toast(`💾 Saved locally — found ${sameReleaseRemoteCopies} Discogs cop${sameReleaseRemoteCopies === 1 ? 'y' : 'ies'}, so remote grades were not overwritten.`, 5200);
     } else if (fieldRes.failedCount > 0) {
       toast(`⚠️ Saved to Discogs, but ${fieldRes.failedCount} field(s) failed: ${fieldRes.errors[0] || ''}`, 5200);
     } else if (isEditing) {
@@ -3557,17 +3779,22 @@ Return ONLY valid JSON:
       alerts += `<div class="alert-box alert-dup">⏳ Pressing was changed locally and is not synced to Discogs yet.${it.pending_delete_old ? ` Pushing will add #${it.discogs_id} first and then remove old #${it.pending_delete_old.releaseId}.` : ''} Tap <strong>Push to Discogs</strong> below.</div>`;
     } else if (it.synced_to_discogs && it.pending_delete_old) {
       const oldId = it.pending_delete_old.releaseId;
+      const retryLabel = it.pending_field_sync ? `🧹 Sync Grades &amp; Remove Old #${oldId}` : `🧹 Retry Removing Old #${oldId}`;
       alerts += `<div class="alert-box alert-dup">
-        <div>⚠️ Old pressing #${oldId} was kept on Discogs (${it.pending_delete_old.ambiguous ? `multiple copies found — remove manually on Discogs` : `removal pending`}).</div>
+        <div>⚠️ Old pressing #${oldId} was kept on Discogs (${it.pending_delete_old.ambiguous ? `multiple copies found — remove manually on Discogs` : (it.pending_field_sync ? `new copy grades failed to sync first` : `removal pending`)}).</div>
         <div class="inline-actions" style="margin-top:8px;">
-          ${!it.pending_delete_old.ambiguous ? `<button type="button" class="btn btn-sm" onclick="retryRemoveOldDiscogsCopy(${it.id})">🧹 Retry Removing Old #${oldId}</button>` : ''}
+          ${!it.pending_delete_old.ambiguous ? `<button type="button" class="btn btn-sm" onclick="retryRemoveOldDiscogsCopy(${it.id})">${retryLabel}</button>` : ''}
           <a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="https://www.discogs.com/release/${oldId}">Open #${oldId} ↗</a>
           <button type="button" class="btn btn-secondary btn-sm" onclick="dismissPendingDeleteOld(${it.id})">Dismiss</button>
         </div>
       </div>`;
+    } else if (it.synced_to_discogs && it.pending_field_sync) {
+      alerts += `<div class="alert-box alert-dup">⚠️ Some Media/Sleeve/Notes fields failed to sync to Discogs. Tap <strong>💾 Save Grade &amp; Sync Discogs</strong> below to retry.</div>`;
     }
     if (it.is_high_value) alerts += `<div class="alert-box alert-high-value">🔥 HIGH VALUE (${esc(formatMoneyWithUsd(it.est_price, it.est_currency || 'USD'))}) — SET ASIDE!</div>`;
     if (it.is_scarce) alerts += `<div class="alert-box alert-scarce">💎 SCARCE (0 for sale, ${it.want} want / ${it.have} have) — CHECK SOLD!</div>`;
+
+    const needsStashTiebreakConfirm = Boolean(!it.synced_to_discogs && it.discogs_id && it.is_conservative_tiebreak && !it.tiebreak_confirmed);
 
     let localBadges = '';
     if (localMatch.artistHit) localBadges += `<span class="badge badge-green">🎸 Artist in Your Spotify</span>`;
@@ -3584,7 +3811,7 @@ Return ONLY valid JSON:
           <h2 style="margin:0 0 2px;">${esc(it.artist)} — ${esc(it.title)}</h2>
           <div style="font-size:0.84rem; color:var(--muted);">${esc(it.format)} · ${esc(it.country || '?')} · ${esc(it.year || '?')} · ${esc(it.label || 'Unknown Label')} · ${esc(it.catno || 'No Cat#')}</div>
         </div>
-        ${hasDiscogs ? `<span class="badge badge-blue">#${it.discogs_id}</span>` : `<span class="badge badge-yellow">Unlisted</span>`}
+        ${hasDiscogs ? `<span class="badge ${it.is_conservative_tiebreak ? 'badge-yellow' : 'badge-blue'}">#${it.discogs_id}</span>` : `<span class="badge badge-yellow">Unlisted</span>`}
       </div>
 
       ${alerts}
@@ -3641,9 +3868,17 @@ Return ONLY valid JSON:
           <label class="field-label">Condition / Listing Report</label>
           <textarea id="sdNotes" class="tall-textarea" rows="5">${esc(it.condition_note || '')}</textarea>
         </div>
+        ${needsStashTiebreakConfirm ? `
+          <div class="confirm-tiebreak-box" style="margin-bottom:10px;">
+            <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer; font-size:0.84rem; color:#fde68a;">
+              <input id="sdChkConfirmTiebreak" type="checkbox" style="width:20px; height:20px; margin-top:2px; flex:0 0 auto;" onchange="updateStashPushBtnState()" />
+              <span>Confirm pushing as most common pressing <strong>#${it.discogs_id}</strong> (${it.have ?? 0} have) — case/insert details were absent or uncheckable.</span>
+            </label>
+          </div>
+        ` : ''}
         <div class="inline-actions">
           <button class="btn btn-sm" onclick="saveStashEdits(${it.id})">💾 Save Grade &amp; Sync Discogs</button>
-          ${(!it.synced_to_discogs && it.discogs_id) ? `<button class="btn btn-green btn-sm" onclick="pushStashToDiscogs(${it.id})">✅ Push to Discogs</button>` : ''}
+          ${(!it.synced_to_discogs && it.discogs_id) ? `<button id="sdBtnPushDiscogs" class="btn btn-green btn-sm" ${needsStashTiebreakConfirm ? 'disabled' : ''} onclick="pushStashToDiscogs(${it.id})">✅ Push to Discogs</button>` : ''}
           <button class="btn btn-danger btn-sm" onclick="deleteStashItem(${it.id})">🗑️ Delete</button>
         </div>
       </div>
@@ -3651,6 +3886,12 @@ Return ONLY valid JSON:
 
     document.getElementById('stashDetailModal').classList.remove('hidden');
     body.scrollTop = 0;
+  };
+
+  window.updateStashPushBtnState = () => {
+    const btn = document.getElementById('sdBtnPushDiscogs');
+    const chk = document.getElementById('sdChkConfirmTiebreak');
+    if (btn && chk) btn.disabled = !chk.checked;
   };
 
   window.closeStashDetail = () => {
@@ -3663,13 +3904,32 @@ Return ONLY valid JSON:
   window.retryRemoveOldDiscogsCopy = async (id) => {
     const it = stashCache.find(x => x.id === id);
     if (!it || !it.pending_delete_old) return;
+
+    // Finish failed field writes on the NEW pressing FIRST before deleting the old copy
+    if (it.pending_field_sync && it.discogs_id && it.discogs_instance_id) {
+      setStatus(`Retrying grade & notes sync on new pressing #${it.discogs_id}...`, true);
+      const fId = it.discogs_folder_id || cfg.discogsFolderId || '1';
+      const fieldRes = await CC.syncDiscogsInstanceFields(fId, it.discogs_id, it.discogs_instance_id, it.media_condition, it.sleeve_condition, it.condition_note);
+      it.pending_field_sync = fieldRes.failedCount > 0;
+      await CC.idbPut('stash', it);
+
+      if (fieldRes.failedCount > 0) {
+        await loadStashCache();
+        renderStash();
+        setStatus('', false);
+        if (activeStashItem?.id === id) openStashDetail(id, true);
+        toast(`⚠️ New pressing still had ${fieldRes.failedCount} field sync error(s) (${fieldRes.errors[0] || ''}) — old copy #${it.pending_delete_old.releaseId} kept safely on Discogs.`, 5600);
+        return;
+      }
+    }
+
     setStatus(`Removing old pressing #${it.pending_delete_old.releaseId} from Discogs...`, true);
     const delRes = await attemptDeleteOldCopy(it);
     await loadStashCache();
     renderStash();
     setStatus('', false);
     if (activeStashItem?.id === id) openStashDetail(id, true);
-    toast(delRes.ok ? '✅ Old pressing removed from Discogs!' : `⚠️ ${delRes.warning}`, 5000);
+    toast(delRes.ok ? '✅ Grades synced & old pressing removed from Discogs!' : `⚠️ ${delRes.warning}`, 5000);
   };
 
   window.dismissPendingDeleteOld = async (id) => {
@@ -3693,8 +3953,10 @@ Return ONLY valid JSON:
     if (it.synced_to_discogs && it.discogs_id && cfg.discogsUser) {
       let instId = it.discogs_instance_id;
       let fId = it.discogs_folder_id || cfg.discogsFolderId || '1';
+      let remoteCopies = 0;
       if (!instId) {
         const insts = await CC.findDiscogsInstances(it.discogs_id);
+        remoteCopies = insts.length;
         if (insts.length === 1) {
           instId = insts[0].instance_id;
           fId = String(insts[0].folder_id || fId);
@@ -3704,22 +3966,33 @@ Return ONLY valid JSON:
       }
       if (instId) {
         const fieldRes = await CC.syncDiscogsInstanceFields(fId, it.discogs_id, instId, it.media_condition, it.sleeve_condition, it.condition_note);
+        it.pending_field_sync = fieldRes.failedCount > 0;
         if (fieldRes.failedCount > 0) {
           toast(`⚠️ Saved locally, but ${fieldRes.failedCount} Discogs field(s) failed: ${fieldRes.errors[0] || ''}`, 5000);
         } else {
           toast('✅ Updated Stash & Discogs grades!');
         }
-      } else toast('💾 Saved locally (could not uniquely locate Discogs instance)');
+      } else toast(`💾 Saved locally — found ${remoteCopies} Discogs cop${remoteCopies === 1 ? 'y' : 'ies'}, so remote grades were not overwritten.`, 5000);
     } else toast('💾 Grade & notes saved!');
 
     await CC.idbPut('stash', it);
     await loadStashCache();
     renderStash();
+    if (activeStashItem?.id === id) openStashDetail(id, true);
   };
 
   window.pushStashToDiscogs = async (id) => {
     const it = stashCache.find(x => x.id === id);
     if (!it || !it.discogs_id || !cfg.discogsUser) { toast('Verify Discogs in Settings first'); return; }
+
+    if (it.is_conservative_tiebreak && !it.tiebreak_confirmed) {
+      const chk = document.getElementById('sdChkConfirmTiebreak');
+      if (!chk?.checked) {
+        toast('Please check the confirmation box for this conservative tie-breaker pick before pushing to Discogs', 4200);
+        return;
+      }
+    }
+
     if (activeStashItem?.id === id) {
       it.media_condition = document.getElementById('sdMediaCond')?.value || it.media_condition;
       it.sleeve_condition = document.getElementById('sdSleeveCond')?.value || it.sleeve_condition;
@@ -3734,11 +4007,13 @@ Return ONLY valid JSON:
 
       it.synced_to_discogs = true;
       it.pending_discogs_sync = false;
+      it.tiebreak_confirmed = true;
       it.discogs_folder_id = folderId;
       it.discogs_instance_id = newInstId;
 
       setStatus('Syncing grades & notes to Discogs...', true);
       const fieldRes = await CC.syncDiscogsInstanceFields(folderId, it.discogs_id, newInstId, it.media_condition, it.sleeve_condition, it.condition_note);
+      it.pending_field_sync = fieldRes.failedCount > 0;
       const allFieldsFailed = fieldRes.okCount === 0 && fieldRes.failedCount > 0;
 
       // Persist immediately BEFORE removing any old swapped pressing
