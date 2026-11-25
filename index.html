@@ -7,12 +7,12 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>CrateCheck — Media Scanner</title>
-  <link rel="stylesheet" href="style.css?v=1.9.2" />
+  <link rel="stylesheet" href="style.css?v=1.9.3" />
 </head>
 <body>
 
 <header>
-  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.9.2</span></div>
+  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.9.3</span></div>
   <div class="status-pills">
     <span id="aiPill" class="pill" title="Gemini Cloud AI status" onclick="switchView('settings')">Gemini: Off</span>
     <span id="ratePill" class="pill" title="Discogs API sliding window (max 58/min)">API 0/58</span>
@@ -155,12 +155,6 @@
         <div id="pileSkippedNote" style="font-size:0.78rem; color:var(--muted); margin-bottom:10px;"></div>
         <div id="pileResultsList"></div>
       </div>
-    </div>
-
-    <!-- Shared Live Status / Auto-Retry + Cancel Banner -->
-    <div id="statusBanner" class="status-banner">
-      <div class="spinner"></div>
-      <div id="statusText" style="flex:1;">Working...</div>
     </div>
 
     <!-- Zero-Guessing Verification Card -->
@@ -330,11 +324,6 @@
 
   <!-- ==================== SETTINGS VIEW (4 COLLAPSIBLE ACCORDIONS) ==================== -->
   <section id="view-settings" class="view">
-    <div id="settingsStatusBanner" class="status-banner">
-      <div class="spinner"></div>
-      <div id="settingsStatusText" style="flex:1;">Working...</div>
-    </div>
-
     <!-- 1. Gemini Cloud & Playback -->
     <details id="accAi" class="acc-card">
       <summary class="acc-summary">
@@ -699,6 +688,9 @@
 <!-- Open-In Music Platform Popup Menu -->
 <div id="openInMenu" class="open-in-menu hidden"></div>
 
+<!-- Global Floating Live Status / Auto-Retry + Cancel Banner -->
+<div id="globalStatusBanner" class="global-status-banner" role="status" aria-live="polite"></div>
+
 <!-- Floating 30s Audio Mini-Player -->
 <div id="audioBar" class="audio-bar hidden">
   <button id="audioPlayBtn" class="audio-play-btn" onclick="toggleHighlightAudio()">▶</button>
@@ -722,7 +714,7 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="apis.js?v=1.9.2"></script>
-<script src="app.js?v=1.9.2"></script>
+<script src="apis.js?v=1.9.3"></script>
+<script src="app.js?v=1.9.3"></script>
 </body>
 </html>

@@ -42,6 +42,9 @@
   let priorBestVerdict = null;
   let deepSearchCancelled = false;
   let recalibratingStash = false;
+  let recalibrateProgressText = '';
+  let rescoringStashItemId = null;
+  const activeDiscogsSaves = new Set();
   let currentInspected = null;
   let activeStashItem = null;
   let editingStashItem = null;
@@ -58,6 +61,7 @@
   // Audio + Platform Menu state
   const tasteCache = new Map();
   let activeClipKey = '';
+  let activeClipState = 'idle'; // 'idle' | 'loading' | 'playing' | 'paused'
   let activePlatforms = null;
   let activeFallbackClip = null;
   let scanRunId = 0;
@@ -109,8 +113,9 @@
 
   function setStatus(text, show = true, opts = {}) {
     const cancellable = Boolean(opts?.cancellable);
-    renderBanner(document.getElementById('statusBanner'), text, show, cancellable);
-    renderBanner(document.getElementById('settingsStatusBanner'), text, show, cancellable);
+    const isShowing = Boolean(show);
+    renderBanner(document.getElementById('globalStatusBanner'), text, isShowing, cancellable);
+    document.body.classList.toggle('has-status', isShowing);
   }
 
   window.cancelActiveAI = () => {
@@ -658,13 +663,27 @@
 
     finishBtn.className = n > 0 ? 'btn btn-green btn-sm' : 'btn btn-secondary btn-sm';
     finishBtn.innerHTML = `🔍 Finish &amp; Search (<span id="camCountLbl">${n}</span>)`;
-    thumbsEl.innerHTML = stagedPhotos.map(p => `<img src="${p.saveWebp}" />`).join('');
+    thumbsEl.innerHTML = stagedPhotos.map((p, i) => `
+      <div class="cam-thumb-item" onclick="openStagedLightbox(${i})" title="Tap to inspect sharpness">
+        <img src="${p.saveWebp}" />
+        <button type="button" class="cam-thumb-remove" onclick="removeCameraShot(${i}, event)" title="Delete shot">×</button>
+      </div>
+    `).join('');
 
     if (stagedUpc) {
       upcBadge.textContent = `║▌ UPC Locked: ${stagedUpc}`;
       upcBadge.classList.remove('hidden');
     } else upcBadge.classList.add('hidden');
   }
+
+  window.removeCameraShot = (idx, ev) => {
+    if (ev) ev.stopPropagation();
+    if (idx < 0 || idx >= stagedPhotos.length) return;
+    stagedPhotos.splice(idx, 1);
+    updateCameraOverlayUI();
+    updateStageUI();
+    toast('Shot deleted — ready to retake');
+  };
 
   async function openHighResCameraStream() {
     const attempts = [
@@ -1155,17 +1174,51 @@ Return ONLY valid JSON:
     } catch (_) { audioEl.muted = false; }
   }
 
+  function syncTrackPlayButtons() {
+    document.querySelectorAll('[data-play-key]').forEach(btn => {
+      const k = btn.dataset.playKey || '';
+      const isMatch = Boolean(activeClipKey && k === activeClipKey && activeClipState !== 'idle');
+      const row = btn.closest('.track-row, .notable-row');
+
+      btn.classList.remove('is-playing', 'is-loading', 'is-paused');
+      if (row) row.classList.remove('is-playing', 'is-loading', 'is-paused');
+
+      if (!isMatch) {
+        btn.textContent = '▶';
+        return;
+      }
+
+      if (activeClipState === 'playing') {
+        btn.textContent = '⏸';
+        btn.classList.add('is-playing');
+        if (row) row.classList.add('is-playing');
+      } else if (activeClipState === 'loading') {
+        btn.textContent = '…';
+        btn.classList.add('is-loading');
+        if (row) row.classList.add('is-loading');
+      } else if (activeClipState === 'paused') {
+        btn.textContent = '▶';
+        btn.classList.add('is-paused');
+        if (row) row.classList.add('is-paused');
+      } else {
+        btn.textContent = '▶';
+      }
+    });
+  }
+
   window.stopHighlightAudio = () => {
     clipReqId++;
     closeOpenInMenu();
     try { audioEl.pause(); audioEl.removeAttribute('src'); audioEl.load(); } catch (_) {}
     activeClipKey = '';
+    activeClipState = 'idle';
     activePlatforms = null;
     activeFallbackClip = null;
     document.getElementById('audioBar').classList.add('hidden');
     document.body.classList.remove('has-audio');
     document.getElementById('audioProgress').style.width = '0%';
     document.getElementById('audioPlayBtn').textContent = '▶';
+    syncTrackPlayButtons();
   };
 
   window.toggleHighlightAudio = () => {
@@ -1216,11 +1269,25 @@ Return ONLY valid JSON:
     btn.classList.add('open');
   };
 
-  audioEl.addEventListener('play', () => { if (audioEl.src !== SILENT_WAV) document.getElementById('audioPlayBtn').textContent = '⏸'; });
-  audioEl.addEventListener('pause', () => { document.getElementById('audioPlayBtn').textContent = '▶'; });
+  audioEl.addEventListener('play', () => {
+    if (audioEl.src !== SILENT_WAV) {
+      document.getElementById('audioPlayBtn').textContent = '⏸';
+      if (activeClipKey) activeClipState = 'playing';
+      syncTrackPlayButtons();
+    }
+  });
+  audioEl.addEventListener('pause', () => {
+    if (audioEl.src === SILENT_WAV) return;
+    document.getElementById('audioPlayBtn').textContent = '▶';
+    if (activeClipKey && activeClipState !== 'loading') activeClipState = 'paused';
+    syncTrackPlayButtons();
+  });
   audioEl.addEventListener('ended', () => {
+    if (audioEl.src === SILENT_WAV) return;
     document.getElementById('audioPlayBtn').textContent = '▶';
     document.getElementById('audioProgress').style.width = '0%';
+    if (activeClipKey) activeClipState = 'paused';
+    syncTrackPlayButtons();
   });
   audioEl.addEventListener('timeupdate', () => {
     if (audioEl.src !== SILENT_WAV && audioEl.duration && isFinite(audioEl.duration)) {
@@ -1229,25 +1296,42 @@ Return ONLY valid JSON:
   });
 
   async function loadHighlightClip(artist, track, album, myRunId, opts = {}) {
-    const { forceReplace = true, forcePlay = cfg.autoPlayHighlight, strictTrack = true, notifyUser = false, ignoreRunId = false } = opts;
+    const {
+      forceReplace = true,
+      forcePlay = cfg.autoPlayHighlight,
+      strictTrack = true,
+      notifyUser = false,
+      ignoreRunId = false,
+      targetYear = null
+    } = opts;
     if (!artist && !track && !album) return;
 
     const key = normFull(`${artist}|${track || album}`);
-    if (key === activeClipKey && audioEl.src && audioEl.src !== SILENT_WAV) {
-      if (forcePlay) {
-        audioEl.muted = false;
-        audioEl.currentTime = 0;
-        audioEl.play().catch(() => {});
-        if (notifyUser) toast(`▶ Replaying: ${track || album}`);
+    if (key === activeClipKey) {
+      if (activeClipState === 'loading') return;
+      if (audioEl.src && audioEl.src !== SILENT_WAV) {
+        if (notifyUser) {
+          toggleHighlightAudio();
+        } else if (forcePlay && audioEl.paused) {
+          audioEl.muted = false;
+          audioEl.play().catch(() => {});
+        }
+        return;
       }
-      return;
     }
     if (!forceReplace && activeClipKey && !audioEl.paused) return;
+
+    if (notifyUser && forcePlay) {
+      unlockAudioForAutoplay(true);
+    }
 
     const myClipReq = ++clipReqId;
     closeOpenInMenu();
     activeFallbackClip = null;
     activePlatforms = null;
+    activeClipKey = key;
+    activeClipState = 'loading';
+    syncTrackPlayButtons();
 
     const bar = document.getElementById('audioBar');
     const labelTarget = track || album;
@@ -1257,7 +1341,8 @@ Return ONLY valid JSON:
     document.getElementById('audioProgress').style.width = '0%';
     updateAudioMarquee(`Finding clip & platforms: ${labelTarget}...`);
 
-    const res = await CC.fetchAudioAndPlatforms(artist, track, album, strictTrack);
+    const resolvedYear = targetYear ?? currentInspected?.year ?? activeStashItem?.year ?? null;
+    const res = await CC.fetchAudioAndPlatforms(artist, track, album, strictTrack, resolvedYear);
     if ((!ignoreRunId && myRunId !== scanRunId) || myClipReq !== clipReqId) return;
 
     activePlatforms = res.platforms;
@@ -1271,15 +1356,23 @@ Return ONLY valid JSON:
       audioEl.currentTime = 0;
       if (forcePlay) {
         audioEl.play().catch(() => {
+          activeClipState = 'paused';
           document.getElementById('audioPlayBtn').textContent = '▶';
           updateAudioMarquee(`Tap ▶ for 30s clip: ${res.clip.trackName} — ${res.clip.artistName}`);
+          syncTrackPlayButtons();
         });
-      } else document.getElementById('audioPlayBtn').textContent = '▶';
+      } else {
+        activeClipState = 'paused';
+        document.getElementById('audioPlayBtn').textContent = '▶';
+        syncTrackPlayButtons();
+      }
       return;
     }
 
     activeClipKey = '';
+    activeClipState = 'idle';
     try { audioEl.pause(); audioEl.removeAttribute('src'); } catch (_) {}
+    syncTrackPlayButtons();
     if (res.fallbackClip) {
       activeFallbackClip = res.fallbackClip;
       document.getElementById('audioPlayBtn').textContent = '▶';
@@ -1691,13 +1784,12 @@ Return ONLY valid JSON:
   async function verifyCandidateBatch(batch, myRunId, opts = {}) {
     const { maxSiblings = 8, progressPrefix = '🕵️', retryLabel = 'Verification' } = opts;
     const dossiers = [];
-    const fetchedIds = new Set();
+    const batchFetchedIds = new Set();
     const refQueue = [];
 
     const pushReleaseDossier = (rel, fallbackCat) => {
-      if (!rel || fetchedIds.has(rel.id)) return;
-      fetchedIds.add(rel.id);
-      detectiveInspectedIds.add(rel.id);
+      if (!rel || batchFetchedIds.has(rel.id)) return;
+      batchFetchedIds.add(rel.id);
       const tracks = (rel.tracklist || []).filter(t => t.type_ !== 'heading').map(t => {
         const ta = cleanDiscogsArtist(t.artists);
         return ta ? `${ta} - ${t.title}` : t.title;
@@ -1720,7 +1812,7 @@ Return ONLY valid JSON:
       });
 
       extractReferencedIds(rel.notes).forEach(refId => {
-        if (!fetchedIds.has(refId)) refQueue.push(refId);
+        if (!batchFetchedIds.has(refId)) refQueue.push(refId);
       });
     };
 
@@ -1732,7 +1824,7 @@ Return ONLY valid JSON:
       pushReleaseDossier(rel, batch[i].catno);
     }
 
-    const uniqueRefs = Array.from(new Set(refQueue)).filter(id => !fetchedIds.has(id)).slice(0, maxSiblings);
+    const uniqueRefs = Array.from(new Set(refQueue)).filter(id => !batchFetchedIds.has(id)).slice(0, maxSiblings);
     for (let i = 0; i < uniqueRefs.length; i++) {
       if (myRunId !== scanRunId || deepSearchCancelled) return null;
       setStatus(`🔗 Auto-following sibling #${uniqueRefs[i]} (${i + 1}/${uniqueRefs.length}) · API ${CC.getRateCount()}/58...`, true, { cancellable: true });
@@ -1759,7 +1851,6 @@ Return ONLY valid JSON:
       } catch (_) {}
     }
 
-    detectiveInspectedCount = detectiveInspectedIds.size;
     setStatus(`${progressPrefix} Verifying ${dossiers.length} pressing(s) on ${aiEngineLabel()}...`, true, { cancellable: true });
 
     const prompt = `You are a STRICT, ZERO-GUESSING Discogs Verification Engine. Accuracy is everything. NEVER guess or force a contradictory match!
@@ -1821,8 +1912,10 @@ Return ONLY valid JSON:
 
     const parts = [{ text: prompt }, ...stagedPhotos.map(p => ({ inline_data: { mime_type: 'image/jpeg', data: p.apiB64 } }))];
     const verdict = await CC.callAI(parts, 'MEDIUM', { retryLabel });
-    if (myRunId !== scanRunId || deepSearchCancelled) return null;
+    if (!verdict || typeof verdict !== 'object' || myRunId !== scanRunId || deepSearchCancelled) return null;
 
+    batchFetchedIds.forEach(id => detectiveInspectedIds.add(id));
+    detectiveInspectedCount = detectiveInspectedIds.size;
     (verdict.candidate_diffs || []).forEach(d => { if (d.id && d.short_diff) detectiveDiffs[d.id] = d.short_diff; });
     (verdict.eliminated_ids || []).forEach(id => detectiveEliminatedIds.add(id));
     return verdict;
@@ -2229,19 +2322,23 @@ Return ONLY valid JSON:
     await runTasteAnalysis(currentInspected, scanRunId);
   };
 
-  function buildTracklistHtml(tracks, matched = [], source = 'scan') {
+  function buildTracklistHtml(tracks, matched = [], source = 'scan', defaultArtist = '') {
     const mSet = new Set(matched.map(norm));
     if (!tracks.length) return `<div style="padding:12px; color:var(--muted); font-size:0.84rem;">No tracklist available.</div>`;
+    const fallbackArtist = defaultArtist || (source === 'stash' ? activeStashItem?.artist : currentInspected?.artist) || '';
     return tracks.map((t, i) => {
       const hit = mSet.has(norm(t.title)) || (t.artist && mSet.has(norm(`${t.artist} - ${t.title}`)));
       const fn = source === 'stash' ? `previewStashTrack(${i})` : `previewTrackByIndex(${i})`;
+      const trackArtist = t.artist || fallbackArtist;
+      const trackTitle = t.title || '';
+      const playKey = normFull(`${trackArtist}|${trackTitle}`);
       return `<div class="track-row ${hit ? 'track-hit' : ''}">
         <div class="track-info">
           <div class="track-name">${esc(t.pos ? t.pos + ' · ' : '')}${esc(t.title)}</div>
           ${t.artist ? `<div class="track-sub">${esc(t.artist)}</div>` : ''}
         </div>
         ${hit ? '<span class="badge badge-green" style="margin:0;">Spotify</span>' : ''}
-        <button type="button" class="play-pill-btn" onclick="${fn}" title="Play 30s preview">▶</button>
+        <button type="button" class="play-pill-btn" data-play-key="${esc(playKey)}" onclick="${fn}" title="Play 30s preview">▶</button>
       </div>`;
     }).join('');
   }
@@ -2252,36 +2349,54 @@ Return ONLY valid JSON:
       const lArt = resolveLitmusArtist(item);
       const showArt = lArt && norm(lArt) !== norm(item.artist) && !/^various/i.test(lArt);
       const fn = source === 'stash' ? 'previewStashLitmus()' : 'previewLitmusTrack()';
+      const litmusKey = normFull(`${lArt || ''}|${item.litmus_track}`);
       html += `<div class="notable-row" style="border-bottom:1px solid rgba(255,255,255,0.12); padding-bottom:9px; margin-bottom:6px;">
         <div><strong>🎧 Test Song:</strong> ${showArt ? `${esc(lArt)} — ` : ''}${esc(item.litmus_track)}</div>
-        <button type="button" class="play-pill-btn sm" onclick="${fn}" title="Play Test Song">▶</button>
+        <button type="button" class="play-pill-btn sm" data-play-key="${esc(litmusKey)}" onclick="${fn}" title="Play Test Song">▶</button>
       </div>`;
     }
     const list = normalizeNotableList(item.notable_songs, item.artist);
     if (list.length) {
       html += `<div style="font-weight:800; margin-bottom:4px;">⭐ Notable / Recognizable Songs (${list.length}):</div>`;
       html += list.map((s, idx) => {
+        const nArt = s.artist || item.artist || '';
         const showA = s.artist && norm(s.artist) !== norm(item.artist) && !/^various/i.test(s.artist);
         const fn = source === 'stash' ? `previewStashNotable(${idx})` : `previewScanNotable(${idx})`;
+        const nKey = normFull(`${nArt}|${s.title}`);
         return `<div class="notable-row">
           <div style="flex:1; min-width:0;">
             <strong>${showA ? `${esc(s.artist)} — ` : ''}${esc(s.title)}</strong>
             ${s.reason ? `<div style="font-size:0.78rem; color:var(--muted);">${esc(s.reason)}</div>` : ''}
           </div>
-          <button type="button" class="play-pill-btn sm" onclick="${fn}" title="Play 30s preview">▶</button>
+          <button type="button" class="play-pill-btn sm" data-play-key="${esc(nKey)}" onclick="${fn}" title="Play 30s preview">▶</button>
         </div>`;
       }).join('');
     }
     return html || `<span style="color:var(--muted);">No major mainstream hits identified.</span>`;
   }
 
+  function getCurrentSaveLockKeys() {
+    if (!currentInspected) return [];
+    const keys = [];
+    const primary = editingStashItem?.id ? `stash:${editingStashItem.id}` : `rel:${currentInspected.discogs_id || 'local'}`;
+    keys.push(primary);
+    if (currentInspected.discogs_id) {
+      const rk = `rel:${currentInspected.discogs_id}`;
+      if (!keys.includes(rk)) keys.push(rk);
+    }
+    return keys;
+  }
+
   window.updateSaveButtonsState = () => {
     if (!currentInspected) return;
+    const isLocked = getCurrentSaveLockKeys().some(k => activeDiscogsSaves.has(k));
     const hasDiscogs = Boolean(currentInspected.discogs_id);
     const saveBtn = document.getElementById('btnSaveBoth');
+    const saveLocalBtn = document.getElementById('btnSaveLocal');
     const needTiebreakConfirm = Boolean(hasDiscogs && currentInspected.is_conservative_tiebreak);
     const confirmed = document.getElementById('chkConfirmTiebreak')?.checked;
-    saveBtn.disabled = !hasDiscogs || !cfg.discogsToken || !cfg.discogsUser || (needTiebreakConfirm && !confirmed);
+    if (saveBtn) saveBtn.disabled = isLocked || !hasDiscogs || !cfg.discogsToken || !cfg.discogsUser || (needTiebreakConfirm && !confirmed);
+    if (saveLocalBtn) saveLocalBtn.disabled = isLocked;
   };
 
   function renderInspector(item, hasDiscogs) {
@@ -2376,7 +2491,8 @@ Return ONLY valid JSON:
     const localMatch = checkLocalSpotify(item);
     item.spotify_matches = localMatch;
     document.getElementById('trackCount').textContent = item.tracklist.length;
-    document.getElementById('inspTracklist').innerHTML = buildTracklistHtml(item.tracklist, localMatch.matchedTracks, 'scan');
+    document.getElementById('inspTracklist').innerHTML = buildTracklistHtml(item.tracklist, localMatch.matchedTracks, 'scan', item.artist);
+    syncTrackPlayButtons();
 
     let badges = '';
     if (localMatch.artistHit) {
@@ -2523,36 +2639,30 @@ Return ONLY valid JSON:
   window.previewTrackByIndex = (idx) => {
     const t = currentInspected?.tracklist?.[idx];
     if (!t?.title) return;
-    unlockAudioForAutoplay(true);
-    loadHighlightClip(t.artist || currentInspected.artist, t.title, currentInspected.title, scanRunId, { forceReplace: true, forcePlay: true, strictTrack: true, notifyUser: true });
+    loadHighlightClip(t.artist || currentInspected.artist, t.title, currentInspected.title, scanRunId, { forceReplace: true, forcePlay: true, strictTrack: true, notifyUser: true, targetYear: currentInspected.year });
   };
   window.previewLitmusTrack = () => {
     if (!currentInspected?.litmus_track) return;
-    unlockAudioForAutoplay(true);
-    loadHighlightClip(resolveLitmusArtist(currentInspected), currentInspected.litmus_track, currentInspected.title, scanRunId, { forceReplace: true, forcePlay: true, strictTrack: true, notifyUser: true });
+    loadHighlightClip(resolveLitmusArtist(currentInspected), currentInspected.litmus_track, currentInspected.title, scanRunId, { forceReplace: true, forcePlay: true, strictTrack: true, notifyUser: true, targetYear: currentInspected.year });
   };
   window.previewScanNotable = (idx) => {
     const s = normalizeNotableList(currentInspected?.notable_songs, currentInspected?.artist)[idx];
     if (!s?.title) return;
-    unlockAudioForAutoplay(true);
-    loadHighlightClip(s.artist || currentInspected.artist, s.title, currentInspected.title, scanRunId, { forceReplace: true, forcePlay: true, strictTrack: true, notifyUser: true });
+    loadHighlightClip(s.artist || currentInspected.artist, s.title, currentInspected.title, scanRunId, { forceReplace: true, forcePlay: true, strictTrack: true, notifyUser: true, targetYear: currentInspected.year });
   };
   window.previewStashTrack = (idx) => {
     const t = activeStashItem?.tracklist?.[idx];
     if (!t?.title) return;
-    unlockAudioForAutoplay(true);
-    loadHighlightClip(t.artist || activeStashItem.artist, t.title, activeStashItem.title, scanRunId, { forceReplace: true, forcePlay: true, strictTrack: true, notifyUser: true, ignoreRunId: true });
+    loadHighlightClip(t.artist || activeStashItem.artist, t.title, activeStashItem.title, scanRunId, { forceReplace: true, forcePlay: true, strictTrack: true, notifyUser: true, ignoreRunId: true, targetYear: activeStashItem.year });
   };
   window.previewStashLitmus = () => {
     if (!activeStashItem?.litmus_track) return;
-    unlockAudioForAutoplay(true);
-    loadHighlightClip(resolveLitmusArtist(activeStashItem), activeStashItem.litmus_track, activeStashItem.title, scanRunId, { forceReplace: true, forcePlay: true, strictTrack: true, notifyUser: true, ignoreRunId: true });
+    loadHighlightClip(resolveLitmusArtist(activeStashItem), activeStashItem.litmus_track, activeStashItem.title, scanRunId, { forceReplace: true, forcePlay: true, strictTrack: true, notifyUser: true, ignoreRunId: true, targetYear: activeStashItem.year });
   };
   window.previewStashNotable = (idx) => {
     const s = normalizeNotableList(activeStashItem?.notable_songs, activeStashItem?.artist)[idx];
     if (!s?.title) return;
-    unlockAudioForAutoplay(true);
-    loadHighlightClip(s.artist || activeStashItem.artist, s.title, activeStashItem.title, scanRunId, { forceReplace: true, forcePlay: true, strictTrack: true, notifyUser: true, ignoreRunId: true });
+    loadHighlightClip(s.artist || activeStashItem.artist, s.title, activeStashItem.title, scanRunId, { forceReplace: true, forcePlay: true, strictTrack: true, notifyUser: true, ignoreRunId: true, targetYear: activeStashItem.year });
   };
 
   function verdictBadgeClass(verdict) {
@@ -2581,12 +2691,13 @@ Return ONLY valid JSON:
     } else cBox.classList.add('hidden');
 
     document.getElementById('tasteHits').innerHTML = buildNotableHitsHtml(item, 'scan');
+    syncTrackPlayButtons();
 
     const previewArtist = resolveLitmusArtist(item);
     if (item.litmus_track) {
-      loadHighlightClip(previewArtist, item.litmus_track, item.title, myRunId, { forceReplace: true, forcePlay: cfg.autoPlayHighlight, strictTrack: true, notifyUser: false });
+      loadHighlightClip(previewArtist, item.litmus_track, item.title, myRunId, { forceReplace: true, forcePlay: cfg.autoPlayHighlight, strictTrack: true, notifyUser: false, targetYear: item.year });
     } else if (item.title) {
-      loadHighlightClip(previewArtist, '', item.title, myRunId, { forceReplace: true, forcePlay: cfg.autoPlayHighlight, strictTrack: false, notifyUser: false });
+      loadHighlightClip(previewArtist, '', item.title, myRunId, { forceReplace: true, forcePlay: cfg.autoPlayHighlight, strictTrack: false, notifyUser: false, targetYear: item.year });
     }
   }
 
@@ -2604,7 +2715,7 @@ Return ONLY valid JSON:
       return;
     }
 
-    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v192`;
+    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v193`;
     if (tasteCache.has(cacheKey)) { applyTasteUI(item, tasteCache.get(cacheKey), myRunId); return; }
 
     const tracksStr = (item.tracklist || []).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title).join('; ');
@@ -3579,24 +3690,59 @@ Return ONLY valid JSON:
     }
   }
 
-  async function ensureDiscogsInstanceDurable(ledgerKey, releaseId, defaultFolderId) {
-    const existing = getPendingDiscogsOp(ledgerKey);
-    const sameOp = existing && Number(existing.discogs_id) === Number(releaseId) && existing.username === cfg.discogsUser;
+  function findMatchingPendingDiscogsOp(keys, releaseId, opts = {}) {
+    const { requireCreated = false } = opts;
+    const targetId = Number(releaseId || 0);
+    if (!targetId || !cfg.discogsUser) return null;
+    const uniqueKeys = Array.from(new Set((keys || []).filter(Boolean)));
+    for (const k of uniqueKeys) {
+      const op = getPendingDiscogsOp(k);
+      if (!op || Number(op.discogs_id) !== targetId || op.username !== cfg.discogsUser) continue;
+      if (requireCreated && !(op.status === 'created' && op.instanceId)) continue;
+      return { key: k, op };
+    }
+    return null;
+  }
+
+  async function ensureDiscogsInstanceDurable(ledgerKey, releaseId, defaultFolderId, fallbackKeys = []) {
+    const searchKeys = Array.from(new Set([ledgerKey, ...(fallbackKeys || [])].filter(Boolean)));
 
     // Case 1: Already received instanceId in a prior attempt whose local IDB save failed
-    if (sameOp && existing.instanceId) {
-      return { instanceId: existing.instanceId, folderId: existing.folderId || defaultFolderId, reused: true };
+    const createdMatch = findMatchingPendingDiscogsOp(searchKeys, releaseId, { requireCreated: true });
+    if (createdMatch?.op?.instanceId) {
+      const existing = createdMatch.op;
+      const fId = existing.folderId || defaultFolderId;
+      if (createdMatch.key !== ledgerKey) {
+        setPendingDiscogsOp(ledgerKey, { ...existing, folderId: fId });
+      }
+      return { instanceId: existing.instanceId, folderId: fId, reused: true };
     }
 
     // Case 2: Prior POST started but browser closed / network dropped before response arrived -> reconcile first!
-    if (sameOp && existing.status === 'posting') {
+    let postingMatch = null;
+    for (const k of searchKeys) {
+      const op = getPendingDiscogsOp(k);
+      if (op && Number(op.discogs_id) === Number(releaseId) && op.username === cfg.discogsUser && op.status === 'posting') {
+        postingMatch = { key: k, op };
+        break;
+      }
+    }
+    if (postingMatch) {
+      const existing = postingMatch.op;
       setStatus(`Checking Discogs to avoid duplicate copy of #${releaseId}...`, true);
       const remoteNow = await CC.findDiscogsInstances(releaseId, { throwOnError: true });
       const prevIds = new Set((existing.preExistingInstanceIds || []).map(Number));
-      const created = remoteNow.find(r => !prevIds.has(Number(r.instance_id)));
-      if (created?.instance_id) {
+      const newlyCreated = remoteNow.filter(r => !prevIds.has(Number(r.instance_id)));
+      if (newlyCreated.length > 1) {
+        const idsList = newlyCreated.map(r => `#${r.instance_id}`).join(', ');
+        throw new Error(`Multiple new Discogs copies found for #${releaseId} (${idsList}) — please clean up duplicates on Discogs before syncing grades so the wrong copy isn't updated.`);
+      }
+      if (newlyCreated.length === 1 && newlyCreated[0]?.instance_id) {
+        const created = newlyCreated[0];
         const fId = String(created.folder_id || existing.folderId || defaultFolderId);
-        setPendingDiscogsOp(ledgerKey, { ...existing, status: 'created', instanceId: created.instance_id, folderId: fId });
+        const updatedOp = { ...existing, status: 'created', instanceId: created.instance_id, folderId: fId };
+        setPendingDiscogsOp(ledgerKey, updatedOp);
+        if (postingMatch.key !== ledgerKey) setPendingDiscogsOp(postingMatch.key, updatedOp);
         return { instanceId: created.instance_id, folderId: fId, reused: true };
       }
     }
@@ -3680,169 +3826,213 @@ Return ONLY valid JSON:
       return;
     }
 
-    const mediaCond = document.getElementById('gMediaCond').value || 'Very Good Plus (VG+)';
-    const sleeveCond = document.getElementById('gSleeveCond').value || 'Very Good Plus (VG+)';
-    const condNote = document.getElementById('gNotes').value.trim();
-
-    currentInspected.media_condition = mediaCond;
-    currentInspected.sleeve_condition = sleeveCond;
-    currentInspected.condition_note = condNote;
-
     const isEditing = Boolean(editingStashItem);
     const oldItem = editingStashItem;
-    const changedRelease = isEditing && Number(oldItem.discogs_id || 0) !== Number(currentInspected.discogs_id || 0);
-    const sameRelease = isEditing && oldItem.synced_to_discogs && Number(oldItem.discogs_id) === Number(currentInspected.discogs_id);
-    const swappedRelease = isEditing && oldItem.synced_to_discogs && oldItem.discogs_id && Number(oldItem.discogs_id) !== Number(currentInspected.discogs_id);
-
     const ledgerKey = isEditing && oldItem?.id ? `stash:${oldItem.id}` : `rel:${currentInspected.discogs_id || 'local'}`;
+    const relKey = currentInspected.discogs_id ? `rel:${currentInspected.discogs_id}` : '';
+    const lockKeys = Array.from(new Set([ledgerKey, relKey].filter(Boolean)));
 
-    let synced = isEditing ? Boolean(oldItem.synced_to_discogs) : false;
-    let folderId = isEditing ? (oldItem.discogs_folder_id || cfg.discogsFolderId || '1') : (cfg.discogsFolderId || '1');
-    let instanceId = isEditing ? (oldItem.discogs_instance_id || null) : null;
-    let pendingDiscogsSync = isEditing ? Boolean(oldItem.pending_discogs_sync) : false;
-    let pendingDeleteOld = isEditing ? (oldItem.pending_delete_old || null) : null;
-    let pendingFieldSync = isEditing ? Boolean(oldItem.pending_field_sync) : false;
+    if (lockKeys.some(k => activeDiscogsSaves.has(k))) return;
 
-    let fieldRes = { okCount: 0, failedCount: 0, errors: [] };
-    let sameReleaseSkippedRemote = false;
-    let sameReleaseRemoteCopies = 0;
+    if (syncToDiscogs && (!cfg.discogsToken || !cfg.discogsUser || !currentInspected.discogs_id)) {
+      toast('Verify Discogs in Settings first');
+      return;
+    }
 
-    const newThumbs = stagedPhotos.map(p => p.saveWebp);
-    const finalThumbs = newThumbs.length ? newThumbs : (isEditing ? (oldItem.thumbs || (oldItem.thumb_data_url ? [oldItem.thumb_data_url] : [])) : []);
+    lockKeys.forEach(k => activeDiscogsSaves.add(k));
+    const saveBothBtn = document.getElementById('btnSaveBoth');
+    const saveLocalBtn = document.getElementById('btnSaveLocal');
+    if (saveBothBtn) saveBothBtn.disabled = true;
+    if (saveLocalBtn) saveLocalBtn.disabled = true;
 
-    const buildRecord = () => {
-      const cleanInspected = { ...currentInspected };
-      delete cleanInspected._pendingDiscogsAdd;
-      const rec = {
-        ...cleanInspected,
-        is_conservative_tiebreak: Boolean(currentInspected.is_conservative_tiebreak),
-        tiebreak_confirmed: Boolean(!currentInspected.is_conservative_tiebreak || tiebreakChecked),
-        synced_to_discogs: synced,
-        pending_discogs_sync: pendingDiscogsSync,
-        pending_field_sync: pendingFieldSync,
-        pending_delete_old: pendingDeleteOld,
-        discogs_folder_id: synced ? folderId : null,
-        discogs_instance_id: synced ? instanceId : null,
-        thumbs: finalThumbs,
-        thumb_data_url: finalThumbs[0] || currentInspected.discogs_thumb || '',
-        created_at: isEditing ? (oldItem.created_at || Date.now()) : Date.now(),
-        updated_at: Date.now()
+    try {
+      const mediaCond = document.getElementById('gMediaCond').value || 'Very Good Plus (VG+)';
+      const sleeveCond = document.getElementById('gSleeveCond').value || 'Very Good Plus (VG+)';
+      const condNote = document.getElementById('gNotes').value.trim();
+
+      currentInspected.media_condition = mediaCond;
+      currentInspected.sleeve_condition = sleeveCond;
+      currentInspected.condition_note = condNote;
+
+      const changedRelease = isEditing && Number(oldItem.discogs_id || 0) !== Number(currentInspected.discogs_id || 0);
+      const sameRelease = isEditing && oldItem.synced_to_discogs && Number(oldItem.discogs_id) === Number(currentInspected.discogs_id);
+      const swappedRelease = isEditing && oldItem.synced_to_discogs && oldItem.discogs_id && Number(oldItem.discogs_id) !== Number(currentInspected.discogs_id);
+
+      let synced = isEditing ? Boolean(oldItem.synced_to_discogs) : false;
+      let folderId = isEditing ? (oldItem.discogs_folder_id || cfg.discogsFolderId || '1') : (cfg.discogsFolderId || '1');
+      let instanceId = isEditing ? (oldItem.discogs_instance_id || null) : null;
+      let pendingDiscogsSync = isEditing ? Boolean(oldItem.pending_discogs_sync) : false;
+      let pendingDeleteOld = isEditing ? (oldItem.pending_delete_old || null) : null;
+      let pendingFieldSync = isEditing ? Boolean(oldItem.pending_field_sync) : false;
+      let attachedFromLedger = false;
+
+      let fieldRes = { okCount: 0, failedCount: 0, errors: [] };
+      let sameReleaseSkippedRemote = false;
+      let sameReleaseRemoteCopies = 0;
+
+      const newThumbs = stagedPhotos.map(p => p.saveWebp);
+      const finalThumbs = newThumbs.length ? newThumbs : (isEditing ? (oldItem.thumbs || (oldItem.thumb_data_url ? [oldItem.thumb_data_url] : [])) : []);
+
+      const buildRecord = () => {
+        const cleanInspected = { ...currentInspected };
+        delete cleanInspected._pendingDiscogsAdd;
+        const rec = {
+          ...cleanInspected,
+          is_conservative_tiebreak: Boolean(currentInspected.is_conservative_tiebreak),
+          tiebreak_confirmed: Boolean(!currentInspected.is_conservative_tiebreak || tiebreakChecked),
+          synced_to_discogs: synced,
+          pending_discogs_sync: pendingDiscogsSync,
+          pending_field_sync: pendingFieldSync,
+          pending_delete_old: pendingDeleteOld,
+          discogs_folder_id: synced ? folderId : null,
+          discogs_instance_id: synced ? instanceId : null,
+          thumbs: finalThumbs,
+          thumb_data_url: finalThumbs[0] || currentInspected.discogs_thumb || '',
+          created_at: isEditing ? (oldItem.created_at || Date.now()) : Date.now(),
+          updated_at: Date.now()
+        };
+        if (isEditing) rec.id = oldItem.id;
+        return rec;
       };
-      if (isEditing) rec.id = oldItem.id;
-      return rec;
-    };
 
-    if (syncToDiscogs) {
-      if (!cfg.discogsToken || !cfg.discogsUser || !currentInspected.discogs_id) {
-        toast('Verify Discogs in Settings first');
-        return;
-      }
+      if (syncToDiscogs) {
+        try {
+          if (sameRelease) {
+            setStatus('Updating grades & notes on your existing Discogs item...', true);
+            if (!instanceId) {
+              const insts = await CC.findDiscogsInstances(oldItem.discogs_id, { throwOnError: true });
+              if (insts.length === 1) {
+                instanceId = insts[0].instance_id;
+                folderId = String(insts[0].folder_id || folderId);
+              } else {
+                sameReleaseSkippedRemote = true;
+                sameReleaseRemoteCopies = insts.length;
+              }
+            }
+            if (instanceId) {
+              fieldRes = await CC.syncDiscogsInstanceFields(folderId, currentInspected.discogs_id, instanceId, mediaCond, sleeveCond, condNote);
+              pendingFieldSync = fieldRes.failedCount > 0;
+            }
+            synced = true;
+            pendingDiscogsSync = false;
+          } else {
+            // 1. Durable Add-First with unified cross-path ledger + remote reconciliation on retry/reload
+            const added = await ensureDiscogsInstanceDurable(ledgerKey, currentInspected.discogs_id, cfg.discogsFolderId || '1', relKey ? [relKey] : []);
+            folderId = added.folderId;
+            instanceId = added.instanceId;
 
-      try {
-        if (sameRelease) {
-          setStatus('Updating grades & notes on your existing Discogs item...', true);
-          if (!instanceId) {
-            const insts = await CC.findDiscogsInstances(oldItem.discogs_id, { throwOnError: true });
-            if (insts.length === 1) {
-              instanceId = insts[0].instance_id;
-              folderId = String(insts[0].folder_id || folderId);
-            } else {
-              sameReleaseSkippedRemote = true;
-              sameReleaseRemoteCopies = insts.length;
+            // 2. Sync Media/Sleeve/Notes fields on the new instance
+            setStatus('Saving Media/Sleeve grade & notes to Discogs...', true);
+            fieldRes = await CC.syncDiscogsInstanceFields(folderId, currentInspected.discogs_id, instanceId, mediaCond, sleeveCond, condNote);
+
+            synced = true;
+            pendingDiscogsSync = false;
+            pendingFieldSync = fieldRes.failedCount > 0;
+
+            if (swappedRelease) {
+              pendingDeleteOld = {
+                releaseId: oldItem.discogs_id,
+                folderId: oldItem.discogs_folder_id || '1',
+                instanceId: oldItem.discogs_instance_id || null
+              };
             }
           }
-          if (instanceId) {
-            fieldRes = await CC.syncDiscogsInstanceFields(folderId, currentInspected.discogs_id, instanceId, mediaCond, sleeveCond, condNote);
-            pendingFieldSync = fieldRes.failedCount > 0;
-          }
-          synced = true;
-          pendingDiscogsSync = false;
-        } else {
-          // 1. Durable Add-First with localStorage ledger + remote reconciliation on retry/reload
-          const added = await ensureDiscogsInstanceDurable(ledgerKey, currentInspected.discogs_id, cfg.discogsFolderId || '1');
-          folderId = added.folderId;
-          instanceId = added.instanceId;
-
-          // 2. Sync Media/Sleeve/Notes fields on the new instance
-          setStatus('Saving Media/Sleeve grade & notes to Discogs...', true);
-          fieldRes = await CC.syncDiscogsInstanceFields(folderId, currentInspected.discogs_id, instanceId, mediaCond, sleeveCond, condNote);
-
-          synced = true;
-          pendingDiscogsSync = false;
-          pendingFieldSync = fieldRes.failedCount > 0;
-
-          if (swappedRelease) {
+        } catch (err) {
+          setStatus('', false);
+          toast('Discogs sync failed (old copy untouched): ' + err.message, 5200);
+          return;
+        }
+      } else {
+        if (changedRelease) {
+          if (oldItem.synced_to_discogs && oldItem.discogs_id) {
             pendingDeleteOld = {
               releaseId: oldItem.discogs_id,
               folderId: oldItem.discogs_folder_id || '1',
               instanceId: oldItem.discogs_instance_id || null
             };
           }
+          instanceId = null;
+          folderId = null;
+          synced = false;
+          pendingDiscogsSync = true;
+          pendingFieldSync = false;
+        }
+
+        // Cross-path recovery: if a prior Sync attempt already created a Discogs instance before IDB failed,
+        // attach that instanceId now so a subsequent "Push to Discogs" never creates a duplicate copy.
+        if (currentInspected.discogs_id) {
+          const priorCreated = findMatchingPendingDiscogsOp([ledgerKey, relKey], currentInspected.discogs_id, { requireCreated: true });
+          if (priorCreated?.op?.instanceId) {
+            instanceId = priorCreated.op.instanceId;
+            folderId = priorCreated.op.folderId || cfg.discogsFolderId || '1';
+            synced = true;
+            pendingDiscogsSync = false;
+            pendingFieldSync = true;
+            attachedFromLedger = true;
+          }
+        }
+      }
+
+      // 3. IMMEDIATELY persist updated Stash record to IndexedDB BEFORE deleting any old Discogs copy
+      const record = buildRecord();
+      try {
+        const savedKey = await CC.idbPut('stash', record);
+        if (!record.id) record.id = savedKey;
+        if (syncToDiscogs || attachedFromLedger) {
+          clearPendingDiscogsOp(ledgerKey);
+          if (relKey && relKey !== ledgerKey) clearPendingDiscogsOp(relKey);
         }
       } catch (err) {
         setStatus('', false);
-        toast('Discogs sync failed (old copy untouched): ' + err.message, 5200);
+        toast('Local save failed — tap Save again to retry safely without duplicating on Discogs: ' + err.message, 5600);
         return;
       }
-    } else if (changedRelease) {
-      if (oldItem.synced_to_discogs && oldItem.discogs_id) {
-        pendingDeleteOld = {
-          releaseId: oldItem.discogs_id,
-          folderId: oldItem.discogs_folder_id || '1',
-          instanceId: oldItem.discogs_instance_id || null
-        };
-      }
-      instanceId = null;
-      folderId = null;
-      synced = false;
-      pendingDiscogsSync = true;
-      pendingFieldSync = false;
-    }
 
-    // 3. IMMEDIATELY persist updated Stash record to IndexedDB BEFORE deleting any old Discogs copy
-    const record = buildRecord();
-    try {
-      const savedKey = await CC.idbPut('stash', record);
-      if (!record.id) record.id = savedKey;
-      clearPendingDiscogsOp(ledgerKey);
-    } catch (err) {
+      // 4. Only delete old copy when ALL requested field writes succeeded (fieldRes.failedCount === 0)
+      let oldDeleteWarning = '';
+      if (syncToDiscogs && record.pending_delete_old) {
+        if (fieldRes.failedCount > 0) {
+          oldDeleteWarning = `${fieldRes.failedCount} grade/note field(s) failed to sync (${fieldRes.errors[0] || ''}) — old copy #${record.pending_delete_old.releaseId} was kept safely on Discogs. Retry from Stash Detail.`;
+        } else {
+          setStatus(`Removing old pressing #${record.pending_delete_old.releaseId} from Discogs...`, true);
+          const delRes = await attemptDeleteOldCopy(record);
+          if (!delRes.ok) oldDeleteWarning = delRes.warning;
+        }
+      }
+
+      await loadStashCache();
       setStatus('', false);
-      toast('Local save failed — tap Save again to retry safely without duplicating on Discogs: ' + err.message, 5600);
-      return;
-    }
 
-    // 4. Only delete old copy when ALL requested field writes succeeded (fieldRes.failedCount === 0)
-    let oldDeleteWarning = '';
-    if (syncToDiscogs && record.pending_delete_old) {
-      if (fieldRes.failedCount > 0) {
-        oldDeleteWarning = `${fieldRes.failedCount} grade/note field(s) failed to sync (${fieldRes.errors[0] || ''}) — old copy #${record.pending_delete_old.releaseId} was kept safely on Discogs. Retry from Stash Detail.`;
+      if (oldDeleteWarning) {
+        toast(`⚠️ ${oldDeleteWarning}`, 6000);
+      } else if (sameReleaseSkippedRemote) {
+        toast(`💾 Saved locally — found ${sameReleaseRemoteCopies} Discogs cop${sameReleaseRemoteCopies === 1 ? 'y' : 'ies'}, so remote grades were not overwritten.`, 5200);
+      } else if (fieldRes.failedCount > 0) {
+        toast(`⚠️ Saved to Discogs, but ${fieldRes.failedCount} field(s) failed: ${fieldRes.errors[0] || ''}`, 5200);
+      } else if (attachedFromLedger) {
+        toast('💾 Saved locally & linked existing Discogs copy (sync grades from Stash Detail).', 4800);
+      } else if (isEditing) {
+        toast(syncToDiscogs
+          ? '✅ Stash & Discogs updated cleanly!'
+          : (pendingDiscogsSync ? '💾 Updated locally (marked Pending Discogs Sync)' : '💾 Stash updated!'));
       } else {
-        setStatus(`Removing old pressing #${record.pending_delete_old.releaseId} from Discogs...`, true);
-        const delRes = await attemptDeleteOldCopy(record);
-        if (!delRes.ok) oldDeleteWarning = delRes.warning;
+        toast(synced ? `✅ Saved to Discogs${fieldRes.okCount ? ' (with grades!)' : ''} & Stash!` : '💾 Saved to Local Stash!');
+      }
+
+      editingStashItem = null;
+      document.getElementById('editModeBanner').classList.add('hidden');
+      resetScanner();
+    } finally {
+      lockKeys.forEach(k => activeDiscogsSaves.delete(k));
+      if (currentInspected) {
+        updateSaveButtonsState();
+      } else {
+        const bBoth = document.getElementById('btnSaveBoth');
+        const bLocal = document.getElementById('btnSaveLocal');
+        if (bBoth) bBoth.disabled = false;
+        if (bLocal) bLocal.disabled = false;
       }
     }
-
-    await loadStashCache();
-    setStatus('', false);
-
-    if (oldDeleteWarning) {
-      toast(`⚠️ ${oldDeleteWarning}`, 6000);
-    } else if (sameReleaseSkippedRemote) {
-      toast(`💾 Saved locally — found ${sameReleaseRemoteCopies} Discogs cop${sameReleaseRemoteCopies === 1 ? 'y' : 'ies'}, so remote grades were not overwritten.`, 5200);
-    } else if (fieldRes.failedCount > 0) {
-      toast(`⚠️ Saved to Discogs, but ${fieldRes.failedCount} field(s) failed: ${fieldRes.errors[0] || ''}`, 5200);
-    } else if (isEditing) {
-      toast(syncToDiscogs
-        ? '✅ Stash & Discogs updated cleanly!'
-        : (pendingDiscogsSync ? '💾 Updated locally (marked Pending Discogs Sync)' : '💾 Stash updated!'));
-    } else {
-      toast(synced ? `✅ Saved to Discogs${fieldRes.okCount ? ' (with grades!)' : ''} & Stash!` : '💾 Saved to Local Stash!');
-    }
-
-    editingStashItem = null;
-    document.getElementById('editModeBanner').classList.add('hidden');
-    resetScanner();
   };
 
   window.startEditStashItem = (id) => {
@@ -3925,6 +4115,21 @@ Return ONLY valid JSON:
     updateSettingsPills();
   }
 
+  function updateRecalibrateStashBtn() {
+    const recalBtn = document.getElementById('btnRecalibrateStash');
+    if (!recalBtn) return;
+    if (recalibratingStash) {
+      recalBtn.disabled = true;
+      recalBtn.textContent = recalibrateProgressText || '⏳ Recalibrating...';
+      return;
+    }
+    const staleCount = stashCache.filter(isStashTasteStale).length;
+    recalBtn.disabled = false;
+    recalBtn.textContent = staleCount > 0
+      ? `🔄 Recalibrate Taste (${staleCount} updated)`
+      : '🔄 Recalibrate Taste';
+  }
+
   window.renderStash = () => {
     const q = norm(document.getElementById('stashSearch').value);
     const filtered = stashCache.filter(it => {
@@ -3937,13 +4142,7 @@ Return ONLY valid JSON:
       return norm(`${it.artist} ${it.title} ${it.catno} ${it.label} ${it.condition_note} ${(it.tracklist || []).map(t => `${t.artist || ''} ${t.title}`).join(' ')}`).includes(q);
     });
 
-    const staleCount = stashCache.filter(isStashTasteStale).length;
-    const recalBtn = document.getElementById('btnRecalibrateStash');
-    if (recalBtn) {
-      recalBtn.textContent = staleCount > 0
-        ? `🔄 Recalibrate Taste (${staleCount} updated)`
-        : '🔄 Recalibrate Taste';
-    }
+    updateRecalibrateStashBtn();
 
     const totalValUsd = filtered.reduce((s, it) => {
       const u = toApproxUsd(it.est_price, it.est_currency || 'USD');
@@ -3983,6 +4182,14 @@ Return ONLY valid JSON:
     const it = stashCache.find(x => x.id === id);
     if (!it) return;
     if (!CC.isAiReady()) { toast('Add your Gemini API Key in Settings first'); return; }
+    if (rescoringStashItemId === id) return;
+
+    rescoringStashItemId = id;
+    const rescoreBtn = document.getElementById('sdBtnRescore');
+    if (rescoreBtn) {
+      rescoreBtn.disabled = true;
+      rescoreBtn.textContent = '⏳ Re-Scoring...';
+    }
 
     const localMatch = checkLocalSpotify(it);
     it.spotify_matches = localMatch;
@@ -4041,16 +4248,24 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
       it.taste_scored_at = Date.now();
       it.updated_at = Date.now();
 
-      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v192`);
+      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v193`);
       await CC.idbPut('stash', it);
       await loadStashCache();
       renderStash();
       setStatus('', false);
+      rescoringStashItemId = null;
       if (activeStashItem?.id === id) openStashDetail(id, true);
       toast(`✅ Re-scored: ${it.taste_score}/10 (${it.taste_verdict})`, 3200);
     } catch (err) {
       setStatus('', false);
       if (err.name !== 'AbortError') toast('Re-score failed: ' + err.message, 4500);
+    } finally {
+      if (rescoringStashItemId === id) rescoringStashItemId = null;
+      const b = document.getElementById('sdBtnRescore');
+      if (b && activeStashItem?.id === id) {
+        b.disabled = false;
+        b.textContent = '🔄 Re-Score';
+      }
     }
   };
 
@@ -4070,11 +4285,11 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
       if (!confirm(`Recalibrate all ${targets.length} Stash item(s) against your latest Taste Profile & Soft Spots?`)) return;
     }
 
-    recalibratingStash = true;
-    const btn = document.getElementById('btnRecalibrateStash');
-    if (btn) btn.disabled = true;
-
     const BATCH_SIZE = 20;
+    recalibratingStash = true;
+    recalibrateProgressText = `⏳ Recalibrating 1–${Math.min(BATCH_SIZE, targets.length)} of ${targets.length}...`;
+    updateRecalibrateStashBtn();
+
     const dna = spotifyProfile?.tasteDna || 'No written Taste Profile yet.';
     const softSpots = spotifyProfile?.softSpots || 'None specified';
     let updatedTotal = 0;
@@ -4084,6 +4299,8 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
         if (!recalibratingStash) break;
         const chunk = targets.slice(start, start + BATCH_SIZE);
         const endNum = start + chunk.length;
+        recalibrateProgressText = `⏳ Recalibrating ${start + 1}–${endNum} of ${targets.length}...`;
+        updateRecalibrateStashBtn();
         setStatus(`🔄 Recalibrating ${start + 1}–${endNum} of ${targets.length}...`, true, { cancellable: true });
 
         const payload = chunk.map((it, idx) => {
@@ -4158,7 +4375,8 @@ Return ONLY valid JSON:
       if (err.name !== 'AbortError') toast(`Recalibration stopped after ${updatedTotal} item(s): ${err.message}`, 4800);
     } finally {
       recalibratingStash = false;
-      if (btn) btn.disabled = false;
+      recalibrateProgressText = '';
+      updateRecalibrateStashBtn();
     }
   };
 
@@ -4252,7 +4470,7 @@ Return ONLY valid JSON:
         <div class="taste-header">
           <strong style="font-size:0.92rem;">🎧 Taste &amp; Context</strong>
           <div class="inline-actions" style="gap:6px;">
-            <button type="button" class="btn btn-secondary btn-sm" style="min-height:28px; padding:3px 9px; font-size:0.74rem;" onclick="recalibrateSingleStashItem(${it.id})">🔄 Re-Score</button>
+            <button id="sdBtnRescore" type="button" class="btn btn-secondary btn-sm" style="min-height:28px; padding:3px 9px; font-size:0.74rem;" ${rescoringStashItemId === it.id ? 'disabled' : ''} onclick="recalibrateSingleStashItem(${it.id})">${rescoringStashItemId === it.id ? '⏳ Re-Scoring...' : '🔄 Re-Score'}</button>
             <span class="taste-score">${it.taste_score ? `${esc(it.taste_score)}/10` : '—'} ${it.taste_verdict ? `<span class="badge ${verdictBadgeClass(it.taste_verdict)}" style="vertical-align:middle;">${esc(it.taste_verdict)}</span>` : ''}</span>
           </div>
         </div>
@@ -4264,7 +4482,7 @@ Return ONLY valid JSON:
 
       <div class="section-block">
         <div class="section-heading">🎵 Tracklist (${(it.tracklist || []).length})</div>
-        <div class="tracklist-open">${buildTracklistHtml(it.tracklist || [], localMatch.matchedTracks, 'stash')}</div>
+        <div class="tracklist-open">${buildTracklistHtml(it.tracklist || [], localMatch.matchedTracks, 'stash', it.artist)}</div>
       </div>
 
       ${it.pressing_notes ? `
@@ -4312,12 +4530,20 @@ Return ONLY valid JSON:
 
     document.getElementById('stashDetailModal').classList.remove('hidden');
     body.scrollTop = 0;
+    syncTrackPlayButtons();
+    updateStashPushBtnState();
   };
 
   window.updateStashPushBtnState = () => {
     const btn = document.getElementById('sdBtnPushDiscogs');
+    if (!btn) return;
+    const isLocked = Boolean(
+      activeStashItem &&
+      (activeDiscogsSaves.has(`stash:${activeStashItem.id}`) ||
+       (activeStashItem.discogs_id && activeDiscogsSaves.has(`rel:${activeStashItem.discogs_id}`)))
+    );
     const chk = document.getElementById('sdChkConfirmTiebreak');
-    if (btn && chk) btn.disabled = !chk.checked;
+    btn.disabled = isLocked || Boolean(chk && !chk.checked);
   };
 
   window.closeStashDetail = () => {
@@ -4419,14 +4645,23 @@ Return ONLY valid JSON:
       }
     }
 
+    const ledgerKey = `stash:${it.id}`;
+    const relKey = `rel:${it.discogs_id}`;
+    const lockKeys = [ledgerKey, relKey];
+    if (lockKeys.some(k => activeDiscogsSaves.has(k))) return;
+
+    lockKeys.forEach(k => activeDiscogsSaves.add(k));
+    const pushBtn = document.getElementById('sdBtnPushDiscogs');
+    if (pushBtn) pushBtn.disabled = true;
+
     if (activeStashItem?.id === id) {
       it.media_condition = document.getElementById('sdMediaCond')?.value || it.media_condition;
       it.sleeve_condition = document.getElementById('sdSleeveCond')?.value || it.sleeve_condition;
       it.condition_note = document.getElementById('sdNotes')?.value.trim() ?? it.condition_note;
     }
-    const ledgerKey = `stash:${it.id}`;
+
     try {
-      const added = await ensureDiscogsInstanceDurable(ledgerKey, it.discogs_id, cfg.discogsFolderId || '1');
+      const added = await ensureDiscogsInstanceDurable(ledgerKey, it.discogs_id, cfg.discogsFolderId || '1', [relKey]);
       const folderId = added.folderId;
       const newInstId = added.instanceId;
 
@@ -4440,9 +4675,10 @@ Return ONLY valid JSON:
       const fieldRes = await CC.syncDiscogsInstanceFields(folderId, it.discogs_id, newInstId, it.media_condition, it.sleeve_condition, it.condition_note);
       it.pending_field_sync = fieldRes.failedCount > 0;
 
-      // Persist immediately BEFORE removing any old swapped pressing; clear ledger only after IDB succeeds
+      // Persist immediately BEFORE removing any old swapped pressing; clear both ledger keys only after IDB succeeds
       await CC.idbPut('stash', it);
       clearPendingDiscogsOp(ledgerKey);
+      clearPendingDiscogsOp(relKey);
 
       let oldWarn = '';
       if (it.pending_delete_old) {
@@ -4470,6 +4706,9 @@ Return ONLY valid JSON:
     } catch (e) {
       setStatus('', false);
       toast('Failed: ' + e.message, 4500);
+    } finally {
+      lockKeys.forEach(k => activeDiscogsSaves.delete(k));
+      updateStashPushBtnState();
     }
   };
 

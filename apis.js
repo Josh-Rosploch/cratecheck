@@ -506,7 +506,12 @@
   CC.callAI = async (parts, thinkingLevel = null, opts = {}) => runGeminiRequest(parts, thinkingLevel, opts);
   CC.callGeminiJSON = CC.callAI;
 
-  // ==================== REMIX-AWARE AUDIO PREVIEW + PLATFORM AVAILABILITY ====================
+  // ==================== ERA-, ALBUM- & REMIX-AWARE AUDIO PREVIEW + PLATFORM AVAILABILITY ====================
+  function extractYear4(val) {
+    const m = String(val || '').match(/\b(19\d{2}|20\d{2})\b/);
+    return m ? Number(m[1]) : null;
+  }
+
   function splitTrackVersion(raw) {
     const str = String(raw || '').trim();
     const parts = [];
@@ -518,7 +523,7 @@
     return { base, version: parts.join(' ').trim() };
   }
 
-  function scoreAudioCandidate(candArtist, candTrack, candAlbum, targetArtist, rawTrack, targetAlbum, strictTrack) {
+  function scoreAudioCandidate(candArtist, candTrack, candAlbum, targetArtist, rawTrack, targetAlbum, strictTrack, targetYear = null, candYear = null) {
     const isVarious = !targetArtist || /^various(\s+artists)?$/i.test(targetArtist.trim());
     const aSim = isVarious ? 0.7 : CC.similarity(targetArtist, candArtist || '');
     const isTribute = /karaoke|tribute|cover band|lullaby|in the style of/i.test(`${candArtist} ${candAlbum} ${candTrack}`);
@@ -528,12 +533,59 @@
     const cand = splitTrackVersion(candTrack);
     const tSimBase = req.base ? CC.similarity(req.base, cand.base || candTrack || '') : 0;
     const albSim = targetAlbum ? CC.similarity(targetAlbum, candAlbum || '') : 0;
+    const tYear = extractYear4(targetYear);
+    const cYear = extractYear4(candYear);
+
+    const applyEraAndAltAdjustments = (baseScore) => {
+      let adj = baseScore;
+      if (tYear && cYear) {
+        if (Math.abs(cYear - tYear) <= 2) adj += 0.16;
+        else if (cYear > tYear + 5 && albSim < 0.65) adj -= 0.24;
+      }
+
+      const reqText = String(rawTrack || '');
+      const reqAsksAlt = /\b(re-?record\w*|live|acoustic|unplugged|anniversary)\b/i.test(reqText) ||
+        Boolean(tYear && Array.from(reqText.matchAll(/\b(19\d{2}|20\d{2})\b/g)).some(m => Number(m[1]) > tYear + 5));
+
+      if (!reqAsksAlt) {
+        const candMeta = `${candTrack || ''} ${candAlbum || ''}`;
+        const candNonTitle = `${cand.version || ''} ${candAlbum || ''}`;
+        const hasReRecordOrAnniv = /\b(re-?record\w*|unplugged|anniversary)\b/i.test(candMeta);
+        const reqBaseHasLive = /\blive\b/i.test(req.base || '');
+        const reqBaseHasAcoustic = /\bacoustic\b/i.test(req.base || '');
+        const hasLiveOrAcoustic =
+          (!reqBaseHasLive && /\blive\b/i.test(candMeta)) ||
+          (reqBaseHasLive && /\blive\b/i.test(candNonTitle)) ||
+          (!reqBaseHasAcoustic && /\bacoustic\b/i.test(candMeta)) ||
+          (reqBaseHasAcoustic && /\bacoustic\b/i.test(candNonTitle));
+
+        let hasLaterParenYear = false;
+        if (tYear) {
+          const parenGroups = candMeta.match(/[\(\[]([^\)\]]+)[\)\]]/g) || [];
+          for (const g of parenGroups) {
+            const inner = g.slice(1, -1);
+            const isStandardRemasterOnOrigAlb = /\bremaster\w*\b/i.test(inner) && albSim >= 0.65;
+            if (isStandardRemasterOnOrigAlb) continue;
+            const yrs = Array.from(inner.matchAll(/\b(19\d{2}|20\d{2})\b/g)).map(m => Number(m[1]));
+            if (yrs.some(y => y > tYear + 5)) {
+              hasLaterParenYear = true;
+              break;
+            }
+          }
+        }
+
+        if (hasReRecordOrAnniv || hasLiveOrAcoustic || hasLaterParenYear) {
+          adj -= 0.26;
+        }
+      }
+      return adj;
+    };
 
     if (strictTrack && req.base) {
       if (tSimBase < 0.45) return { score: -1, versionMatched: false };
       if (!isVarious && aSim < 0.35) return { score: -1, versionMatched: false };
 
-      let score = tSimBase * 0.50 + aSim * 0.25 + albSim * 0.05;
+      let score = tSimBase * 0.50 + aSim * 0.25 + albSim * 0.18;
       let versionMatched = !req.version;
 
       if (req.version) {
@@ -561,15 +613,16 @@
         if (cand.version && /remix|line dance|dub|club mix|extended|karaoke|instrumental/i.test(cand.version)) score -= 0.22;
         else score += 0.12;
       }
+      score = applyEraAndAltAdjustments(score);
       return { score, versionMatched };
     }
 
     if (!isVarious && aSim < 0.45) return { score: -1, versionMatched: false };
     if (targetAlbum && albSim < 0.35) return { score: -1, versionMatched: false };
-    return { score: aSim * 0.55 + albSim * 0.45, versionMatched: true };
+    return { score: applyEraAndAltAdjustments(aSim * 0.55 + albSim * 0.45), versionMatched: true };
   }
 
-  async function queryApple(term, artist, rawTrack, album, strictTrack) {
+  async function queryApple(term, artist, rawTrack, album, strictTrack, targetYear = null) {
     try {
       const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(term)}&media=music&entity=song&limit=25`);
       if (!res.ok) return null;
@@ -578,7 +631,8 @@
       if (!items.length) return null;
       const best = items
         .map(r => {
-          const ev = scoreAudioCandidate(r.artistName, r.trackName, r.collectionName, artist, rawTrack, album, strictTrack);
+          const candYear = extractYear4(r.releaseDate);
+          const ev = scoreAudioCandidate(r.artistName, r.trackName, r.collectionName, artist, rawTrack, album, strictTrack, targetYear, candYear);
           return { r, score: ev.score, versionMatched: ev.versionMatched };
         })
         .filter(x => x.score > 0)
@@ -595,7 +649,7 @@
     } catch (_) { return null; }
   }
 
-  function queryDeezerJSONP(query, artist, rawTrack, album, strictTrack) {
+  function queryDeezerJSONP(query, artist, rawTrack, album, strictTrack, targetYear = null) {
     return new Promise((resolve) => {
       const cbName = '_dzcb_' + Math.random().toString(36).slice(2, 9);
       const script = document.createElement('script');
@@ -608,7 +662,8 @@
         if (!list.length) { resolve(null); return; }
         const best = list
           .map(x => {
-            const ev = scoreAudioCandidate(x.artist?.name, x.title, x.album?.title, artist, rawTrack, album, strictTrack);
+            const candYear = extractYear4(x.album?.release_date || x.release_date);
+            const ev = scoreAudioCandidate(x.artist?.name, x.title, x.album?.title, artist, rawTrack, album, strictTrack, targetYear, candYear);
             return { x, score: ev.score, versionMatched: ev.versionMatched };
           })
           .filter(y => y.score > 0)
@@ -631,7 +686,7 @@
     });
   }
 
-  async function querySpotifyExact(query, artist, rawTrack, album, strictTrack) {
+  async function querySpotifyExact(query, artist, rawTrack, album, strictTrack, targetYear = null) {
     if (!CC.cfg.spotifyAccessToken && !CC.cfg.spotifyRefreshToken) return null;
     try {
       const d = await spFetch(`https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=track&limit=10`);
@@ -640,7 +695,8 @@
       const best = list
         .map(x => {
           const aName = (x.artists || []).map(a => a.name).join(', ');
-          const ev = scoreAudioCandidate(aName, x.name, x.album?.name, artist, rawTrack, album, strictTrack);
+          const candYear = extractYear4(x.album?.release_date);
+          const ev = scoreAudioCandidate(aName, x.name, x.album?.name, artist, rawTrack, album, strictTrack, targetYear, candYear);
           return { x, aName, score: ev.score, versionMatched: ev.versionMatched };
         })
         .filter(y => y.score > 0)
@@ -656,7 +712,7 @@
     } catch (_) { return null; }
   }
 
-  CC.fetchAudioAndPlatforms = async (artist, track, album, strictTrack = true) => {
+  CC.fetchAudioAndPlatforms = async (artist, track, album, strictTrack = true, targetYear = null) => {
     const isVarious = !artist || /^various(\s+artists)?$/i.test(artist.trim());
     const rawTrack = String(track || '').trim();
     const { base, version } = splitTrackVersion(rawTrack);
@@ -671,9 +727,9 @@
     const pickBetter = (cur, next) => (!cur || (next && ((next.exactVersion && !cur.exactVersion) || (next.exactVersion === cur.exactVersion && next.score > cur.score)))) ? next : cur;
 
     const [ap1, dz1, sp1] = await Promise.all([
-      queryApple(primaryQ, artist, rawTrack, album, strictTrack),
-      queryDeezerJSONP(primaryQ, artist, rawTrack, album, strictTrack),
-      CC.cfg.showSpotify ? querySpotifyExact(primaryQ, artist, rawTrack, album, strictTrack) : Promise.resolve(null)
+      queryApple(primaryQ, artist, rawTrack, album, strictTrack, targetYear),
+      queryDeezerJSONP(primaryQ, artist, rawTrack, album, strictTrack, targetYear),
+      CC.cfg.showSpotify ? querySpotifyExact(primaryQ, artist, rawTrack, album, strictTrack, targetYear) : Promise.resolve(null)
     ]);
 
     let apBest = ap1, dzBest = dz1, spBest = sp1;
@@ -681,9 +737,9 @@
     // Fallback 1: parentheticals/brackets stripped (baseQ) across ALL enabled services lacking an exact match
     if (baseQ && baseQ !== primaryQ && (!apBest?.exactVersion || !dzBest?.exactVersion || (CC.cfg.showSpotify && !spBest?.exactVersion))) {
       const [ap2, dz2, sp2] = await Promise.all([
-        !apBest?.exactVersion ? queryApple(baseQ, artist, rawTrack, album, strictTrack) : Promise.resolve(null),
-        !dzBest?.exactVersion ? queryDeezerJSONP(baseQ, artist, rawTrack, album, strictTrack) : Promise.resolve(null),
-        (CC.cfg.showSpotify && !spBest?.exactVersion) ? querySpotifyExact(baseQ, artist, rawTrack, album, strictTrack) : Promise.resolve(null)
+        !apBest?.exactVersion ? queryApple(baseQ, artist, rawTrack, album, strictTrack, targetYear) : Promise.resolve(null),
+        !dzBest?.exactVersion ? queryDeezerJSONP(baseQ, artist, rawTrack, album, strictTrack, targetYear) : Promise.resolve(null),
+        (CC.cfg.showSpotify && !spBest?.exactVersion) ? querySpotifyExact(baseQ, artist, rawTrack, album, strictTrack, targetYear) : Promise.resolve(null)
       ]);
       apBest = pickBetter(apBest, ap2);
       dzBest = pickBetter(dzBest, dz2);
@@ -693,9 +749,9 @@
     // Fallback 2: ASCII-folded query (e.g., Turkish/accented titles) across ALL enabled services lacking an exact match
     if (foldedBaseQ && foldedBaseQ !== baseQ && foldedBaseQ !== primaryQ && (!apBest?.exactVersion || !dzBest?.exactVersion || (CC.cfg.showSpotify && !spBest?.exactVersion))) {
       const [ap3, dz3, sp3] = await Promise.all([
-        !apBest?.exactVersion ? queryApple(foldedBaseQ, artist, rawTrack, album, strictTrack) : Promise.resolve(null),
-        !dzBest?.exactVersion ? queryDeezerJSONP(foldedBaseQ, artist, rawTrack, album, strictTrack) : Promise.resolve(null),
-        (CC.cfg.showSpotify && !spBest?.exactVersion) ? querySpotifyExact(foldedBaseQ, artist, rawTrack, album, strictTrack) : Promise.resolve(null)
+        !apBest?.exactVersion ? queryApple(foldedBaseQ, artist, rawTrack, album, strictTrack, targetYear) : Promise.resolve(null),
+        !dzBest?.exactVersion ? queryDeezerJSONP(foldedBaseQ, artist, rawTrack, album, strictTrack, targetYear) : Promise.resolve(null),
+        (CC.cfg.showSpotify && !spBest?.exactVersion) ? querySpotifyExact(foldedBaseQ, artist, rawTrack, album, strictTrack, targetYear) : Promise.resolve(null)
       ]);
       apBest = pickBetter(apBest, ap3);
       dzBest = pickBetter(dzBest, dz3);
