@@ -48,14 +48,12 @@ header {
 .pill.ok { color: var(--green); border-color: rgba(16, 185, 129, 0.4); }
 .pill.warn { color: var(--yellow); border-color: rgba(245, 158, 11, 0.4); }
 .pill.err { color: var(--red); border-color: rgba(239, 68, 68, 0.4); }
-.pill.local { color: #d8b4fe; border-color: rgba(168, 85, 247, 0.55); background: rgba(168, 85, 247, 0.16); }
 
 main { max-width: 720px; margin: 0 auto; padding: 14px; }
 .view { display: none; }
 .view.active { display: block; }
 
 .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 12px; }
-.provider-box { background: rgba(13, 16, 23, 0.55); border: 1px solid var(--border); border-radius: 12px; padding: 11px; }
 h2 { margin: 0 0 10px; font-size: 1.05rem; font-weight: 700; }
 h3 { margin: 0 0 8px; font-size: 0.95rem; font-weight: 700; }
 p { margin: 0 0 10px; color: var(--muted); font-size: 0.9rem; }
@@ -353,8 +351,15 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 
 .cam-overlay { position: fixed; inset: 0; z-index: 95; background: #000; display: flex; flex-direction: column; }
 .cam-top { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; background: rgba(0,0,0,0.75); }
-.cam-stage { position: relative; flex: 1; overflow: hidden; background: #000; display: flex; align-items: center; justify-content: center; }
+.cam-stage { position: relative; flex: 1; overflow: hidden; background: #000; display: flex; align-items: center; justify-content: center; cursor: crosshair; }
 .cam-stage video { width: 100%; height: 100%; object-fit: cover; }
+.cam-focus-ring {
+  position: absolute; width: 72px; height: 72px; margin-left: -36px; margin-top: -36px;
+  border: 2px solid #fbbf24; border-radius: 50%; pointer-events: none;
+  opacity: 0; transform: scale(1.35); transition: opacity 0.2s ease, transform 0.22s ease;
+  box-shadow: 0 0 12px rgba(251, 191, 36, 0.65);
+}
+.cam-focus-ring.show { opacity: 1; transform: scale(1); }
 .cam-upc-badge { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); background: rgba(16, 185, 129, 0.92); color: #052e16; font-weight: 900; font-size: 0.85rem; padding: 6px 14px; border-radius: 999px; box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
 .cam-flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; transition: opacity 0.18s ease; }
 .cam-flash.flash { opacity: 0.7; }
@@ -364,6 +369,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .cam-controls { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .shutter-btn { width: 68px; height: 68px; border-radius: 50%; border: 4px solid #fff; background: rgba(255,255,255,0.22); cursor: pointer; transition: transform 0.08s ease; }
 .shutter-btn:active { transform: scale(0.92); background: rgba(255,255,255,0.55); }
+.shutter-btn:disabled { opacity: 0.5; cursor: wait; }
 
 .lb-overlay { position: fixed; inset: 0; z-index: 98; background: rgba(0,0,0,0.97); display: flex; flex-direction: column; }
 .lb-top { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; background: rgba(0,0,0,0.7); }

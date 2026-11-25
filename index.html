@@ -7,14 +7,14 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>CrateCheck — Media Scanner</title>
-  <link rel="stylesheet" href="style.css?v=1.7" />
+  <link rel="stylesheet" href="style.css?v=1.8" />
 </head>
 <body>
 
 <header>
-  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.7</span></div>
+  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.8</span></div>
   <div class="status-pills">
-    <span id="aiPill" class="pill" title="Active AI engine" onclick="switchView('settings')">AI: Cloud</span>
+    <span id="aiPill" class="pill" title="Gemini Cloud AI status" onclick="switchView('settings')">Gemini: Off</span>
     <span id="ratePill" class="pill" title="Discogs API sliding window (max 58/min)">API 0/58</span>
     <span id="spotifyPill" class="pill">Spotify: Off</span>
   </div>
@@ -25,7 +25,7 @@
   <section id="view-scan" class="view active">
     <div id="setupNotice" class="card hidden" style="border-color: var(--yellow); background: var(--yellow-bg);">
       <div style="font-weight: 800; color: #fde68a; margin-bottom: 4px;">Finish Quick Setup First</div>
-      <p style="color: #fef3c7; font-size: 0.84rem; margin-bottom: 8px;">Configure your AI Engine (Local PC or Gemini) &amp; Discogs Token in Settings.</p>
+      <p style="color: #fef3c7; font-size: 0.84rem; margin-bottom: 8px;">Configure your Gemini API Key &amp; Discogs Token in Settings.</p>
       <button class="btn btn-sm" onclick="switchView('settings')">⚙️ Open Settings</button>
     </div>
 
@@ -79,7 +79,7 @@
         <div id="stagedSummary" class="staged-box hidden">
           <div id="stagedUpcRow" class="hidden" style="margin-bottom:8px;"></div>
           <div id="previewStrip" class="preview-strip"></div>
-          <div style="font-size:0.72rem; color:var(--muted); margin-top:5px;">Tap any photo to inspect fullscreen · Saved at 1200px WebP</div>
+          <div style="font-size:0.72rem; color:var(--muted); margin-top:5px;">Tap any photo to inspect fullscreen · AI 2048px JPEG · Stash 1200px WebP</div>
         </div>
 
         <div class="search-action-row">
@@ -99,7 +99,7 @@
         <input id="pileGalleryInput" class="hidden-file" type="file" accept="image/*" />
         <input id="pileCamInput" class="hidden-file" type="file" accept="image/*" capture="environment" />
         <p style="font-size:0.84rem; margin-bottom:10px;">
-          Snap or upload a box/shelf of tapes. AI maps each legible tape's position, scores it against your <strong>Taste DNA</strong>, and pulls rough Discogs prices. <strong>Tap any result to spotlight it in the photo.</strong>
+          Snap or upload a box/shelf of tapes. AI maps each legible tape's position and scores it against your <strong>Taste DNA &amp; Soft Spots</strong> immediately. <strong>Tap any tape to spotlight it &amp; check Discogs pricing.</strong>
         </p>
         <div class="btn-row" style="margin-top:0;">
           <button class="btn btn-secondary" onclick="document.getElementById('pileCamInput').click()">📷 Snap Pile / Shelf</button>
@@ -131,9 +131,12 @@
       </div>
 
       <div id="pileResultsCard" class="card hidden">
-        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap;">
           <h2 style="margin:0;">📚 Pull List (<span id="pileCount">0</span>)</h2>
-          <span class="badge badge-yellow" style="margin:0;">Tap to Highlight</span>
+          <div class="inline-actions" style="gap:6px;">
+            <button id="btnPileCheckPrices" type="button" class="btn btn-secondary btn-sm" style="min-height:30px; padding:4px 10px;" onclick="fetchAllPilePrices()">💰 Check Prices</button>
+            <span class="badge badge-yellow" style="margin:0;">Tap to Highlight</span>
+          </div>
         </div>
         <div id="pileSkippedNote" style="font-size:0.78rem; color:var(--muted); margin-bottom:10px;"></div>
         <div id="pileResultsList"></div>
@@ -365,75 +368,31 @@
       <div id="settingsStatusText" style="flex:1;">Working...</div>
     </div>
 
-    <!-- 1. AI Engine & Playback (Local PC Ollama RTX 5090 OR Gemini Cloud) -->
+    <!-- 1. Gemini Cloud & Playback -->
     <details id="accAi" class="acc-card">
       <summary class="acc-summary">
-        <span>1. 🤖 AI Engine &amp; Playback</span>
+        <span>1. 🤖 Gemini Cloud &amp; Playback</span>
         <span id="pillAi" class="pill">Setup</span>
       </summary>
       <div class="acc-body">
-        <div style="margin-bottom:12px;">
-          <label class="field-label">Active AI Provider</label>
-          <select id="cfgAiProvider" onchange="toggleAiProviderUI()">
-            <option value="ollama">🖥️ Local PC (Ollama — RTX 5090, $0, Zero 503s)</option>
-            <option value="gemini">☁️ Gemini Cloud API</option>
+        <div class="inline-guide">
+          <strong>Gemini Cloud Setup:</strong> Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey ↗</a> → <strong>Create API Key</strong> → paste below. Keys stay strictly in your browser.
+        </div>
+        <div style="margin-bottom:10px;">
+          <label class="field-label">Gemini API Key</label>
+          <input id="cfgGeminiKey" type="password" placeholder="AIza..." />
+        </div>
+        <div style="margin-bottom:10px;">
+          <label class="field-label">Gemini Model</label>
+          <select id="cfgGeminiModel">
+            <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Free Tier ~500/day)</option>
+            <option value="gemini-3.8-flash">gemini-3.8-flash (Sharpest OCR &amp; Grading)</option>
+            <option value="gemini-3.6-flash">gemini-3.6-flash (Balanced)</option>
+            <option value="gemini-4-hydrogen">gemini-4-hydrogen (Strictest — Paid Tier)</option>
           </select>
         </div>
 
-        <!-- Local PC (Ollama) Settings -->
-        <div id="ollamaConfigWrap" class="provider-box">
-          <div class="inline-guide">
-            <strong>Local PC Setup:</strong> Run Ollama with <code>OLLAMA_ORIGINS</code> set to this page's origin, expose HTTPS privately via <strong>Tailscale Serve</strong> (<code>tailscale serve --bg 11434</code>), and paste your <code>https://...ts.net</code> URL below.
-          </div>
-          <div style="margin-bottom:10px;">
-            <label class="field-label">Ollama HTTPS URL (Tailscale Serve / Cloudflare)</label>
-            <input id="cfgOllamaUrl" type="text" placeholder="https://your-pc.tailXXXX.ts.net" />
-          </div>
-          <div style="margin-bottom:8px;">
-            <label class="field-label">Local Vision Model</label>
-            <div style="display:flex; gap:6px;">
-              <input id="cfgOllamaModel" type="text" placeholder="qwen3.8:27b" style="flex:1;" />
-              <button type="button" class="btn btn-secondary btn-sm" style="flex:0 0 auto;" onclick="fetchOllamaModels()">🔄 Load PC Models</button>
-            </div>
-          </div>
-          <div style="margin-bottom:10px;">
-            <select id="ollamaModelPicker" onchange="if(this.value) document.getElementById('cfgOllamaModel').value = this.value;">
-              <option value="">Quick pick recommended 32GB vision model...</option>
-              <option value="qwen3.8:27b">qwen3.8:27b (Best OCR, Grading &amp; Pile Boxes)</option>
-              <option value="gemma4:31b">gemma4:31b (Best Music Knowledge &amp; Writing)</option>
-              <option value="qwen3-vl:32b">qwen3-vl:32b (Dedicated Vision OCR)</option>
-            </select>
-          </div>
-          <div class="toggle-row">
-            <div>
-              <div style="font-size:0.86rem; font-weight:600;">☁️ Auto-Fallback to Gemini if PC is Offline</div>
-              <div style="font-size:0.74rem; color:var(--muted);">Uses your saved Gemini key below when you're away from home</div>
-            </div>
-            <input id="cfgOllamaFallback" type="checkbox" style="width:22px; height:22px;" />
-          </div>
-        </div>
-
-        <!-- Gemini Cloud Settings (always accessible for Cloud mode or Fallback) -->
-        <div id="geminiConfigWrap" class="provider-box" style="margin-top:10px;">
-          <div class="inline-guide">
-            <strong>Gemini Cloud Setup:</strong> Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey ↗</a> → <strong>Create API Key</strong> → paste below. Keys stay strictly in your browser.
-          </div>
-          <div style="margin-bottom:10px;">
-            <label class="field-label">Gemini API Key</label>
-            <input id="cfgGeminiKey" type="password" placeholder="AIza..." />
-          </div>
-          <div style="margin-bottom:4px;">
-            <label class="field-label">Gemini Model</label>
-            <select id="cfgGeminiModel">
-              <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Free Tier ~500/day)</option>
-              <option value="gemini-3.8-flash">gemini-3.8-flash (Sharpest OCR &amp; Grading)</option>
-              <option value="gemini-3.6-flash">gemini-3.6-flash (Balanced)</option>
-              <option value="gemini-4-hydrogen">gemini-4-hydrogen (Strictest — Paid Tier)</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="toggle-row" style="margin-top:8px;">
+        <div class="toggle-row" style="margin-top:4px;">
           <div>
             <div style="font-size:0.9rem; font-weight:600;">🔊 Auto-Play 30s Test Song</div>
             <div style="font-size:0.76rem; color:var(--muted);">Plays a 30s clip in the floating bar without interrupting Spotify</div>
@@ -443,13 +402,13 @@
         <div class="toggle-row">
           <div>
             <div style="font-size:0.9rem; font-weight:600;">🕵️ Auto Zero-Guessing Verification</div>
-            <div style="font-size:0.76rem; color:var(--muted);">Inspects untruncated notes + [r=ID] siblings &amp; checks with you if uncertain</div>
+            <div style="font-size:0.76rem; color:var(--muted);">Sweeps up to 45 pressings + [r=ID] siblings, respects loose tapes &amp; picks conservatively on ties</div>
           </div>
           <input id="cfgAutoDetective" type="checkbox" style="width:22px; height:22px;" />
         </div>
         <div class="inline-actions" style="margin-top:8px;">
           <button class="btn btn-sm" onclick="saveSettings()">Save Settings</button>
-          <button class="btn btn-secondary btn-sm" onclick="testAiConnection()">🧪 Test AI Connection</button>
+          <button class="btn btn-secondary btn-sm" onclick="testAiConnection()">🧪 Test Gemini</button>
           <span id="aiStatusBadge" style="font-size:0.82rem; font-weight:700;"></span>
         </div>
       </div>
@@ -548,6 +507,14 @@
           <textarea id="cfgTasteDna" class="tall-textarea" rows="5" placeholder="Tap '🧠 Analyze ALL Data' after syncing Spotify to generate your complete Taste DNA..."></textarea>
         </div>
 
+        <div style="margin-bottom:10px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+            <label class="field-label" style="margin:0;">Soft Spots &amp; Niche Pockets (equal first-class weight on every scan)</label>
+            <button type="button" class="btn btn-secondary btn-sm" style="min-height:28px; padding:3px 9px; font-size:0.74rem;" onclick="saveTasteDnaManual()">Save</button>
+          </div>
+          <textarea id="cfgSoftSpots" rows="3" placeholder="Italo Disco, 80s Euro-dance, synthwave, game/movie soundtracks..."></textarea>
+        </div>
+
         <details style="margin-bottom:12px;">
           <summary style="font-size:0.82rem;">Optional: Merge Exportify CSV (for playlists made by others)</summary>
           <p style="margin-top:6px; font-size:0.8rem;">Export any playlist at <strong>exportify.net</strong> and import the CSV here.</p>
@@ -584,7 +551,7 @@
         <span id="pillData" class="pill">0 items</span>
       </summary>
       <div class="acc-body">
-        <p style="font-size:0.84rem; margin-bottom:10px;">Export a JSON backup after big scanning sessions (includes 1200px photos, grades, stash, Spotify library &amp; Taste DNA).</p>
+        <p style="font-size:0.84rem; margin-bottom:10px;">Export a JSON backup after big scanning sessions (includes 1200px photos, grades, stash, Spotify library, Taste DNA &amp; Soft Spots).</p>
         <div class="btn-row" style="margin-top:0; margin-bottom:8px;">
           <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="exportJSON()">⬇️ Export JSON</button>
           <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="document.getElementById('jsonRestoreInput').click()">⬆️ Restore JSON</button>
@@ -595,10 +562,10 @@
         <div class="inline-guide" style="margin-bottom:0;">
           <strong>Workflow Tips:</strong>
           <ol style="margin:6px 0 0; padding-left:18px;">
-            <li><strong>Local PC Mode:</strong> Runs on your RTX 5090 via Ollama + Tailscale Serve with zero <code>503</code> errors or daily caps.</li>
-            <li><strong>2-Shot Camera:</strong> Snap Front/Side A → flip → snap Back/Side B (auto-detects UPC live).</li>
-            <li><strong>Pile Scan Spotlight:</strong> Tap any tape in the Pull List to spotlight its exact location in the pile photo, or tap a box on the photo to jump to its card.</li>
-            <li><strong>Stash Re-Check:</strong> Tap <strong>🔄 Edit / Re-Check</strong> on any saved item to upgrade to 1200px photos and auto-swap wrong Discogs pressings while keeping your saved grades.</li>
+            <li><strong>Gemini Cloud Auto-Retry:</strong> Transient <code>500/503</code> hiccups retry automatically every 5s with a one-tap Cancel button.</li>
+            <li><strong>Full-Res 2-Shot Camera:</strong> Uses hardware autofocus + 2048px AI capture (tap screen to focus) and auto-detects UPC live.</li>
+            <li><strong>Instant Pile Scan:</strong> Spines and Taste scores appear right away — tap any tape to spotlight it and lazily fetch its Discogs price, or tap <strong>💰 Check Prices</strong> for all.</li>
+            <li><strong>Safe Stash Re-Check:</strong> Swapping a wrong Discogs pressing adds the new copy first before deleting the old one.</li>
           </ol>
         </div>
       </div>
@@ -624,8 +591,9 @@
       <button type="button" class="btn btn-secondary btn-sm" style="min-height:32px; padding:4px 10px;" onclick="closeCameraViewfinder()">Done</button>
     </div>
   </div>
-  <div class="cam-stage">
+  <div id="camStage" class="cam-stage">
     <video id="camVideo" playsinline muted></video>
+    <div id="camFocusRing" class="cam-focus-ring"></div>
     <div id="camUpcBadge" class="cam-upc-badge hidden"></div>
     <div id="camFlash" class="cam-flash"></div>
   </div>
@@ -696,7 +664,7 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="apis.js?v=1.7"></script>
-<script src="app.js?v=1.7"></script>
+<script src="apis.js?v=1.8"></script>
+<script src="app.js?v=1.8"></script>
 </body>
 </html>
