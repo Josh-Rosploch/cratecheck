@@ -66,9 +66,9 @@
     .ver-tag {
       font-size: 0.68rem;
       font-weight: 700;
-      color: var(--muted);
-      background: var(--card-2);
-      border: 1px solid var(--border);
+      color: #93c5fd;
+      background: rgba(59, 130, 246, 0.18);
+      border: 1px solid rgba(59, 130, 246, 0.35);
       padding: 1px 6px;
       border-radius: 6px;
     }
@@ -169,6 +169,7 @@
     }
     .btn-green { background: var(--green); color: #052e16; }
     .btn-spotify { background: var(--spotify); color: #052e16; }
+    .btn-purple { background: linear-gradient(135deg, #7c3aed, #6366f1); color: #fff; }
     .btn-secondary { background: var(--card-2); border-color: var(--border); color: var(--text); }
     .btn-danger { background: var(--red-bg); border-color: rgba(239,68,68,0.4); color: #fca5a5; }
     .btn-sm { min-height: 36px; padding: 7px 12px; font-size: 0.82rem; width: auto; }
@@ -177,6 +178,12 @@
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 8px;
+      margin-top: 8px;
+    }
+    .btn-row-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
       margin-top: 8px;
     }
 
@@ -273,6 +280,50 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
+    /* Variant Detective Card */
+    .detective-card {
+      background: linear-gradient(180deg, rgba(139, 92, 246, 0.14), rgba(24, 28, 38, 0.95));
+      border: 1.5px solid rgba(168, 85, 247, 0.45);
+      border-radius: var(--radius);
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+    .detective-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .detective-q {
+      background: rgba(13, 16, 23, 0.78);
+      border: 1px solid rgba(168, 85, 247, 0.35);
+      border-radius: 12px;
+      padding: 12px;
+      margin-top: 10px;
+    }
+    .detective-hint {
+      font-size: 0.8rem;
+      color: #c4b5fd;
+      margin: 4px 0 10px;
+    }
+    .opt-btn {
+      display: block;
+      width: 100%;
+      text-align: left;
+      padding: 11px 12px;
+      margin-bottom: 7px;
+      border-radius: 10px;
+      background: var(--card-2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 0.86rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .opt-btn:last-child { margin-bottom: 0; }
+    .opt-btn:active { border-color: var(--purple); background: rgba(168, 85, 247, 0.18); }
+
     .candidate-card {
       display: flex;
       gap: 12px;
@@ -282,11 +333,18 @@
       border: 1.5px solid var(--border);
       margin-bottom: 8px;
       cursor: pointer;
-      transition: border-color 0.15s ease;
+      transition: border-color 0.15s ease, opacity 0.15s ease;
     }
     .candidate-card.selected {
       border-color: var(--accent);
       background: rgba(59, 130, 246, 0.12);
+    }
+    .candidate-card.ai-pick {
+      border-color: var(--purple);
+      box-shadow: 0 0 0 1px rgba(168, 85, 247, 0.28);
+    }
+    .candidate-card.eliminated {
+      opacity: 0.45;
     }
     .candidate-thumb {
       width: 64px;
@@ -307,6 +365,15 @@
       font-size: 0.78rem;
       color: var(--muted);
       margin-bottom: 5px;
+    }
+    .candidate-diff {
+      font-size: 0.78rem;
+      color: #e2e8f0;
+      background: rgba(13, 16, 23, 0.65);
+      border-left: 3px solid var(--purple);
+      padding: 4px 8px;
+      border-radius: 4px;
+      margin: 5px 0;
     }
 
     .badge {
@@ -384,6 +451,19 @@
       font-size: 1.3rem;
       font-weight: 900;
       color: var(--spotify);
+    }
+
+    .notes-box {
+      background: #0d1017;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px 10px;
+      margin-bottom: 10px;
+      font-size: 0.78rem;
+      color: var(--muted);
+      white-space: pre-wrap;
+      max-height: 150px;
+      overflow-y: auto;
     }
 
     .tracklist {
@@ -495,6 +575,50 @@
     .guide-step li { margin-bottom: 6px; }
     .guide-step a { color: #60a5fa; font-weight: 600; }
 
+    /* Live Barcode Modal */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 90;
+      background: rgba(0, 0, 0, 0.88);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .modal-box {
+      width: 100%;
+      max-width: 440px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 14px;
+    }
+    .scanner-frame {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 4/3;
+      background: #000;
+      border-radius: 12px;
+      overflow: hidden;
+      margin-bottom: 10px;
+    }
+    .scanner-frame video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .scanner-line {
+      position: absolute;
+      left: 10%;
+      right: 10%;
+      top: 50%;
+      height: 2px;
+      background: #ef4444;
+      box-shadow: 0 0 8px #ef4444;
+    }
+
     nav.bottom-nav {
       position: fixed;
       bottom: 0;
@@ -561,7 +685,7 @@
 <body>
 
 <header>
-  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.1</span></div>
+  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.2</span></div>
   <div class="status-pills">
     <span id="ratePill" class="pill" title="Discogs API sliding window (max 50/min)">API 0/50</span>
     <span id="spotifyPill" class="pill">Spotify: Off</span>
@@ -592,15 +716,18 @@
       <input id="camExtra" class="hidden-file" type="file" accept="image/*" capture="environment" />
 
       <button class="btn btn-primary-scan" onclick="document.getElementById('camPrimary').click()">
-        📷 Scan Item (Front / Side A)
+        📷 Scan Item (Front / Shell)
       </button>
 
-      <div class="btn-row">
+      <div class="btn-row-3">
         <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="document.getElementById('camExtra').click()">
-          + Extra Photo (Back / Matrix)
+          + Extra Photo
+        </button>
+        <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="openBarcodeScanner()">
+          ║▌ Scan UPC
         </button>
         <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="toggleManualEntry()">
-          ⌨️ Type Cat# / Title
+          ⌨️ Type Info
         </button>
       </div>
 
@@ -612,60 +739,21 @@
       <div id="statusText">Working...</div>
     </div>
 
-    <!-- Extracted Fields Card -->
-    <div id="extractCard" class="card hidden">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-        <h3 style="margin:0;">1. Confirm Scanned Details</h3>
-        <button class="btn btn-secondary btn-sm" onclick="resetScanner()">Clear</button>
+    <!-- AI Variant Detective Card -->
+    <div id="detectiveCard" class="detective-card hidden">
+      <div class="detective-header">
+        <strong style="font-size:0.95rem; color:#e9d5ff;">🕵️ AI Variant Detective</strong>
+        <span id="detectiveBadge"></span>
       </div>
-      <div class="field-grid">
-        <div class="field-full">
-          <label class="field-label">Album / Release Title</label>
-          <input id="fTitle" type="text" placeholder="e.g., Dawn Patrol" />
-        </div>
-        <div class="field-full">
-          <label class="field-label">Artist(s)</label>
-          <input id="fArtist" type="text" placeholder="e.g., Night Ranger" />
-        </div>
-        <div>
-          <label class="field-label">Catalog #</label>
-          <input id="fCatno" type="text" placeholder="e.g., MCAC-5460" />
-        </div>
-        <div>
-          <label class="field-label">Format</label>
-          <select id="fFormat">
-            <option value="Cassette">Cassette</option>
-            <option value="CD">CD</option>
-            <option value="Vinyl">Vinyl</option>
-          </select>
-        </div>
-        <div>
-          <label class="field-label">Label</label>
-          <input id="fLabel" type="text" placeholder="e.g., MCA Records" />
-        </div>
-        <div>
-          <label class="field-label">Year / Barcode</label>
-          <input id="fYear" type="text" placeholder="e.g., 1982" />
-        </div>
-        <div class="field-full">
-          <label class="field-label">Condition / Notes</label>
-          <input id="fNote" type="text" placeholder="Standard / Loose shell / etc." />
-        </div>
-      </div>
-
-      <div class="btn-row" style="margin-top:10px;">
-        <button class="btn btn-sm" style="width:100%;" onclick="runDiscogsSearch()">🔍 Search Discogs</button>
-        <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="inspectUnlistedItem()">🎧 Not on Discogs? Check Taste</button>
+      <div id="detectiveReasoning" style="font-size:0.86rem; color:#f1f5f9;"></div>
+      <div id="detectiveQuestionBox" class="detective-q hidden"></div>
+      <div class="inline-actions" style="margin-top:8px;">
+        <button id="btnShowAllCands" class="btn btn-secondary btn-sm hidden" onclick="showAllCandidates()">Show All Variants</button>
+        <button class="btn btn-secondary btn-sm" onclick="document.getElementById('camExtra').click()">📷 Add Back/Shell Photo to Refine</button>
       </div>
     </div>
 
-    <!-- Discogs Candidates -->
-    <div id="candidatesCard" class="card hidden">
-      <h3>2. Tap the Right Match to Check Price &amp; Taste</h3>
-      <div id="candidatesList"></div>
-    </div>
-
-    <!-- Selected Item Inspector -->
+    <!-- Selected Item Inspector (placed high so auto-picked result is immediately visible!) -->
     <div id="inspectorCard" class="card hidden">
       <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:8px;">
         <div>
@@ -709,6 +797,11 @@
         <div id="tasteHits" style="margin-top:8px; font-size:0.82rem; color:#cbd5e1;"></div>
       </div>
 
+      <details id="pressingNotesDetails" class="hidden" style="margin-bottom:8px;">
+        <summary>🔎 Discogs Pressing Notes &amp; Identifiers</summary>
+        <div class="notes-box" id="inspNotes"></div>
+      </details>
+
       <details id="tracklistDetails">
         <summary>🎵 Tracklist (<span id="trackCount">0</span>)</summary>
         <div class="tracklist" id="inspTracklist"></div>
@@ -727,6 +820,70 @@
           </button>
         </div>
       </div>
+    </div>
+
+    <!-- Discogs Candidates -->
+    <div id="candidatesCard" class="card hidden">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px;">
+        <h3 style="margin:0;">Discogs Matches (<span id="candCount">0</span>)</h3>
+        <button id="btnManualDetective" class="btn btn-purple btn-sm" onclick="runVariantDetective(true)">🕵️ AI Pick Variant</button>
+      </div>
+      <div id="candidatesList"></div>
+    </div>
+
+    <!-- Extracted Fields Card (Collapsible after scan so screen stays clean) -->
+    <div id="extractCard" class="card hidden">
+      <details id="extractDetails" open>
+        <summary style="display:flex; justify-content:space-between; align-items:center;">
+          <span>✏️ Scanned Details (Edit / Re-Search)</span>
+        </summary>
+        <div style="margin-top:10px;">
+          <div class="field-grid">
+            <div class="field-full">
+              <label class="field-label">Album / Release Title</label>
+              <input id="fTitle" type="text" placeholder="e.g., Dawn Patrol" />
+            </div>
+            <div class="field-full">
+              <label class="field-label">Artist(s)</label>
+              <input id="fArtist" type="text" placeholder="e.g., Night Ranger" />
+            </div>
+            <div>
+              <label class="field-label">Catalog #</label>
+              <input id="fCatno" type="text" placeholder="e.g., MCAC-5460" />
+            </div>
+            <div>
+              <label class="field-label">Barcode (UPC/EAN)</label>
+              <input id="fBarcode" type="text" placeholder="e.g., 07673254604" />
+            </div>
+            <div>
+              <label class="field-label">Format</label>
+              <select id="fFormat">
+                <option value="Cassette">Cassette</option>
+                <option value="CD">CD</option>
+                <option value="Vinyl">Vinyl</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label">Year</label>
+              <input id="fYear" type="text" placeholder="e.g., 1982" />
+            </div>
+            <div>
+              <label class="field-label">Label</label>
+              <input id="fLabel" type="text" placeholder="e.g., MCA Records" />
+            </div>
+            <div>
+              <label class="field-label">Condition / Notes</label>
+              <input id="fNote" type="text" placeholder="Standard / Loose shell" />
+            </div>
+          </div>
+          <div id="detectedCluesLine" style="font-size:0.76rem; color:var(--muted); margin-top:8px;"></div>
+          <div class="btn-row" style="margin-top:10px;">
+            <button class="btn btn-sm" style="width:100%;" onclick="runDiscogsSearch()">🔍 Re-Search Discogs</button>
+            <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="inspectUnlistedItem()">🎧 Not on Discogs?</button>
+          </div>
+          <button class="btn btn-secondary btn-sm" style="width:100%; margin-top:8px;" onclick="resetScanner()">Clear Scan</button>
+        </div>
+      </details>
     </div>
   </section>
 
@@ -758,7 +915,7 @@
   <!-- ==================== SETTINGS VIEW ==================== -->
   <section id="view-settings" class="view">
     <div class="card">
-      <h2>1. Gemini Vision &amp; Taste AI</h2>
+      <h2>1. Gemini Vision &amp; Variant AI</h2>
       <div style="margin-bottom:10px;">
         <label class="field-label">Gemini API Key</label>
         <input id="cfgGeminiKey" type="password" placeholder="AIza..." />
@@ -767,11 +924,18 @@
         <label class="field-label">Gemini Model</label>
         <select id="cfgGeminiModel">
           <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Fast &amp; Cheap Default)</option>
-          <option value="gemini-3.8-flash">gemini-3.8-flash (Sharpest OCR for tiny text)</option>
+          <option value="gemini-3.8-flash">gemini-3.8-flash (Sharpest OCR &amp; Variant Detective)</option>
           <option value="gemini-3.6-flash">gemini-3.6-flash (Balanced)</option>
         </select>
       </div>
-      <div class="inline-actions">
+      <div class="toggle-row">
+        <div>
+          <div style="font-size:0.9rem; font-weight:600;">🕵️ Auto AI Variant Detective</div>
+          <div style="font-size:0.76rem; color:var(--muted);">Auto-compares pressing notes vs your photo &amp; asks tie-breaker questions</div>
+        </div>
+        <input id="cfgAutoDetective" type="checkbox" style="width:22px; height:22px;" />
+      </div>
+      <div class="inline-actions" style="margin-top:6px;">
         <button class="btn btn-sm" onclick="saveSettings()">Save Settings</button>
         <button class="btn btn-secondary btn-sm" onclick="testGeminiKey()">🧪 Test Gemini Key</button>
         <span id="geminiStatusBadge" style="font-size:0.82rem; font-weight:700;"></span>
@@ -779,7 +943,7 @@
     </div>
 
     <div class="card">
-      <h2>2. Discogs Account</h2>
+      <h2>2. Discogs Account &amp; Preferences</h2>
       <div style="margin-bottom:10px;">
         <label class="field-label">Discogs Personal Access Token</label>
         <input id="cfgDiscogsToken" type="password" placeholder="Paste token from discogs.com/settings/developers" />
@@ -790,20 +954,40 @@
         <span id="discogsUserBadge" style="font-size:0.82rem; color:var(--green); font-weight:700;"></span>
       </div>
       <div style="margin-bottom:10px;">
-        <label class="field-label">Target Discogs Folder (create new ones via Manage Folders ↗, then tap Verify again)</label>
+        <label class="field-label">Target Discogs Folder</label>
         <select id="cfgDiscogsFolder">
           <option value="1">Uncategorized (Default)</option>
         </select>
       </div>
-      <div style="margin-bottom:10px;">
-        <label class="field-label">High-Value Alert Threshold ($ USD)</label>
-        <input id="cfgThreshold" type="number" min="1" step="1" value="20" />
+      <div class="field-grid" style="margin-bottom:10px;">
+        <div>
+          <label class="field-label">Home Country Bias</label>
+          <select id="cfgHomeCountry">
+            <option value="US">US (United States)</option>
+            <option value="Canada">Canada</option>
+            <option value="UK">UK</option>
+            <option value="Europe">Europe</option>
+            <option value="Japan">Japan</option>
+            <option value="">None (Global)</option>
+          </select>
+        </div>
+        <div>
+          <label class="field-label">High-Value Alert ($)</label>
+          <input id="cfgThreshold" type="number" min="1" step="1" value="20" />
+        </div>
+      </div>
+      <div class="toggle-row">
+        <div>
+          <div style="font-size:0.9rem; font-weight:600;">Fetch VG+ Seller Price Suggestions</div>
+          <div style="font-size:0.76rem; color:var(--muted);">Only works if Discogs Seller Settings are enabled (auto-disables if unsupported to save API calls)</div>
+        </div>
+        <input id="cfgFetchVg" type="checkbox" style="width:22px; height:22px;" />
       </div>
       <div class="toggle-row">
         <span style="font-size:0.9rem; font-weight:600;">Voice Readback (Speech)</span>
         <input id="cfgVoice" type="checkbox" style="width:22px; height:22px;" />
       </div>
-      <button class="btn btn-sm" onclick="saveSettings()">Save Settings</button>
+      <button class="btn btn-sm" style="margin-top:6px;" onclick="saveSettings()">Save Settings</button>
     </div>
 
     <div class="card">
@@ -846,54 +1030,61 @@
   <!-- ==================== SETUP GUIDE VIEW ==================== -->
   <section id="view-guide" class="view">
     <div class="card">
-      <h2>Step-by-Step Setup (Takes ~3 Mins)</h2>
+      <h2>Step-by-Step Setup &amp; Tips</h2>
       <p>All keys stay strictly on your phone in <code>localStorage</code> and never touch any third-party server.</p>
 
       <div class="guide-step">
-        <h3>1. Get Your Gemini API Key (For Photo Scanning &amp; Taste AI)</h3>
+        <h3>Best Photo Trick for Exact Pressing ID</h3>
         <ol>
-          <li>Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio (aistudio.google.com/apikey)</a> and sign in with Google.</li>
-          <li>Tap <strong>Create API Key</strong>, select or create a project, and copy the key starting with <code>AIza...</code>.</li>
-          <li>Paste it into <strong>Settings → Gemini API Key</strong> and tap <strong>🧪 Test Gemini Key</strong>.</li>
+          <li>For cased cassettes, lay the <strong>cassette shell next to the J-card</strong> in one photo (showing shell color, timing window, and printed text/barcode).</li>
+          <li>The <strong>AI Variant Detective</strong> automatically reads Discogs pressing notes and compares them to your photo—or asks you 1 quick Yes/No question to lock down the exact edition.</li>
         </ol>
       </div>
 
       <div class="guide-step">
-        <h3>2. Get Your Discogs Token (For Collection &amp; Prices)</h3>
+        <h3>1. Gemini API Key</h3>
         <ol>
-          <li>Log into Discogs and open <a href="https://www.discogs.com/settings/developers" target="_blank" rel="noopener">discogs.com/settings/developers</a>.</li>
-          <li>Tap <strong>Generate new token</strong> and copy it.</li>
-          <li>Paste it into <strong>Settings → Discogs Personal Access Token</strong>, then tap <strong>Verify Account &amp; Load Folders</strong>.</li>
-          <li>To organize into custom folders (e.g. Cassettes / To Sell), create them at <a href="https://www.discogs.com/manage_folders" target="_blank" rel="noopener">discogs.com/manage_folders</a>, then tap <strong>Verify Account &amp; Load Folders</strong> again.</li>
+          <li>Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> → <strong>Create API Key</strong> → paste in Settings → tap <strong>🧪 Test Gemini Key</strong>.</li>
+          <li><em>Google AI Pro subscribers:</em> You can also claim $10/month in Gemini API credits inside AI Studio's Billing/Plans menu.</li>
         </ol>
       </div>
 
       <div class="guide-step">
-        <h3>3. Connect Spotify (For "Would I Like This?")</h3>
+        <h3>2. Discogs Token &amp; Folders</h3>
         <ol>
-          <li>Copy your app's exact Redirect URI below:
+          <li>Open <a href="https://www.discogs.com/settings/developers" target="_blank" rel="noopener">discogs.com/settings/developers</a> → <strong>Generate new token</strong> → paste in Settings → tap <strong>Verify Account &amp; Load Folders</strong>.</li>
+          <li>Create custom folders anytime at <a href="https://www.discogs.com/manage_folders" target="_blank" rel="noopener">discogs.com/manage_folders</a>, then tap Verify again.</li>
+        </ol>
+      </div>
+
+      <div class="guide-step">
+        <h3>3. Spotify Taste Sync</h3>
+        <ol>
+          <li>Copy your Redirect URI:
             <div class="code-copy">
               <span id="guideRedirectUri" style="flex:1;"></span>
               <button class="btn btn-secondary btn-sm" onclick="copyRedirectUri()">Copy</button>
             </div>
           </li>
-          <li>Open <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a> (requires Spotify Premium).</li>
-          <li>Tap <strong>Create app</strong> → name it <code>CrateCheck</code> → paste the Redirect URI above → check <strong>only Web API</strong> → Save.</li>
-          <li>Copy the <strong>Client ID</strong> from Settings, paste it into <strong>Settings → Spotify Client ID</strong>, and tap <strong>Connect &amp; Sync All Spotify Data</strong>.</li>
-        </ol>
-      </div>
-
-      <div class="guide-step">
-        <h3>4. Install as a Home-Screen App on Android</h3>
-        <ol>
-          <li>Open your GitHub Pages URL in <strong>Chrome</strong> on your phone.</li>
-          <li>Tap the <strong>⋮ menu</strong> (top-right) → <strong>Install / Add to Home screen</strong>.</li>
-          <li>It now launches full-screen like a native app and works on 5G at Goodwill.</li>
+          <li>At <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a>, create an app, check <strong>only Web API</strong>, paste the Redirect URI, and paste the Client ID into Settings.</li>
         </ol>
       </div>
     </div>
   </section>
 </main>
+
+<!-- Live UPC Barcode Scanner Modal -->
+<div id="barcodeModal" class="modal-backdrop hidden">
+  <div class="modal-box">
+    <h3 style="margin-bottom:8px;">║▌ Aim at Barcode (UPC / EAN)</h3>
+    <div class="scanner-frame">
+      <video id="barcodeVideo" playsinline muted></video>
+      <div class="scanner-line"></div>
+    </div>
+    <p id="barcodeHint" style="font-size:0.82rem; margin-bottom:10px;">Hold steady in good light...</p>
+    <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="closeBarcodeScanner()">Cancel</button>
+  </div>
+</div>
 
 <nav class="bottom-nav">
   <button class="nav-btn active" data-view="scan" onclick="switchView('scan')"><span class="ico">📷</span>Scan</button>
@@ -934,10 +1125,13 @@
   let cfg = Object.assign({
     geminiKey: '',
     geminiModel: 'gemini-3.5-flash-lite',
+    autoDetective: true,
     discogsToken: '',
     discogsUser: '',
     discogsFolderId: '1',
     discogsFolders: [{ id: 1, name: 'Uncategorized' }],
+    homeCountry: 'US',
+    fetchVgSuggestions: true,
     threshold: 20,
     voice: false,
     spotifyClientId: '',
@@ -955,7 +1149,17 @@
   let currentPhotos = { primaryB64: null, extraB64: null, thumbWebp: null };
   let currentExtracted = null;
   let currentCandidates = [];
+  let visibleCandidateIds = null; // null = show all
+  let detectiveDiffs = {};        // releaseId -> short_diff
+  let detectivePickId = null;
+  let detectiveEliminatedIds = new Set();
   let currentInspected = null;
+
+  const releaseDetailCache = new Map(); // releaseId -> Discogs release JSON
+  const tasteCache = new Map();         // norm(artist|title) -> Gemini taste JSON
+
+  let barcodeStream = null;
+  let barcodeRaf = null;
 
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -965,12 +1169,8 @@
       const req = indexedDB.open('CrateCheckDB', 1);
       req.onupgradeneeded = (e) => {
         const d = e.target.result;
-        if (!d.objectStoreNames.contains('stash')) {
-          d.createObjectStore('stash', { keyPath: 'id', autoIncrement: true });
-        }
-        if (!d.objectStoreNames.contains('meta')) {
-          d.createObjectStore('meta', { keyPath: 'key' });
-        }
+        if (!d.objectStoreNames.contains('stash')) d.createObjectStore('stash', { keyPath: 'id', autoIncrement: true });
+        if (!d.objectStoreNames.contains('meta')) d.createObjectStore('meta', { keyPath: 'key' });
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
@@ -979,8 +1179,7 @@
 
   function idbGet(store, key) {
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(store, 'readonly');
-      const req = tx.objectStore(store).get(key);
+      const req = db.transaction(store, 'readonly').objectStore(store).get(key);
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
     });
@@ -988,8 +1187,7 @@
 
   function idbPut(store, val) {
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(store, 'readwrite');
-      const req = tx.objectStore(store).put(val);
+      const req = db.transaction(store, 'readwrite').objectStore(store).put(val);
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
     });
@@ -997,8 +1195,7 @@
 
   function idbDelete(store, key) {
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(store, 'readwrite');
-      const req = tx.objectStore(store).delete(key);
+      const req = db.transaction(store, 'readwrite').objectStore(store).delete(key);
       req.onsuccess = () => resolve();
       req.onerror = () => reject(req.error);
     });
@@ -1006,8 +1203,7 @@
 
   function idbGetAll(store) {
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(store, 'readonly');
-      const req = tx.objectStore(store).getAll();
+      const req = db.transaction(store, 'readonly').objectStore(store).getAll();
       req.onsuccess = () => resolve(req.result || []);
       req.onerror = () => reject(req.error);
     });
@@ -1169,6 +1365,74 @@
     }
   }
 
+  async function getReleaseCached(releaseId) {
+    if (releaseDetailCache.has(releaseId)) return releaseDetailCache.get(releaseId);
+    const data = await discogsFetch(`/releases/${releaseId}`);
+    releaseDetailCache.set(releaseId, data);
+    return data;
+  }
+
+  // ==================== LIVE BARCODE SCANNER (CHROME BarcodeDetector) ====================
+  window.openBarcodeScanner = async function() {
+    if (!('BarcodeDetector' in window) || !navigator.mediaDevices?.getUserMedia) {
+      toast('Live UPC scanner not supported here — snap a photo of the barcode instead!', 3500);
+      document.getElementById('camPrimary').click();
+      return;
+    }
+    const modal = document.getElementById('barcodeModal');
+    const video = document.getElementById('barcodeVideo');
+    const hint = document.getElementById('barcodeHint');
+    modal.classList.remove('hidden');
+    hint.textContent = 'Starting rear camera...';
+
+    try {
+      const detector = new BarcodeDetector({ formats: ['upc_a', 'upc_e', 'ean_13', 'ean_8', 'code_128'] });
+      barcodeStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }
+      });
+      video.srcObject = barcodeStream;
+      await video.play();
+      hint.textContent = 'Center the barcode on the red line...';
+
+      const scanLoop = async () => {
+        if (!barcodeStream) return;
+        try {
+          const codes = await detector.detect(video);
+          if (codes && codes.length && codes[0].rawValue) {
+            const code = codes[0].rawValue.replace(/\D/g, '');
+            if (code.length >= 8) {
+              closeBarcodeScanner();
+              playChime();
+              document.getElementById('extractCard').classList.remove('hidden');
+              document.getElementById('extractDetails').open = true;
+              document.getElementById('fBarcode').value = code;
+              if (activeFormat !== 'Auto') document.getElementById('fFormat').value = activeFormat;
+              toast(`║▌ Barcode read: ${code}`);
+              runDiscogsSearch();
+              return;
+            }
+          }
+        } catch (_) {}
+        barcodeRaf = requestAnimationFrame(scanLoop);
+      };
+      barcodeRaf = requestAnimationFrame(scanLoop);
+    } catch (err) {
+      closeBarcodeScanner();
+      toast('Camera error: ' + err.message);
+    }
+  };
+
+  window.closeBarcodeScanner = function() {
+    if (barcodeRaf) cancelAnimationFrame(barcodeRaf);
+    barcodeRaf = null;
+    if (barcodeStream) {
+      barcodeStream.getTracks().forEach(t => t.stop());
+      barcodeStream = null;
+    }
+    document.getElementById('barcodeVideo').srcObject = null;
+    document.getElementById('barcodeModal').classList.add('hidden');
+  };
+
   // ==================== IMAGE COMPRESSION ====================
   function processImageFile(file, maxDim, mime, quality) {
     return new Promise((resolve, reject) => {
@@ -1184,8 +1448,7 @@
         const canvas = document.createElement('canvas');
         canvas.width = width;
         canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, width, height);
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
         resolve(canvas.toDataURL(mime, quality));
       };
       img.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
@@ -1291,30 +1554,29 @@
   };
 
   async function runGeminiVision() {
-    setStatus('Reading cover, artist, title & catalog # with Gemini...', true);
+    setStatus('Reading text, barcode & physical pressing clues with Gemini...', true);
     const fmtHint = activeFormat === 'Auto' ? 'Auto-detect whether Cassette, CD, or Vinyl' : `User selected format: ${activeFormat}`;
-    const prompt = `You are a physical music media OCR & cataloging expert. Inspect the image(s) carefully. ${fmtHint}.
+    const prompt = `You are a physical music media OCR & Discogs pressing-identification expert. Inspect ALL details in the image(s). ${fmtHint}.
 Return ONLY valid JSON with these exact keys:
 {
   "detected_format": "Cassette" | "CD" | "Vinyl",
   "raw_catalog_number": "exact catalog/ID code printed on spine/shell/disc hub/sleeve, or empty string",
-  "cleaned_catalog_variants": ["variations stripping hyphens/spaces/price prefixes like 295XPR9708 -> XPR9708, XPR 9708"],
+  "cleaned_catalog_variants": ["variations stripping hyphens/spaces/price prefixes"],
   "barcode": "digits only UPC/EAN if clearly visible, else empty string",
   "album_title": "album or release title",
   "artists": ["main artist name(s)"],
   "label": "record label name or empty string",
-  "year": "4-digit year if printed, else empty string",
+  "year": "4-digit copyright/release year printed, else empty string",
+  "country_clues": "country printed (e.g. 'Printed in U.S.A.', 'Made in Canada', 'Made in Germany') or 'Not visible'",
+  "club_edition": "None" | "CRC" | "BMG" | "Unknown",
+  "physical_details": "concise description of pressing identifiers visible: shell color (solid white/beige/black/clear), paper label vs direct print, timing window markings (e.g. 100-50-0, dots, blank), screws vs welded, J-card color/border, Dolby/HX Pro logos, address text, or CD matrix/IFPI codes",
   "condition_note": "short note like 'Loose cassette shell', 'Cracked jewel case', or 'Standard'",
   "visible_tracks": ["any song titles visible on the shell or back cover"]
 }`;
 
     const parts = [{ text: prompt }];
-    if (currentPhotos.primaryB64) {
-      parts.push({ inline_data: { mime_type: 'image/jpeg', data: currentPhotos.primaryB64 } });
-    }
-    if (currentPhotos.extraB64) {
-      parts.push({ inline_data: { mime_type: 'image/jpeg', data: currentPhotos.extraB64 } });
-    }
+    if (currentPhotos.primaryB64) parts.push({ inline_data: { mime_type: 'image/jpeg', data: currentPhotos.primaryB64 } });
+    if (currentPhotos.extraB64) parts.push({ inline_data: { mime_type: 'image/jpeg', data: currentPhotos.extraB64 } });
 
     try {
       const ext = await callGeminiJSON(parts);
@@ -1324,12 +1586,21 @@ Return ONLY valid JSON with these exact keys:
       document.getElementById('fTitle').value = ext.album_title || '';
       document.getElementById('fArtist').value = Array.isArray(ext.artists) ? ext.artists.join(', ') : (ext.artists || '');
       document.getElementById('fCatno').value = ext.raw_catalog_number || '';
+      document.getElementById('fBarcode').value = (ext.barcode || '').replace(/\D/g, '');
       document.getElementById('fFormat').value = ['Cassette', 'CD', 'Vinyl'].includes(ext.detected_format) ? ext.detected_format : 'Cassette';
       document.getElementById('fLabel').value = ext.label || '';
-      document.getElementById('fYear').value = ext.barcode ? `${ext.year || ''} ${ext.barcode}`.trim() : (ext.year || '');
+      document.getElementById('fYear').value = ext.year || '';
       document.getElementById('fNote').value = ext.condition_note || 'Standard';
 
+      const clues = [
+        ext.country_clues && ext.country_clues !== 'Not visible' ? `Country: ${ext.country_clues}` : '',
+        ext.club_edition && ext.club_edition !== 'Unknown' ? `Club: ${ext.club_edition}` : '',
+        ext.physical_details ? `Clues: ${ext.physical_details}` : ''
+      ].filter(Boolean).join(' · ');
+      document.getElementById('detectedCluesLine').textContent = clues;
+
       document.getElementById('extractCard').classList.remove('hidden');
+      document.getElementById('extractDetails').open = false;
       speakText(`${ext.raw_catalog_number || ''} ${ext.artists?.[0] || ''} ${ext.album_title || ''}`);
 
       await runDiscogsSearch();
@@ -1341,11 +1612,26 @@ Return ONLY valid JSON with these exact keys:
 
   window.toggleManualEntry = function() {
     document.getElementById('extractCard').classList.remove('hidden');
+    document.getElementById('extractDetails').open = true;
     if (activeFormat !== 'Auto') document.getElementById('fFormat').value = activeFormat;
     document.getElementById('fCatno').focus();
   };
 
   // ==================== SMART DISCOGS SEARCH ====================
+  function inferCountryFromClues(clues) {
+    const c = String(clues || '').toLowerCase();
+    if (!c || c === 'not visible') return '';
+    if (c.includes('u.s.a') || c.includes('usa') || c.includes('united states') || c.includes('universal city') || c.includes('new york') || c.includes('los angeles')) return 'US';
+    if (c.includes('canada')) return 'Canada';
+    if (c.includes('uk') || c.includes('england') || c.includes('united kingdom')) return 'UK';
+    if (c.includes('germany')) return 'Germany';
+    if (c.includes('japan')) return 'Japan';
+    if (c.includes('india')) return 'India';
+    if (c.includes('turkey')) return 'Turkey';
+    if (c.includes('europe') || c.includes('holland') || c.includes('netherlands')) return 'Europe';
+    return '';
+  }
+
   window.runDiscogsSearch = async function() {
     if (!cfg.discogsToken) {
       setStatus('', false);
@@ -1356,18 +1642,21 @@ Return ONLY valid JSON with these exact keys:
     const title = document.getElementById('fTitle').value.trim();
     const artist = document.getElementById('fArtist').value.trim();
     const catno = document.getElementById('fCatno').value.trim();
+    const barcode = document.getElementById('fBarcode').value.replace(/\D/g, '').trim();
     const format = document.getElementById('fFormat').value;
     const label = document.getElementById('fLabel').value.trim();
-    const yearOrBarcode = document.getElementById('fYear').value.trim();
-    const barcode = (currentExtracted?.barcode || '').replace(/\D/g, '') ||
-                    (yearOrBarcode.replace(/\D/g, '').length >= 10 ? yearOrBarcode.replace(/\D/g, '') : '');
 
     if (!title && !artist && !catno && !barcode) {
-      toast('Enter at least a Catalog #, Title, or Artist');
+      toast('Enter at least a Barcode, Catalog #, Title, or Artist');
       return;
     }
 
     document.getElementById('inspectorCard').classList.add('hidden');
+    document.getElementById('detectiveCard').classList.add('hidden');
+    detectiveDiffs = {};
+    detectivePickId = null;
+    detectiveEliminatedIds = new Set();
+    visibleCandidateIds = null;
     setStatus('Searching Discogs...', true);
 
     const pool = new Map();
@@ -1377,19 +1666,41 @@ Return ONLY valid JSON with these exact keys:
       });
     };
 
+    const photoCountry = inferCountryFromClues(currentExtracted?.country_clues);
+    const preferredCountry = photoCountry || cfg.homeCountry || '';
+    const clubDetected = currentExtracted?.club_edition || 'Unknown';
+
     const scoreItem = (item) => {
       const targetStr = `${artist} ${title}`.trim();
-      const sim = targetStr ? similarity(targetStr, item.title || '') : 0.5;
+      const sim = targetStr ? similarity(targetStr, item.title || '') : 0.7;
       const itemCat = norm(item.catno || '').replace(/\s+/g, '');
       const rawCat = norm(catno).replace(/\s+/g, '');
       const catMatch = rawCat && itemCat && (itemCat === rawCat || itemCat.includes(rawCat) || rawCat.includes(itemCat));
-      const score = sim * 0.72 + (catMatch ? 0.28 : 0);
-      return { sim, catMatch, score };
+      const fmtList = (Array.isArray(item.format) ? item.format : [item.format || '']).join(' ').toLowerCase();
+      const isClub = fmtList.includes('club');
+      const have = item.community?.have || 0;
+
+      let score = sim * 0.58 + (catMatch ? 0.22 : 0);
+      if (item._tier === 'barcode') score += 0.14;
+      if (preferredCountry && item.country) {
+        if (norm(item.country) === norm(preferredCountry)) score += (photoCountry ? 0.18 : 0.09);
+        else if (photoCountry) score -= 0.12;
+      }
+      if (clubDetected === 'None' && isClub) score -= 0.12;
+      if ((clubDetected === 'CRC' || clubDetected === 'BMG') && isClub) score += 0.15;
+      score += Math.min(0.08, Math.log10(have + 1) * 0.035);
+
+      return { sim, catMatch, isClub, score };
     };
 
     try {
       if (barcode) {
-        addResults(await discogsFetch('/database/search', { type: 'release', barcode, format, per_page: 10 }), 'barcode');
+        const bParams = { type: 'release', barcode, per_page: 10 };
+        if (activeFormat !== 'Auto' || document.getElementById('fFormat').value) bParams.format = format;
+        addResults(await discogsFetch('/database/search', bParams), 'barcode');
+        if (pool.size === 0 && bParams.format) {
+          addResults(await discogsFetch('/database/search', { type: 'release', barcode, per_page: 10 }), 'barcode');
+        }
       }
       if (catno && pool.size < 3) {
         addResults(await discogsFetch('/database/search', { type: 'release', catno, format, per_page: 10 }), 'catno');
@@ -1420,60 +1731,270 @@ Return ONLY valid JSON with these exact keys:
       })).sort((a, b) => b._check.score - a._check.score).slice(0, 6);
 
       currentCandidates = ranked;
-      renderCandidates(ranked);
-      setStatus('', false);
+      renderCandidates();
+
+      if (ranked.length === 1) {
+        await inspectCandidate(0);
+      } else if (ranked.length > 1 && cfg.autoDetective && cfg.geminiKey) {
+        await runVariantDetective(false);
+      } else {
+        setStatus('', false);
+      }
     } catch (err) {
       setStatus('', false);
       toast('Discogs search failed: ' + err.message, 4000);
     }
   };
 
-  function renderCandidates(items) {
+  function renderCandidates() {
     const card = document.getElementById('candidatesCard');
     const list = document.getElementById('candidatesList');
     card.classList.remove('hidden');
 
-    if (!items.length) {
-      list.innerHTML = `<p style="margin-bottom:8px;">No Discogs matches found. Tweak the fields above or tap <strong>Not on Discogs? Check Taste</strong> to evaluate &amp; log it locally.</p>`;
+    const shown = visibleCandidateIds
+      ? currentCandidates.filter(c => visibleCandidateIds.has(c.id))
+      : currentCandidates;
+    document.getElementById('candCount').textContent = shown.length;
+    document.getElementById('btnManualDetective').classList.toggle('hidden', currentCandidates.length < 2);
+
+    if (!shown.length) {
+      list.innerHTML = `<p style="margin-bottom:8px;">No Discogs matches found. Open <strong>Scanned Details</strong> below to edit or tap <strong>Not on Discogs?</strong></p>`;
       return;
     }
 
-    list.innerHTML = items.map((it, idx) => {
-      const verified = it._check.sim >= 0.48 && (it._check.catMatch || !document.getElementById('fCatno').value.trim());
-      const badge = verified
-        ? `<span class="badge badge-green">✅ Title &amp; Cat# Verified</span>`
-        : `<span class="badge badge-yellow">⚠️ Check Variant</span>`;
+    list.innerHTML = shown.map(it => {
+      const idx = currentCandidates.indexOf(it);
+      const verified = it._check.sim >= 0.45 && (it._check.catMatch || it._tier === 'barcode' || !document.getElementById('fCatno').value.trim());
+      const isPick = detectivePickId === it.id;
+      const isElim = detectiveEliminatedIds.has(it.id);
+      const isSelected = currentInspected?.discogs_id === it.id;
+      const diffTxt = detectiveDiffs[it.id] || '';
+      const have = it.community?.have ?? 0;
+      const want = it.community?.want ?? 0;
       const fmtText = Array.isArray(it.format) ? it.format.slice(0, 3).join(', ') : (it.format || '');
       const lblText = Array.isArray(it.label) ? it.label[0] : (it.label || '');
+
       return `
-        <div class="candidate-card" id="cand-${idx}" onclick="inspectCandidate(${idx})">
+        <div class="candidate-card ${isSelected ? 'selected' : ''} ${isPick ? 'ai-pick' : ''} ${isElim ? 'eliminated' : ''}" id="cand-${idx}" onclick="inspectCandidate(${idx})">
           <img class="candidate-thumb" src="${esc(it.thumb || '')}" onerror="this.style.visibility='hidden'" />
           <div class="candidate-meta">
             <div class="candidate-title">${esc(it.title)}</div>
-            <div class="candidate-sub">${esc(it.year || '?')} · ${esc(lblText)} · <strong>${esc(it.catno || 'No Cat#')}</strong> · ${esc(it.country || '')}</div>
-            <div>${badge}<span class="badge badge-blue">${esc(fmtText)}</span></div>
+            <div class="candidate-sub">${esc(it.year || '?')} · ${esc(lblText)} · <strong>${esc(it.catno || 'No Cat#')}</strong> · <strong>${esc(it.country || '?')}</strong></div>
+            ${diffTxt ? `<div class="candidate-diff">${esc(diffTxt)}</div>` : ''}
+            <div>
+              ${isPick ? `<span class="badge badge-purple">🎯 AI Pick</span>` : ''}
+              ${verified ? `<span class="badge badge-green">✅ Verified</span>` : `<span class="badge badge-yellow">⚠️ Check</span>`}
+              <span class="badge badge-blue">${esc(fmtText)}</span>
+              <span class="badge" style="background:#0d1017; color:var(--muted);">👥 ${have} have · ${want} want</span>
+            </div>
           </div>
         </div>
       `;
     }).join('');
   }
 
+  // ==================== AI VARIANT DETECTIVE ====================
+  window.runVariantDetective = async function(forceAll = false, subsetIds = null) {
+    if (!cfg.geminiKey || currentCandidates.length < 2) return;
+
+    const pool = subsetIds
+      ? currentCandidates.filter(c => subsetIds.includes(c.id))
+      : (forceAll ? currentCandidates.slice(0, 4) : currentCandidates.slice(0, 4));
+
+    if (pool.length < 2) {
+      if (pool.length === 1) await inspectCandidate(currentCandidates.indexOf(pool[0]));
+      return;
+    }
+
+    setStatus(`🕵️ Detective: checking Discogs pressing notes for ${pool.length} variants...`, true);
+
+    try {
+      const dossiers = [];
+      for (let i = 0; i < pool.length; i++) {
+        setStatus(`🕵️ Reading pressing notes (${i + 1}/${pool.length})...`, true);
+        const rel = await getReleaseCached(pool[i].id);
+        const fmtSummary = (rel.formats || []).map(f =>
+          [f.name, ...(f.descriptions || []), f.text || ''].filter(Boolean).join(', ')
+        ).join(' | ');
+        const idsSummary = (rel.identifiers || []).slice(0, 8).map(x =>
+          `${x.type}${x.description ? ` (${x.description})` : ''}: ${x.value}`
+        ).join('; ');
+        const compSummary = (rel.companies || []).slice(0, 5).map(c => `${c.entity_type_name}: ${c.name}`).join('; ');
+
+        dossiers.push({
+          id: rel.id,
+          year: rel.year || '?',
+          country: rel.country || '?',
+          catno: rel.labels?.[0]?.catno || pool[i].catno || '',
+          label: rel.labels?.[0]?.name || '',
+          formats: fmtSummary,
+          notes: (rel.notes || '').slice(0, 450),
+          identifiers: idsSummary.slice(0, 350),
+          companies: compSummary.slice(0, 220),
+          have: rel.community?.have || 0,
+          want: rel.community?.want || 0
+        });
+      }
+
+      setStatus('🕵️ Comparing pressing notes against your photo...', true);
+
+      const prompt = `You are a Discogs Variant Detective. The user scanned a physical music item and Discogs returned ${dossiers.length} similar release variants.
+Your job:
+1. Carefully compare the user's photo(s) and extracted details against each Discogs variant's country, format/shell description, pressing notes, identifiers (barcode, matrix, CRC/BMG club stamps, timing window, shell color, copyright years), and community popularity.
+2. User's home country is "${cfg.homeCountry || 'Unknown'}". Eliminate obvious country mismatches (e.g. India/Turkey/Europe when photo says Printed in U.S.A. or has US address).
+3. If the photo clearly identifies ONE exact variant (or eliminates all others), set status="confident" and set best_release_id.
+4. If 2+ variants remain genuinely indistinguishable from the photo (for example: one is a white shell vs clear shell and shell isn't shown, or J-card back has/lacks a barcode, or CRC/BMG club edition vs retail), set status="needs_question" and write ONE ultra-clear, beginner-friendly differentiating question with concrete clickable options mapping to the exact release IDs!
+
+Extracted details: ${JSON.stringify({
+  title: document.getElementById('fTitle').value,
+  artist: document.getElementById('fArtist').value,
+  catno: document.getElementById('fCatno').value,
+  barcode: document.getElementById('fBarcode').value,
+  country_clues: currentExtracted?.country_clues || 'Not visible',
+  club_edition: currentExtracted?.club_edition || 'Unknown',
+  physical_details: currentExtracted?.physical_details || 'None (barcode/manual search)'
+})}
+
+Discogs Variants:
+${JSON.stringify(dossiers, null, 2)}
+
+Return ONLY valid JSON:
+{
+  "status": "confident" | "needs_question",
+  "best_release_id": number,
+  "confidence": "High" | "Medium" | "Low",
+  "eliminated_ids": [numbers of variants definitely ruled out],
+  "reasoning": "1-2 clear sentences explaining what matches the photo and why others were ruled out or what's still ambiguous.",
+  "candidate_diffs": [
+    { "id": number, "short_diff": "6-12 word summary of what makes this pressing unique (e.g. 'US retail, white shell, 100-50-0 window')" }
+  ],
+  "question": null or {
+    "prompt": "Short direct question to tell the remaining variants apart",
+    "how_to_check": "Exact 1-sentence instruction telling the user where to look on the tape/CD/cover",
+    "options": [
+      { "label": "Clear physical description (e.g. 'Solid white shell with 100-50-0 window')", "matching_ids": [number] }
+    ]
+  }
+}`;
+
+      const parts = [{ text: prompt }];
+      if (currentPhotos.primaryB64) parts.push({ inline_data: { mime_type: 'image/jpeg', data: currentPhotos.primaryB64 } });
+      if (currentPhotos.extraB64) parts.push({ inline_data: { mime_type: 'image/jpeg', data: currentPhotos.extraB64 } });
+
+      const verdict = await callGeminiJSON(parts);
+
+      // Apply short diffs to cards
+      (verdict.candidate_diffs || []).forEach(d => {
+        if (d.id && d.short_diff) detectiveDiffs[d.id] = d.short_diff;
+      });
+      detectiveEliminatedIds = new Set(verdict.eliminated_ids || []);
+      detectivePickId = verdict.best_release_id || null;
+
+      renderDetectiveCard(verdict);
+      renderCandidates();
+
+      const pickIdx = currentCandidates.findIndex(c => c.id === verdict.best_release_id);
+      if (verdict.status === 'confident' && pickIdx !== -1) {
+        await inspectCandidate(pickIdx);
+      } else {
+        setStatus('', false);
+        document.getElementById('detectiveCard').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    } catch (err) {
+      setStatus('', false);
+      toast('Variant Detective skipped: ' + err.message, 3500);
+    }
+  };
+
+  function renderDetectiveCard(verdict) {
+    const card = document.getElementById('detectiveCard');
+    card.classList.remove('hidden');
+
+    const confClass = verdict.status === 'confident' ? 'badge-green' : 'badge-yellow';
+    const confLabel = verdict.status === 'confident' ? `✅ ${verdict.confidence || 'High'} Match` : '❓ Quick Question';
+    document.getElementById('detectiveBadge').innerHTML = `<span class="badge ${confClass}" style="margin:0;">${esc(confLabel)}</span>`;
+    document.getElementById('detectiveReasoning').textContent = verdict.reasoning || '';
+
+    const qBox = document.getElementById('detectiveQuestionBox');
+    if (verdict.status === 'needs_question' && verdict.question && Array.isArray(verdict.question.options) && verdict.question.options.length) {
+      qBox.classList.remove('hidden');
+      window._detectiveOptions = verdict.question.options;
+      qBox.innerHTML = `
+        <div style="font-weight:800; font-size:0.92rem;">${esc(verdict.question.prompt)}</div>
+        ${verdict.question.how_to_check ? `<div class="detective-hint">💡 How to check: ${esc(verdict.question.how_to_check)}</div>` : ''}
+        <div>
+          ${verdict.question.options.map((opt, i) => `
+            <button class="opt-btn" onclick="answerDetective(${i})">${esc(opt.label)}</button>
+          `).join('')}
+        </div>
+      `;
+    } else {
+      qBox.classList.add('hidden');
+      qBox.innerHTML = '';
+    }
+
+    document.getElementById('btnShowAllCands').classList.toggle('hidden', !visibleCandidateIds);
+  }
+
+  window.answerDetective = async function(optIdx) {
+    const opt = (window._detectiveOptions || [])[optIdx];
+    if (!opt) return;
+    const ids = (opt.matching_ids || []).filter(id => currentCandidates.some(c => c.id === id));
+
+    if (ids.length === 1) {
+      visibleCandidateIds = new Set(ids);
+      detectivePickId = ids[0];
+      document.getElementById('detectiveQuestionBox').classList.add('hidden');
+      document.getElementById('detectiveBadge').innerHTML = `<span class="badge badge-green" style="margin:0;">✅ Narrowed Down</span>`;
+      document.getElementById('detectiveReasoning').textContent = `Matched based on: "${opt.label}"`;
+      document.getElementById('btnShowAllCands').classList.remove('hidden');
+      renderCandidates();
+      await inspectCandidate(currentCandidates.findIndex(c => c.id === ids[0]));
+    } else if (ids.length > 1) {
+      visibleCandidateIds = new Set(ids);
+      document.getElementById('btnShowAllCands').classList.remove('hidden');
+      renderCandidates();
+      toast(`Narrowed to ${ids.length} variants — checking next clue...`);
+      await runVariantDetective(false, ids);
+    } else {
+      visibleCandidateIds = null;
+      document.getElementById('detectiveQuestionBox').classList.add('hidden');
+      renderCandidates();
+      toast('Showing all Discogs matches — tap the closest one below');
+    }
+  };
+
+  window.showAllCandidates = function() {
+    visibleCandidateIds = null;
+    detectiveEliminatedIds = new Set();
+    document.getElementById('btnShowAllCands').classList.add('hidden');
+    renderCandidates();
+  };
+
   // ==================== INSPECT CANDIDATE (PRICE + SCARCITY + SPOTIFY TASTE) ====================
   window.inspectCandidate = async function(idx) {
     const cand = currentCandidates[idx];
     if (!cand) return;
 
-    document.querySelectorAll('.candidate-card').forEach((el, i) => el.classList.toggle('selected', i === idx));
-    setStatus('Fetching release details, tracklist & pricing...', true);
+    setStatus('Fetching pricing & tracklist...', true);
 
     try {
-      const release = await discogsFetch(`/releases/${cand.id}`);
+      const release = await getReleaseCached(cand.id);
       const stats = await discogsFetch(`/marketplace/stats/${cand.id}`).catch(() => ({}));
+
       let suggestions = null;
-      try {
-        suggestions = await discogsFetch(`/marketplace/price_suggestions/${cand.id}`);
-      } catch (_) {
-        suggestions = null;
+      if (cfg.fetchVgSuggestions) {
+        try {
+          suggestions = await discogsFetch(`/marketplace/price_suggestions/${cand.id}`);
+        } catch (err) {
+          suggestions = null;
+          if (err.status === 403 || err.status === 404) {
+            // Auto-disable to save 1 API call + 1.2s on every future scan
+            cfg.fetchVgSuggestions = false;
+            document.getElementById('cfgFetchVg').checked = false;
+            persistCfg();
+          }
+        }
       }
 
       const artistName = (release.artists || []).map(a => a.name.replace(/\s*\(\d+\)$/, '')).join(', ') ||
@@ -1495,7 +2016,16 @@ Return ONLY valid JSON with these exact keys:
       const want = release.community?.want ?? 0;
 
       const isHighValue = estPrice !== null && estPrice >= Number(cfg.threshold || 20);
-      const isScarce = numForSale === 0 && (want > have || want >= 10);
+      const isScarce = numForSale === 0 && (want >= 10 || (want > have && want >= 5));
+
+      const notesParts = [];
+      if (release.formats?.length) {
+        notesParts.push('Format: ' + release.formats.map(f => [f.name, ...(f.descriptions || []), f.text || ''].filter(Boolean).join(', ')).join(' | '));
+      }
+      if (release.notes) notesParts.push('\nNotes:\n' + release.notes);
+      if (release.identifiers?.length) {
+        notesParts.push('\nIdentifiers:\n' + release.identifiers.map(x => `• ${x.type}${x.description ? ` (${x.description})` : ''}: ${x.value}`).join('\n'));
+      }
 
       currentInspected = {
         discogs_id: release.id,
@@ -1517,6 +2047,7 @@ Return ONLY valid JSON with these exact keys:
         is_high_value: isHighValue,
         is_scarce: isScarce,
         tracklist,
+        pressing_notes: notesParts.join('\n').trim(),
         discogs_url: release.uri || `https://www.discogs.com/release/${release.id}`,
         discogs_thumb: release.thumb || cand.thumb || '',
         taste_score: null,
@@ -1526,6 +2057,7 @@ Return ONLY valid JSON with these exact keys:
         spotify_matches: { artistHit: false, matchedTracks: [] }
       };
 
+      renderCandidates();
       renderInspector(currentInspected, true);
       setStatus('', false);
       document.getElementById('inspectorCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1565,6 +2097,7 @@ Return ONLY valid JSON with these exact keys:
       is_high_value: false,
       is_scarce: false,
       tracklist: tracks,
+      pressing_notes: '',
       discogs_url: '',
       discogs_thumb: '',
       taste_score: null,
@@ -1584,7 +2117,7 @@ Return ONLY valid JSON with these exact keys:
     card.classList.remove('hidden');
 
     document.getElementById('inspTitle').textContent = `${item.artist} — ${item.title}`;
-    document.getElementById('inspSub').textContent = `${item.format} · ${item.year || '?'} · ${item.label || 'Unknown Label'} · ${item.catno || 'No Cat#'}`;
+    document.getElementById('inspSub').textContent = `${item.format} · ${item.country || '?'} · ${item.year || '?'} · ${item.label || 'Unknown Label'} · ${item.catno || 'No Cat#'}`;
     document.getElementById('inspBadge').innerHTML = hasDiscogs
       ? `<span class="badge badge-blue">#${item.discogs_id}</span>`
       : `<span class="badge badge-yellow">Unlisted</span>`;
@@ -1619,6 +2152,14 @@ Return ONLY valid JSON with these exact keys:
       ` + links;
     }
     document.getElementById('inspLinks').innerHTML = links;
+
+    const notesWrap = document.getElementById('pressingNotesDetails');
+    if (item.pressing_notes) {
+      notesWrap.classList.remove('hidden');
+      document.getElementById('inspNotes').textContent = item.pressing_notes;
+    } else {
+      notesWrap.classList.add('hidden');
+    }
 
     const saveBothBtn = document.getElementById('btnSaveBoth');
     saveBothBtn.disabled = !hasDiscogs || !cfg.discogsToken || !cfg.discogsUser;
@@ -1671,6 +2212,23 @@ Return ONLY valid JSON with these exact keys:
     return { artistHit, matchedTracks };
   }
 
+  function applyTasteResult(item, res) {
+    item.taste_score = res.score;
+    item.taste_verdict = res.verdict;
+    item.taste_summary = res.summary;
+    item.notable_songs = Array.isArray(res.notable_songs) ? res.notable_songs : [];
+
+    const vClass = res.verdict === 'KEEP' ? 'badge-green' : res.verdict === 'LISTEN' ? 'badge-blue' : 'badge-red';
+    document.getElementById('tasteScore').innerHTML = `${esc(res.score)}/10 <span class="badge ${vClass}" style="vertical-align:middle;">${esc(res.verdict)}</span>`;
+    document.getElementById('tasteBody').textContent = res.summary || '';
+    if (item.notable_songs.length) {
+      document.getElementById('tasteHits').innerHTML = `<strong>⭐ Notable / Recognizable Songs:</strong><br>` +
+        item.notable_songs.map(s => `• ${esc(s)}`).join('<br>');
+    } else {
+      document.getElementById('tasteHits').innerHTML = `<span style="color:var(--muted);">No major mainstream hits identified on this release.</span>`;
+    }
+  }
+
   async function runTasteAnalysis(item) {
     if (!cfg.geminiKey) {
       document.getElementById('tasteScore').textContent = '—';
@@ -1678,9 +2236,15 @@ Return ONLY valid JSON with these exact keys:
       return;
     }
 
+    const cacheKey = `${norm(item.artist)}|${norm(item.title)}`;
+    if (tasteCache.has(cacheKey)) {
+      applyTasteResult(item, tasteCache.get(cacheKey));
+      return;
+    }
+
     const topArtists = (spotifyProfile?.topArtists || []).slice(0, 60).join(', ');
     const tracksStr = (item.tracklist || []).slice(0, 24).map(t => t.title).join('; ');
-    const prompt = `Evaluate whether the user would like this physical music release and identify any famous/popular songs on it.
+    const prompt = `Evaluate whether the user would like this physical music release and identify any famous/popular songs on it. Speak directly to the user ("you", not "the user").
 Release: "${item.artist} - ${item.title}" (${item.year || 'unknown year'}, Format: ${item.format}, Genres: ${(item.genres || []).join(', ') || 'unknown'}).
 Tracklist: ${tracksStr || 'Unknown'}.
 Local Spotify Matches: Artist in library = ${item.spotify_matches.artistHit}, Exact tracks in library = ${item.spotify_matches.matchedTracks.join(', ') || 'None'}.
@@ -1688,29 +2252,17 @@ User's Top Spotify Artists: ${topArtists || 'Not synced yet'}.
 
 Return ONLY valid JSON:
 {
-  "score": 1 to 10 integer (taste match for this user; if Spotify not synced, rate general appeal 1-10),
+  "score": 1 to 10 integer (taste match for you; if Spotify not synced, rate general appeal 1-10),
   "verdict": "KEEP" | "LISTEN" | "SELL / SKIP",
-  "summary": "1-2 punchy sentences explaining why they will or won't like this, referencing their actual Spotify artists when relevant.",
+  "summary": "1-2 punchy sentences speaking directly to 'you' explaining why you will or won't like this, referencing your actual Spotify artists when relevant.",
   "notable_songs": ["Track Name — brief note on why it's famous/popular (max 3 items, or empty array if obscure)"]
 }`;
 
     try {
       const res = await callGeminiJSON([{ text: prompt }]);
+      tasteCache.set(cacheKey, res);
       if (currentInspected !== item) return;
-      item.taste_score = res.score;
-      item.taste_verdict = res.verdict;
-      item.taste_summary = res.summary;
-      item.notable_songs = Array.isArray(res.notable_songs) ? res.notable_songs : [];
-
-      const vClass = res.verdict === 'KEEP' ? 'badge-green' : res.verdict === 'LISTEN' ? 'badge-blue' : 'badge-red';
-      document.getElementById('tasteScore').innerHTML = `${esc(res.score)}/10 <span class="badge ${vClass}" style="vertical-align:middle;">${esc(res.verdict)}</span>`;
-      document.getElementById('tasteBody').textContent = res.summary || '';
-      if (item.notable_songs.length) {
-        document.getElementById('tasteHits').innerHTML = `<strong>⭐ Notable / Recognizable Songs:</strong><br>` +
-          item.notable_songs.map(s => `• ${esc(s)}`).join('<br>');
-      } else {
-        document.getElementById('tasteHits').innerHTML = `<span style="color:var(--muted);">No major mainstream hits identified on this release.</span>`;
-      }
+      applyTasteResult(item, res);
     } catch (err) {
       document.getElementById('tasteScore').textContent = '?';
       document.getElementById('tasteBody').textContent = 'Taste check error: ' + err.message;
@@ -1766,15 +2318,22 @@ Return ONLY valid JSON:
     currentPhotos = { primaryB64: null, extraB64: null, thumbWebp: null };
     currentExtracted = null;
     currentCandidates = [];
+    visibleCandidateIds = null;
+    detectiveDiffs = {};
+    detectivePickId = null;
+    detectiveEliminatedIds = new Set();
     currentInspected = null;
+
     document.getElementById('camPrimary').value = '';
     document.getElementById('camExtra').value = '';
     document.getElementById('previewStrip').classList.add('hidden');
     document.getElementById('previewStrip').innerHTML = '';
+    document.getElementById('detectiveCard').classList.add('hidden');
     document.getElementById('extractCard').classList.add('hidden');
     document.getElementById('candidatesCard').classList.add('hidden');
     document.getElementById('inspectorCard').classList.add('hidden');
-    ['fTitle', 'fArtist', 'fCatno', 'fLabel', 'fYear', 'fNote'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('detectedCluesLine').textContent = '';
+    ['fTitle', 'fArtist', 'fCatno', 'fBarcode', 'fLabel', 'fYear', 'fNote'].forEach(id => document.getElementById(id).value = '');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -1824,7 +2383,7 @@ Return ONLY valid JSON:
           <img class="stash-thumb" src="${esc(it.thumb_data_url || '')}" onerror="this.style.visibility='hidden'" />
           <div class="stash-body">
             <div class="candidate-title">${esc(it.artist)} — ${esc(it.title)}</div>
-            <div class="candidate-sub">${esc(it.format)} · ${esc(it.year || '?')} · ${esc(it.catno || 'No Cat#')} · ${esc(it.condition_note || '')}</div>
+            <div class="candidate-sub">${esc(it.format)} · ${esc(it.country || '?')} · ${esc(it.year || '?')} · ${esc(it.catno || 'No Cat#')}</div>
             <div style="margin-bottom:6px;">${priceBadge}${scarceBadge}${tasteBadge}${syncBadge}</div>
             ${it.taste_summary ? `<div style="font-size:0.78rem; color:var(--muted); margin-bottom:6px;">${esc(it.taste_summary)}</div>` : ''}
             <div style="display:flex; gap:6px; flex-wrap:wrap;">
@@ -1862,14 +2421,14 @@ Return ONLY valid JSON:
   // ==================== EXPORT / IMPORT ====================
   window.exportCSV = function() {
     if (!stashCache.length) { toast('Nothing to export yet'); return; }
-    const cols = ['artist', 'title', 'format', 'catno', 'label', 'year', 'est_price', 'lowest_price', 'num_for_sale', 'have', 'want', 'is_high_value', 'is_scarce', 'taste_score', 'taste_verdict', 'synced_to_discogs', 'condition_note', 'discogs_url'];
+    const cols = ['artist', 'title', 'format', 'country', 'catno', 'label', 'year', 'est_price', 'lowest_price', 'num_for_sale', 'have', 'want', 'is_high_value', 'is_scarce', 'taste_score', 'taste_verdict', 'synced_to_discogs', 'condition_note', 'discogs_url'];
     const csvCell = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const rows = [cols.join(','), ...stashCache.map(it => cols.map(c => csvCell(it[c])).join(','))];
     downloadFile(rows.join('\n'), `cratecheck-stash-${new Date().toISOString().slice(0,10)}.csv`, 'text/csv');
   };
 
   window.exportJSON = function() {
-    const payload = { version: 1, exportedAt: new Date().toISOString(), stash: stashCache, spotifyProfile };
+    const payload = { version: 2, exportedAt: new Date().toISOString(), stash: stashCache, spotifyProfile };
     downloadFile(JSON.stringify(payload), `cratecheck-backup-${new Date().toISOString().slice(0,10)}.json`, 'application/json');
     toast('JSON backup downloaded');
   };
@@ -1921,14 +2480,8 @@ Return ONLY valid JSON:
 
   window.startSpotifyAuth = async function() {
     saveSettings(true);
-    if (!cfg.spotifyClientId) {
-      toast('Paste your Spotify Client ID first (see Guide tab)');
-      return;
-    }
-    if (!window.crypto?.subtle) {
-      toast('Spotify login requires HTTPS (host on GitHub Pages)');
-      return;
-    }
+    if (!cfg.spotifyClientId) { toast('Paste your Spotify Client ID first (see Guide tab)'); return; }
+    if (!window.crypto?.subtle) { toast('Spotify login requires HTTPS (host on GitHub Pages)'); return; }
 
     if (cfg.spotifyRefreshToken) {
       const ok = await refreshSpotifyToken();
@@ -1958,34 +2511,26 @@ Return ONLY valid JSON:
     const code = params.get('code');
     const state = params.get('state');
     const err = params.get('error');
-    if (err) {
-      history.replaceState({}, '', location.pathname);
-      toast('Spotify login cancelled: ' + err);
-      return;
-    }
+    if (err) { history.replaceState({}, '', location.pathname); toast('Spotify login cancelled: ' + err); return; }
     if (!code) return;
     history.replaceState({}, '', location.pathname);
 
     const savedState = localStorage.getItem('sp_pkce_state');
     const verifier = localStorage.getItem('sp_pkce_verifier');
-    if (!verifier || state !== savedState) {
-      toast('Spotify state mismatch — try connecting again');
-      return;
-    }
+    if (!verifier || state !== savedState) { toast('Spotify state mismatch — try connecting again'); return; }
 
     setStatus('Exchanging Spotify token...', true);
     try {
-      const body = new URLSearchParams({
-        client_id: cfg.spotifyClientId.trim(),
-        grant_type: 'authorization_code',
-        code,
-        redirect_uri: REDIRECT_URI,
-        code_verifier: verifier
-      });
       const res = await fetch('https://accounts.spotify.com/api/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body
+        body: new URLSearchParams({
+          client_id: cfg.spotifyClientId.trim(),
+          grant_type: 'authorization_code',
+          code,
+          redirect_uri: REDIRECT_URI,
+          code_verifier: verifier
+        })
       });
       const tok = await res.json();
       if (!res.ok) throw new Error(tok.error_description || tok.error || 'Token exchange failed');
@@ -2023,9 +2568,7 @@ Return ONLY valid JSON:
   }
 
   async function spFetch(url) {
-    if (Date.now() > cfg.spotifyExpiresAt && cfg.spotifyRefreshToken) {
-      await refreshSpotifyToken();
-    }
+    if (Date.now() > cfg.spotifyExpiresAt && cfg.spotifyRefreshToken) await refreshSpotifyToken();
     const res = await fetch(url, { headers: { Authorization: 'Bearer ' + cfg.spotifyAccessToken } });
     if (res.status === 429) {
       const waitSec = Number(res.headers.get('Retry-After')) || 3;
@@ -2059,17 +2602,14 @@ Return ONLY valid JSON:
     try {
       const me = await spFetch('https://api.spotify.com/v1/me');
 
-      // 1. Top Artists (long & medium term)
       for (const range of ['long_term', 'medium_term']) {
         const topA = await spFetch(`https://api.spotify.com/v1/me/top/artists?limit=50&time_range=${range}`).catch(() => ({ items: [] }));
         (topA.items || []).forEach((a, i) => recordArtist(a.name, Math.max(5, 25 - Math.floor(i / 2))));
       }
 
-      // 2. Top Tracks
       const topT = await spFetch('https://api.spotify.com/v1/me/top/tracks?limit=50&time_range=long_term').catch(() => ({ items: [] }));
       (topT.items || []).forEach(t => recordTrack(t, 4));
 
-      // 3. ALL Liked Songs (no cap)
       let next = 'https://api.spotify.com/v1/me/tracks?limit=50';
       let likedCount = 0;
       while (next) {
@@ -2082,7 +2622,6 @@ Return ONLY valid JSON:
         if (next) await sleep(80);
       }
 
-      // 4. ALL Saved Albums (no cap)
       next = 'https://api.spotify.com/v1/me/albums?limit=50';
       let albumCount = 0;
       while (next) {
@@ -2098,7 +2637,6 @@ Return ONLY valid JSON:
         if (next) await sleep(80);
       }
 
-      // 5. ALL Owned / Collaborative Playlists & ALL Songs inside them (no caps)
       const ownedPlaylists = [];
       let plUrl = 'https://api.spotify.com/v1/me/playlists?limit=50';
       while (plUrl) {
@@ -2126,10 +2664,7 @@ Return ONLY valid JSON:
         }
       }
 
-      const topArtists = Object.values(artistCounts)
-        .sort((a, b) => b.count - a.count)
-        .slice(0, 120)
-        .map(x => x.name);
+      const topArtists = Object.values(artistCounts).sort((a, b) => b.count - a.count).slice(0, 120).map(x => x.name);
 
       spotifyProfile = {
         syncedAt: Date.now(),
@@ -2143,6 +2678,7 @@ Return ONLY valid JSON:
       };
 
       await idbPut('meta', { key: 'spotify_profile', value: spotifyProfile });
+      tasteCache.clear();
       updateSpotifyUI();
       setStatus('', false);
       toast(`🎧 Synced ${spotifyProfile.totalTracks} tracks, ${spotifyProfile.totalArtists} artists (${ownedPlaylists.length} playlists)!`, 4000);
@@ -2191,6 +2727,7 @@ Return ONLY valid JSON:
       totalPlaylists: spotifyProfile?.totalPlaylists || 0
     };
     await idbPut('meta', { key: 'spotify_profile', value: spotifyProfile });
+    tasteCache.clear();
     updateSpotifyUI();
     toast(`Merged! Total: ${spotifyProfile.totalTracks} tracks & ${spotifyProfile.totalArtists} artists.`);
   };
@@ -2243,8 +2780,11 @@ Return ONLY valid JSON:
   window.saveSettings = function(silent = false) {
     cfg.geminiKey = document.getElementById('cfgGeminiKey').value.trim();
     cfg.geminiModel = document.getElementById('cfgGeminiModel').value;
+    cfg.autoDetective = document.getElementById('cfgAutoDetective').checked;
     cfg.discogsToken = document.getElementById('cfgDiscogsToken').value.trim();
     cfg.discogsFolderId = document.getElementById('cfgDiscogsFolder').value || '1';
+    cfg.homeCountry = document.getElementById('cfgHomeCountry').value;
+    cfg.fetchVgSuggestions = document.getElementById('cfgFetchVg').checked;
     cfg.threshold = Number(document.getElementById('cfgThreshold').value) || 20;
     cfg.voice = document.getElementById('cfgVoice').checked;
     cfg.spotifyClientId = document.getElementById('cfgSpotifyClientId').value.trim();
@@ -2300,7 +2840,10 @@ Return ONLY valid JSON:
 
     document.getElementById('cfgGeminiKey').value = cfg.geminiKey || '';
     document.getElementById('cfgGeminiModel').value = cfg.geminiModel || 'gemini-3.5-flash-lite';
+    document.getElementById('cfgAutoDetective').checked = cfg.autoDetective !== false;
     document.getElementById('cfgDiscogsToken').value = cfg.discogsToken || '';
+    document.getElementById('cfgHomeCountry').value = cfg.homeCountry ?? 'US';
+    document.getElementById('cfgFetchVg').checked = cfg.fetchVgSuggestions !== false;
     document.getElementById('cfgThreshold').value = cfg.threshold ?? 20;
     document.getElementById('cfgVoice').checked = Boolean(cfg.voice);
     document.getElementById('cfgSpotifyClientId').value = cfg.spotifyClientId || '';
