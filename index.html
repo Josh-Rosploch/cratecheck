@@ -1,0 +1,2280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f1117" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>CrateCheck — Media Scanner</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --card: #181c26;
+      --card-2: #202636;
+      --border: #2c3448;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --green: #10b981;
+      --green-bg: rgba(16, 185, 129, 0.14);
+      --yellow: #f59e0b;
+      --yellow-bg: rgba(245, 158, 11, 0.15);
+      --red: #ef4444;
+      --red-bg: rgba(239, 68, 68, 0.16);
+      --purple: #a855f7;
+      --purple-bg: rgba(168, 85, 247, 0.16);
+      --spotify: #1db954;
+      --radius: 14px;
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+    }
+
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+      padding-bottom: calc(82px + var(--safe-bottom));
+    }
+
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      background: rgba(15, 17, 23, 0.92);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 800;
+      font-size: 1.08rem;
+      letter-spacing: -0.02em;
+    }
+
+    .status-pills {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.72rem;
+      font-weight: 600;
+    }
+
+    .pill {
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: var(--card-2);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .pill.ok { color: var(--green); border-color: rgba(16, 185, 129, 0.4); }
+    .pill.warn { color: var(--yellow); border-color: rgba(245, 158, 11, 0.4); }
+    .pill.err { color: var(--red); border-color: rgba(239, 68, 68, 0.4); }
+
+    main {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 14px;
+    }
+
+    .view { display: none; }
+    .view.active { display: block; }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+
+    h2 { margin: 0 0 10px; font-size: 1.05rem; font-weight: 700; }
+    h3 { margin: 0 0 8px; font-size: 0.95rem; font-weight: 700; }
+    p { margin: 0 0 10px; color: var(--muted); font-size: 0.9rem; }
+    p:last-child { margin-bottom: 0; }
+
+    .seg-control {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      padding: 5px;
+      border-radius: 12px;
+      margin-bottom: 12px;
+    }
+
+    .seg-btn {
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      font-weight: 700;
+      font-size: 0.84rem;
+      padding: 9px 4px;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .seg-btn.active {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+      min-height: 48px;
+      padding: 12px 16px;
+      border-radius: 12px;
+      border: 1px solid transparent;
+      font-size: 0.95rem;
+      font-weight: 700;
+      cursor: pointer;
+      color: #fff;
+      background: var(--accent);
+      text-decoration: none;
+      transition: transform 0.08s ease, opacity 0.15s ease;
+    }
+    .btn:active { transform: scale(0.985); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary-scan {
+      min-height: 62px;
+      font-size: 1.06rem;
+      background: linear-gradient(135deg, #2563eb, #4f46e5);
+      box-shadow: 0 6px 20px rgba(37, 99, 235, 0.35);
+    }
+    .btn-green { background: var(--green); color: #052e16; }
+    .btn-spotify { background: var(--spotify); color: #052e16; }
+    .btn-secondary { background: var(--card-2); border-color: var(--border); color: var(--text); }
+    .btn-danger { background: var(--red-bg); border-color: rgba(239,68,68,0.4); color: #fca5a5; }
+    .btn-sm { min-height: 36px; padding: 7px 12px; font-size: 0.82rem; width: auto; }
+
+    .btn-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .hidden-file { display: none; }
+
+    .preview-strip {
+      display: flex;
+      gap: 10px;
+      overflow-x: auto;
+      margin-top: 10px;
+    }
+    .preview-item {
+      position: relative;
+      flex: 0 0 auto;
+    }
+    .preview-item img {
+      width: 88px;
+      height: 88px;
+      object-fit: cover;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      display: block;
+    }
+    .preview-label {
+      position: absolute;
+      bottom: 4px;
+      left: 4px;
+      background: rgba(0,0,0,0.75);
+      color: #fff;
+      font-size: 0.65rem;
+      padding: 2px 5px;
+      border-radius: 4px;
+    }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .field-full { grid-column: 1 / -1; }
+
+    label.field-label {
+      display: block;
+      font-size: 0.74rem;
+      color: var(--muted);
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    input[type="text"], input[type="password"], input[type="number"], select, textarea {
+      width: 100%;
+      background: #0d1017;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 10px 11px;
+      font-size: 0.92rem;
+      font-family: inherit;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .status-banner {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: var(--card-2);
+      border: 1px solid var(--border);
+      margin-bottom: 12px;
+      font-size: 0.88rem;
+      font-weight: 600;
+    }
+    .status-banner.show { display: flex; }
+
+    .spinner {
+      width: 18px;
+      height: 18px;
+      border: 2.5px solid rgba(255,255,255,0.2);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      flex: 0 0 auto;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .candidate-card {
+      display: flex;
+      gap: 12px;
+      padding: 12px;
+      border-radius: 12px;
+      background: var(--card-2);
+      border: 1.5px solid var(--border);
+      margin-bottom: 8px;
+      cursor: pointer;
+      transition: border-color 0.15s ease;
+    }
+    .candidate-card.selected {
+      border-color: var(--accent);
+      background: rgba(59, 130, 246, 0.12);
+    }
+    .candidate-thumb {
+      width: 64px;
+      height: 64px;
+      border-radius: 8px;
+      object-fit: cover;
+      background: #0d1017;
+      flex: 0 0 auto;
+    }
+    .candidate-meta { flex: 1; min-width: 0; }
+    .candidate-title {
+      font-weight: 700;
+      font-size: 0.92rem;
+      margin-bottom: 3px;
+      word-break: break-word;
+    }
+    .candidate-sub {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-bottom: 5px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 6px;
+      margin-right: 4px;
+      margin-bottom: 4px;
+    }
+    .badge-green { background: var(--green-bg); color: #34d399; }
+    .badge-yellow { background: var(--yellow-bg); color: #fbbf24; }
+    .badge-red { background: var(--red-bg); color: #f87171; }
+    .badge-purple { background: var(--purple-bg); color: #d8b4fe; }
+    .badge-blue { background: rgba(59, 130, 246, 0.18); color: #93c5fd; }
+
+    .alert-box {
+      padding: 12px 14px;
+      border-radius: 12px;
+      font-weight: 800;
+      font-size: 0.92rem;
+      margin-bottom: 10px;
+      border: 1.5px solid transparent;
+    }
+    .alert-high-value {
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.22), rgba(239, 68, 68, 0.22));
+      border-color: #f59e0b;
+      color: #fde68a;
+    }
+    .alert-scarce {
+      background: linear-gradient(135deg, rgba(168, 85, 247, 0.22), rgba(245, 158, 11, 0.2));
+      border-color: #a855f7;
+      color: #e9d5ff;
+    }
+    .alert-dup {
+      background: var(--yellow-bg);
+      border-color: var(--yellow);
+      color: #fde68a;
+      font-size: 0.84rem;
+    }
+
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .metric-box {
+      background: #0d1017;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 9px 10px;
+    }
+    .metric-label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .metric-val { font-size: 1.05rem; font-weight: 800; margin-top: 2px; }
+
+    .taste-box {
+      background: linear-gradient(180deg, rgba(29, 185, 84, 0.08), rgba(15, 17, 23, 0.6));
+      border: 1px solid rgba(29, 185, 84, 0.35);
+      border-radius: 12px;
+      padding: 12px;
+      margin-bottom: 10px;
+    }
+    .taste-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .taste-score {
+      font-size: 1.3rem;
+      font-weight: 900;
+      color: var(--spotify);
+    }
+
+    .tracklist {
+      max-height: 220px;
+      overflow-y: auto;
+      background: #0d1017;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px 10px;
+      margin-bottom: 10px;
+      font-size: 0.82rem;
+    }
+    .track-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+    .track-row:last-child { border-bottom: none; }
+    .track-hit { color: #34d399; font-weight: 700; }
+
+    .link-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+
+    .chip-row {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      padding-bottom: 6px;
+      margin-bottom: 10px;
+    }
+    .chip {
+      flex: 0 0 auto;
+      padding: 6px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--card-2);
+      color: var(--muted);
+      font-size: 0.78rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .chip.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+
+    .stash-item {
+      display: flex;
+      gap: 11px;
+      padding: 12px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      margin-bottom: 10px;
+    }
+    .stash-thumb {
+      width: 68px;
+      height: 68px;
+      border-radius: 8px;
+      object-fit: cover;
+      background: #0d1017;
+      flex: 0 0 auto;
+    }
+    .stash-body { flex: 1; min-width: 0; }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 0;
+    }
+
+    .code-copy {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      background: #0d1017;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.76rem;
+      word-break: break-all;
+      margin: 6px 0;
+    }
+
+    .guide-step {
+      padding: 12px;
+      background: var(--card-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      margin-bottom: 10px;
+    }
+    .guide-step ol {
+      margin: 6px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+    .guide-step li { margin-bottom: 6px; }
+    .guide-step a { color: #60a5fa; font-weight: 600; }
+
+    nav.bottom-nav {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      z-index: 50;
+      background: rgba(15, 17, 23, 0.96);
+      backdrop-filter: blur(12px);
+      border-top: 1px solid var(--border);
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      padding: 6px 6px calc(6px + var(--safe-bottom));
+    }
+
+    .nav-btn {
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+      padding: 6px 4px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      cursor: pointer;
+      border-radius: 10px;
+    }
+    .nav-btn span.ico { font-size: 1.25rem; line-height: 1; }
+    .nav-btn.active { color: var(--accent); background: rgba(59, 130, 246, 0.1); }
+
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: calc(88px + var(--safe-bottom));
+      transform: translateX(-50%) translateY(20px);
+      background: #1e293b;
+      color: #fff;
+      border: 1px solid var(--border);
+      padding: 10px 16px;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 700;
+      opacity: 0;
+      pointer-events: none;
+      transition: all 0.2s ease;
+      z-index: 100;
+      max-width: 90vw;
+      text-align: center;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+    }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    details summary {
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 0.88rem;
+      color: var(--text);
+      padding: 4px 0;
+    }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="brand">📼 CrateCheck</div>
+  <div class="status-pills">
+    <span id="ratePill" class="pill" title="Discogs API sliding window (max 50/min)">API 0/50</span>
+    <span id="spotifyPill" class="pill">Spotify: Off</span>
+  </div>
+</header>
+
+<main>
+  <!-- ==================== SCANNER VIEW ==================== -->
+  <section id="view-scan" class="view active">
+    <div id="setupNotice" class="card hidden" style="border-color: var(--yellow); background: var(--yellow-bg);">
+      <div style="font-weight: 800; color: #fde68a; margin-bottom: 4px;">Finish Quick Setup First</div>
+      <p style="color: #fef3c7; font-size: 0.84rem; margin-bottom: 8px;">Add your Gemini API Key &amp; Discogs Token in Settings (takes ~3 minutes using the Guide tab).</p>
+      <div class="btn-row">
+        <button class="btn btn-sm btn-secondary" onclick="switchView('guide')">📖 Open Setup Guide</button>
+        <button class="btn btn-sm" onclick="switchView('settings')">⚙️ Open Settings</button>
+      </div>
+    </div>
+
+    <div class="seg-control" id="formatSeg">
+      <button class="seg-btn active" data-fmt="Auto">Auto</button>
+      <button class="seg-btn" data-fmt="Cassette">Cassette</button>
+      <button class="seg-btn" data-fmt="CD">CD</button>
+      <button class="seg-btn" data-fmt="Vinyl">Vinyl</button>
+    </div>
+
+    <div class="card">
+      <input id="camPrimary" class="hidden-file" type="file" accept="image/*" capture="environment" />
+      <input id="camExtra" class="hidden-file" type="file" accept="image/*" capture="environment" />
+
+      <button class="btn btn-primary-scan" onclick="document.getElementById('camPrimary').click()">
+        📷 Scan Item (Front / Side A)
+      </button>
+
+      <div class="btn-row">
+        <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="document.getElementById('camExtra').click()">
+          + Extra Photo (Back / Matrix)
+        </button>
+        <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="toggleManualEntry()">
+          ⌨️ Type Cat# / Title
+        </button>
+      </div>
+
+      <div id="previewStrip" class="preview-strip hidden"></div>
+    </div>
+
+    <div id="statusBanner" class="status-banner">
+      <div class="spinner"></div>
+      <div id="statusText">Working...</div>
+    </div>
+
+    <!-- Extracted Fields Card -->
+    <div id="extractCard" class="card hidden">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <h3 style="margin:0;">1. Confirm Scanned Details</h3>
+        <button class="btn btn-secondary btn-sm" onclick="resetScanner()">Clear</button>
+      </div>
+      <div class="field-grid">
+        <div class="field-full">
+          <label class="field-label">Album / Release Title</label>
+          <input id="fTitle" type="text" placeholder="e.g., Dawn Patrol" />
+        </div>
+        <div class="field-full">
+          <label class="field-label">Artist(s)</label>
+          <input id="fArtist" type="text" placeholder="e.g., Night Ranger" />
+        </div>
+        <div>
+          <label class="field-label">Catalog #</label>
+          <input id="fCatno" type="text" placeholder="e.g., MCAC-5460" />
+        </div>
+        <div>
+          <label class="field-label">Format</label>
+          <select id="fFormat">
+            <option value="Cassette">Cassette</option>
+            <option value="CD">CD</option>
+            <option value="Vinyl">Vinyl</option>
+          </select>
+        </div>
+        <div>
+          <label class="field-label">Label</label>
+          <input id="fLabel" type="text" placeholder="e.g., MCA Records" />
+        </div>
+        <div>
+          <label class="field-label">Year / Barcode</label>
+          <input id="fYear" type="text" placeholder="e.g., 1982" />
+        </div>
+        <div class="field-full">
+          <label class="field-label">Condition / Notes</label>
+          <input id="fNote" type="text" placeholder="Standard / Loose shell / etc." />
+        </div>
+      </div>
+
+      <div class="btn-row" style="margin-top:10px;">
+        <button class="btn btn-sm" style="width:100%;" onclick="runDiscogsSearch()">🔍 Search Discogs</button>
+        <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="inspectUnlistedItem()">🎧 Not on Discogs? Check Taste</button>
+      </div>
+    </div>
+
+    <!-- Discogs Candidates -->
+    <div id="candidatesCard" class="card hidden">
+      <h3>2. Tap the Right Match to Check Price &amp; Taste</h3>
+      <div id="candidatesList"></div>
+    </div>
+
+    <!-- Selected Item Inspector -->
+    <div id="inspectorCard" class="card hidden">
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:8px;">
+        <div>
+          <h2 id="inspTitle" style="margin:0 0 2px;"></h2>
+          <div id="inspSub" style="font-size:0.84rem; color:var(--muted);"></div>
+        </div>
+        <span id="inspBadge"></span>
+      </div>
+
+      <div id="inspAlerts"></div>
+
+      <div class="metrics-grid" id="inspMetrics">
+        <div class="metric-box">
+          <div class="metric-label">Lowest Listed</div>
+          <div class="metric-val" id="mLowest">—</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">VG+ Est. Value</div>
+          <div class="metric-val" id="mVgPlus">—</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">For Sale</div>
+          <div class="metric-val" id="mForSale">—</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Have / Want</div>
+          <div class="metric-val" id="mHaveWant">—</div>
+        </div>
+      </div>
+
+      <div class="link-row" id="inspLinks"></div>
+
+      <!-- Spotify Taste & Hit Check -->
+      <div class="taste-box" id="tasteBox">
+        <div class="taste-header">
+          <strong style="font-size:0.9rem;">🎧 Spotify Taste &amp; Hit Check</strong>
+          <span class="taste-score" id="tasteScore">...</span>
+        </div>
+        <div id="tasteLocalBadges" style="margin-bottom:6px;"></div>
+        <div id="tasteBody" style="font-size:0.86rem; color:#e2e8f0;">Analyzing against your taste profile...</div>
+        <div id="tasteHits" style="margin-top:8px; font-size:0.82rem; color:#cbd5e1;"></div>
+      </div>
+
+      <details id="tracklistDetails">
+        <summary>🎵 Tracklist (<span id="trackCount">0</span>)</summary>
+        <div class="tracklist" id="inspTracklist"></div>
+      </details>
+
+      <div style="margin-top:12px; display:flex; flex-direction:column; gap:8px;">
+        <button id="btnSaveBoth" class="btn btn-green" onclick="saveCurrentItem(true)">
+          ✅ Confirm &amp; Add to Discogs + Local Stash
+        </button>
+        <div class="btn-row" style="margin-top:0;">
+          <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="saveCurrentItem(false)">
+            💾 Save Local Only
+          </button>
+          <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="resetScanner()">
+            ⏭️ Check Only / Next
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== STASH VIEW ==================== -->
+  <section id="view-stash" class="view">
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+        <h2 style="margin:0;">My Local Stash</h2>
+        <span id="stashStats" class="pill">0 items</span>
+      </div>
+      <input id="stashSearch" type="text" placeholder="Search artist, title, cat#, tracks, notes..." oninput="renderStash()" style="margin-bottom:10px;" />
+      <div class="chip-row" id="stashFilters">
+        <button class="chip active" data-filter="all">All</button>
+        <button class="chip" data-filter="Cassette">Cassette</button>
+        <button class="chip" data-filter="CD">CD</button>
+        <button class="chip" data-filter="Vinyl">Vinyl</button>
+        <button class="chip" data-filter="highvalue">🔥 Value / Scarce</button>
+        <button class="chip" data-filter="keep">🎧 Taste 7+</button>
+        <button class="chip" data-filter="localonly">Local Only</button>
+      </div>
+      <div class="btn-row" style="margin-top:0;">
+        <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="exportCSV()">⬇️ Export CSV</button>
+        <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="exportJSON()">💾 Backup JSON</button>
+      </div>
+    </div>
+    <div id="stashList"></div>
+  </section>
+
+  <!-- ==================== SETTINGS VIEW ==================== -->
+  <section id="view-settings" class="view">
+    <div class="card">
+      <h2>1. Gemini Vision &amp; Taste AI</h2>
+      <div style="margin-bottom:10px;">
+        <label class="field-label">Gemini API Key</label>
+        <input id="cfgGeminiKey" type="password" placeholder="AIza..." />
+      </div>
+      <div style="margin-bottom:10px;">
+        <label class="field-label">Gemini Model</label>
+        <select id="cfgGeminiModel">
+          <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Fast &amp; Cheap Default)</option>
+          <option value="gemini-3.8-flash">gemini-3.8-flash (Sharpest OCR for tiny text)</option>
+          <option value="gemini-3.6-flash">gemini-3.6-flash (Balanced)</option>
+        </select>
+      </div>
+      <button class="btn btn-sm" onclick="saveSettings()">Save Settings</button>
+    </div>
+
+    <div class="card">
+      <h2>2. Discogs Account</h2>
+      <div style="margin-bottom:10px;">
+        <label class="field-label">Discogs Personal Access Token</label>
+        <input id="cfgDiscogsToken" type="password" placeholder="Paste token from discogs.com/settings/developers" />
+      </div>
+      <div style="margin-bottom:10px;">
+        <button class="btn btn-secondary btn-sm" onclick="verifyDiscogsAccount()">🔗 Verify Account &amp; Load Folders</button>
+        <span id="discogsUserBadge" style="margin-left:8px; font-size:0.82rem; color:var(--green); font-weight:700;"></span>
+      </div>
+      <div style="margin-bottom:10px;">
+        <label class="field-label">Target Discogs Folder</label>
+        <select id="cfgDiscogsFolder">
+          <option value="1">Uncategorized (Default)</option>
+        </select>
+      </div>
+      <div style="margin-bottom:10px;">
+        <label class="field-label">High-Value Alert Threshold ($ USD)</label>
+        <input id="cfgThreshold" type="number" min="1" step="1" value="20" />
+      </div>
+      <div class="toggle-row">
+        <span style="font-size:0.9rem; font-weight:600;">Voice Readback (Speech)</span>
+        <input id="cfgVoice" type="checkbox" style="width:22px; height:22px;" />
+      </div>
+      <button class="btn btn-sm" onclick="saveSettings()">Save Settings</button>
+    </div>
+
+    <div class="card">
+      <h2>3. Spotify Taste Profile</h2>
+      <p>Syncs your Liked Songs, Top Artists, Saved Albums &amp; owned playlists locally onto your phone once. Zero Spotify calls during scanning.</p>
+      <div style="margin-bottom:10px;">
+        <label class="field-label">Spotify Client ID</label>
+        <input id="cfgSpotifyClientId" type="text" placeholder="32-char Client ID from developer.spotify.com" />
+      </div>
+      <label class="field-label">Your Exact Redirect URI (paste into Spotify Dashboard)</label>
+      <div class="code-copy">
+        <span id="redirectUriText" style="flex:1;"></span>
+        <button class="btn btn-secondary btn-sm" onclick="copyRedirectUri()">Copy</button>
+      </div>
+      <div id="spotifySummary" style="font-size:0.84rem; color:var(--spotify); font-weight:700; margin:8px 0;">Not synced yet.</div>
+      <button class="btn btn-spotify" onclick="startSpotifyAuth()">🎧 Connect &amp; Sync Spotify</button>
+
+      <details style="margin-top:12px;">
+        <summary>Alternative: Import Exportify CSV</summary>
+        <p style="margin-top:6px;">Export any playlist or Liked Songs at <strong>exportify.net</strong> and import the CSV here to feed your taste profile without Spotify Developer setup.</p>
+        <input id="csvImportInput" type="file" accept=".csv" onchange="importExportifyCSV(this.files[0])" />
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>4. Data Backup &amp; Restore</h2>
+      <p>Android Chrome can clear browser storage if your phone gets full. Export a JSON backup after big scanning sessions.</p>
+      <div class="btn-row">
+        <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="exportJSON()">⬇️ Export JSON</button>
+        <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="document.getElementById('jsonRestoreInput').click()">⬆️ Restore JSON</button>
+      </div>
+      <input id="jsonRestoreInput" class="hidden-file" type="file" accept=".json" onchange="importJSON(this.files[0])" />
+    </div>
+  </section>
+
+  <!-- ==================== SETUP GUIDE VIEW ==================== -->
+  <section id="view-guide" class="view">
+    <div class="card">
+      <h2>Step-by-Step Setup (Takes ~3 Mins)</h2>
+      <p>All keys stay strictly on your phone in <code>localStorage</code> and never touch any third-party server.</p>
+
+      <div class="guide-step">
+        <h3>1. Get Your Gemini API Key (For Photo Scanning &amp; Taste AI)</h3>
+        <ol>
+          <li>Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio (aistudio.google.com/apikey)</a> and sign in with Google.</li>
+          <li>Tap <strong>Create API Key</strong>, select or create a project, and copy the key starting with <code>AIza...</code>.</li>
+          <li>Paste it into <strong>Settings → Gemini API Key</strong> and tap Save.</li>
+        </ol>
+      </div>
+
+      <div class="guide-step">
+        <h3>2. Get Your Discogs Token (For Collection &amp; Prices)</h3>
+        <ol>
+          <li>Log into Discogs and open <a href="https://www.discogs.com/settings/developers" target="_blank" rel="noopener">discogs.com/settings/developers</a>.</li>
+          <li>Tap <strong>Generate new token</strong> and copy it.</li>
+          <li>Paste it into <strong>Settings → Discogs Personal Access Token</strong>, then tap <strong>Verify Account &amp; Load Folders</strong> to pick which folder new scans go into.</li>
+          <li><em>Tip for VG+ estimates:</em> Discogs only returns VG+ price suggestions if you have a default seller currency set in Discogs Seller Settings—otherwise the app cleanly uses Lowest Listed Price + Scarcity.</li>
+        </ol>
+      </div>
+
+      <div class="guide-step">
+        <h3>3. Connect Spotify (For "Would I Like This?")</h3>
+        <ol>
+          <li>Copy your app's exact Redirect URI below:
+            <div class="code-copy">
+              <span id="guideRedirectUri" style="flex:1;"></span>
+              <button class="btn btn-secondary btn-sm" onclick="copyRedirectUri()">Copy</button>
+            </div>
+          </li>
+          <li>Open <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a> (requires your Spotify Premium account).</li>
+          <li>Tap <strong>Create app</strong> → name it <code>CrateCheck</code> → paste the Redirect URI above → check <strong>Web API</strong> → Save.</li>
+          <li>Open your app's <strong>Settings</strong>, copy the <strong>Client ID</strong> (you do NOT need the Client Secret).</li>
+          <li>Paste the Client ID into <strong>Settings → Spotify Client ID</strong> and tap <strong>Connect &amp; Sync Spotify</strong>.</li>
+        </ol>
+      </div>
+
+      <div class="guide-step">
+        <h3>4. Install as a Home-Screen App on Android</h3>
+        <ol>
+          <li>Open your GitHub Pages URL in <strong>Chrome</strong> on your phone.</li>
+          <li>Tap the <strong>⋮ menu</strong> (top-right) → <strong>Add to Home screen</strong> → <strong>Install</strong>.</li>
+          <li>It now launches full-screen like a native app and works on 5G at Goodwill.</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+</main>
+
+<nav class="bottom-nav">
+  <button class="nav-btn active" data-view="scan" onclick="switchView('scan')"><span class="ico">📷</span>Scan</button>
+  <button class="nav-btn" data-view="stash" onclick="switchView('stash')"><span class="ico">📦</span><span id="navStashLabel">Stash</span></button>
+  <button class="nav-btn" data-view="settings" onclick="switchView('settings')"><span class="ico">⚙️</span>Settings</button>
+  <button class="nav-btn" data-view="guide" onclick="switchView('guide')"><span class="ico">📖</span>Guide</button>
+</nav>
+
+<div id="toast" class="toast"></div>
+
+<script>
+(() => {
+  'use strict';
+
+  // ==================== DYNAMIC PWA MANIFEST ====================
+  (function injectManifest() {
+    const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192"><rect width="192" height="192" rx="40" fill="#181c26"/><rect x="26" y="48" width="140" height="96" rx="14" fill="#3b82f6"/><circle cx="68" cy="96" r="18" fill="#0f1117"/><circle cx="124" cy="96" r="18" fill="#0f1117"/><rect x="64" y="122" width="64" height="14" rx="4" fill="#0f1117"/></svg>`;
+    const iconUrl = 'data:image/svg+xml;base64,' + btoa(iconSvg);
+    const manifest = {
+      name: 'CrateCheck Media Scanner',
+      short_name: 'CrateCheck',
+      start_url: location.origin + location.pathname,
+      display: 'standalone',
+      background_color: '#0f1117',
+      theme_color: '#0f1117',
+      icons: [{ src: iconUrl, sizes: '192x192', type: 'image/svg+xml' }]
+    };
+    const link = document.createElement('link');
+    link.rel = 'manifest';
+    link.href = URL.createObjectURL(new Blob([JSON.stringify(manifest)], { type: 'application/json' }));
+    document.head.appendChild(link);
+  })();
+
+  // ==================== STATE & CONFIG ====================
+  const REDIRECT_URI = location.origin + location.pathname;
+  const CFG_KEY = 'cratecheck_cfg_v1';
+
+  let cfg = Object.assign({
+    geminiKey: '',
+    geminiModel: 'gemini-3.5-flash-lite',
+    discogsToken: '',
+    discogsUser: '',
+    discogsFolderId: '1',
+    discogsFolders: [{ id: 1, name: 'Uncategorized' }],
+    threshold: 20,
+    voice: false,
+    spotifyClientId: '',
+    spotifyAccessToken: '',
+    spotifyRefreshToken: '',
+    spotifyExpiresAt: 0
+  }, JSON.parse(localStorage.getItem(CFG_KEY) || '{}'));
+
+  let db = null;
+  let spotifyProfile = null;
+  let stashCache = [];
+  let activeFormat = 'Auto';
+  let activeStashFilter = 'all';
+
+  let currentPhotos = { primaryB64: null, extraB64: null, thumbWebp: null };
+  let currentExtracted = null;
+  let currentCandidates = [];
+  let currentInspected = null;
+
+  // ==================== INDEXEDDB ====================
+  function openDB() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open('CrateCheckDB', 1);
+      req.onupgradeneeded = (e) => {
+        const d = e.target.result;
+        if (!d.objectStoreNames.contains('stash')) {
+          d.createObjectStore('stash', { keyPath: 'id', autoIncrement: true });
+        }
+        if (!d.objectStoreNames.contains('meta')) {
+          d.createObjectStore('meta', { keyPath: 'key' });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function idbGet(store, key) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(store, 'readonly');
+      const req = tx.objectStore(store).get(key);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function idbPut(store, val) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(store, 'readwrite');
+      const req = tx.objectStore(store).put(val);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function idbDelete(store, key) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(store, 'readwrite');
+      const req = tx.objectStore(store).delete(key);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function idbGetAll(store) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(store, 'readonly');
+      const req = tx.objectStore(store).getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  // ==================== UI HELPERS ====================
+  function toast(msg, ms = 2800) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(el._t);
+    el._t = setTimeout(() => el.classList.remove('show'), ms);
+  }
+
+  function setStatus(text, show = true) {
+    const el = document.getElementById('statusBanner');
+    document.getElementById('statusText').textContent = text;
+    el.classList.toggle('show', show);
+  }
+
+  function esc(str) {
+    return String(str ?? '').replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
+
+  function norm(s) {
+    return String(s || '')
+      .toLowerCase()
+      .replace(/\(.*?\)|\[.*?\]/g, ' ')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+  }
+
+  function similarity(a, b) {
+    const ta = new Set(norm(a).split(' ').filter(w => w.length > 1));
+    const tb = new Set(norm(b).split(' ').filter(w => w.length > 1));
+    if (!ta.size || !tb.size) return 0;
+    let inter = 0;
+    ta.forEach(w => { if (tb.has(w)) inter++; });
+    const jaccard = inter / (ta.size + tb.size - inter);
+    const na = norm(a), nb = norm(b);
+    const sub = (na && nb && (na.includes(nb) || nb.includes(na))) ? 0.25 : 0;
+    return Math.min(1, jaccard + sub);
+  }
+
+  function playChime() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const now = ctx.currentTime;
+      [587.33, 880].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(freq, now + i * 0.12);
+        gain.gain.setValueAtTime(0.14, now + i * 0.12);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.12 + 0.35);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now + i * 0.12);
+        osc.stop(now + i * 0.12 + 0.36);
+      });
+    } catch (_) {}
+  }
+
+  function speakText(text) {
+    if (!cfg.voice || !('speechSynthesis' in window)) return;
+    try {
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.05;
+      speechSynthesis.speak(u);
+    } catch (_) {}
+  }
+
+  window.switchView = function(name) {
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === name));
+    document.getElementById('view-' + name).classList.add('active');
+    if (name === 'stash') renderStash();
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  };
+
+  // ==================== DISCOGS RATE LIMITER (NO CORS PREFLIGHT) ====================
+  const discogsQueue = [];
+  let discogsBusy = false;
+  let lastDiscogsCall = 0;
+  let recentDiscogsCalls = [];
+
+  function updateRatePill() {
+    const now = Date.now();
+    recentDiscogsCalls = recentDiscogsCalls.filter(t => now - t < 60000);
+    const pill = document.getElementById('ratePill');
+    const c = recentDiscogsCalls.length;
+    pill.textContent = `API ${c}/50`;
+    pill.className = 'pill ' + (c >= 45 ? 'err' : c >= 35 ? 'warn' : 'ok');
+  }
+  setInterval(updateRatePill, 3000);
+
+  function discogsFetch(path, params = {}, method = 'GET') {
+    return new Promise((resolve, reject) => {
+      discogsQueue.push({ path, params, method, resolve, reject });
+      processDiscogsQueue();
+    });
+  }
+
+  async function processDiscogsQueue() {
+    if (discogsBusy || !discogsQueue.length) return;
+    discogsBusy = true;
+    const job = discogsQueue.shift();
+
+    try {
+      // Sliding window check (max 50/min) + 1200ms spacing
+      const now = Date.now();
+      recentDiscogsCalls = recentDiscogsCalls.filter(t => now - t < 60000);
+      if (recentDiscogsCalls.length >= 49) {
+        const waitMs = 60500 - (now - recentDiscogsCalls[0]);
+        setStatus(`Cooling down Discogs rate limit (${Math.ceil(waitMs/1000)}s)...`, true);
+        await new Promise(r => setTimeout(r, Math.max(1000, waitMs)));
+      }
+      const gap = Date.now() - lastDiscogsCall;
+      if (gap < 1200) await new Promise(r => setTimeout(r, 1200 - gap));
+
+      const url = new URL('https://api.discogs.com' + job.path);
+      Object.entries(job.params || {}).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v);
+      });
+      if (cfg.discogsToken) url.searchParams.set('token', cfg.discogsToken.trim());
+
+      lastDiscogsCall = Date.now();
+      recentDiscogsCalls.push(lastDiscogsCall);
+      updateRatePill();
+
+      // Intentionally omit custom headers so browser skips OPTIONS preflight
+      const res = await fetch(url.toString(), { method: job.method });
+      if (res.status === 429) {
+        setStatus('Discogs rate limit hit — waiting 60s...', true);
+        await new Promise(r => setTimeout(r, 60000));
+        const retry = await fetch(url.toString(), { method: job.method });
+        if (!retry.ok) throw new Error(`Discogs HTTP ${retry.status}`);
+        job.resolve(await retry.json().catch(() => ({})));
+      } else if (!res.ok) {
+        const errTxt = await res.text().catch(() => '');
+        const err = new Error(`Discogs HTTP ${res.status}: ${errTxt.slice(0, 120)}`);
+        err.status = res.status;
+        throw err;
+      } else {
+        job.resolve(await res.json().catch(() => ({})));
+      }
+    } catch (e) {
+      job.reject(e);
+    } finally {
+      discogsBusy = false;
+      if (discogsQueue.length) processDiscogsQueue();
+    }
+  }
+
+  // ==================== IMAGE COMPRESSION ====================
+  function processImageFile(file, maxDim, mime, quality) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          if (width >= height) { height = Math.round(height * (maxDim / width)); width = maxDim; }
+          else { width = Math.round(width * (maxDim / height)); height = maxDim; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL(mime, quality));
+      };
+      img.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
+      img.src = url;
+    });
+  }
+
+  async function handlePhotoCapture(file, isExtra) {
+    if (!file) return;
+    if (!cfg.geminiKey) {
+      toast('Add your Gemini API Key in Settings first');
+      switchView('settings');
+      return;
+    }
+
+    setStatus('Compressing photo...', true);
+    try {
+      const apiDataUrl = await processImageFile(file, 1536, 'image/jpeg', 0.82);
+      const b64 = apiDataUrl.split(',')[1];
+      if (!isExtra) {
+        currentPhotos.primaryB64 = b64;
+        currentPhotos.extraB64 = null;
+        currentPhotos.thumbWebp = await processImageFile(file, 600, 'image/webp', 0.6);
+      } else {
+        currentPhotos.extraB64 = b64;
+        if (!currentPhotos.thumbWebp) {
+          currentPhotos.thumbWebp = await processImageFile(file, 600, 'image/webp', 0.6);
+        }
+      }
+      renderPhotoPreviews();
+      await runGeminiVision();
+    } catch (err) {
+      setStatus('', false);
+      toast('Photo error: ' + err.message);
+    }
+  }
+
+  function renderPhotoPreviews() {
+    const strip = document.getElementById('previewStrip');
+    let html = '';
+    if (currentPhotos.primaryB64) {
+      html += `<div class="preview-item"><img src="data:image/jpeg;base64,${currentPhotos.primaryB64}" /><span class="preview-label">Front</span></div>`;
+    }
+    if (currentPhotos.extraB64) {
+      html += `<div class="preview-item"><img src="data:image/jpeg;base64,${currentPhotos.extraB64}" /><span class="preview-label">Extra</span></div>`;
+    }
+    strip.innerHTML = html;
+    strip.classList.toggle('hidden', !html);
+  }
+
+  // ==================== GEMINI API CALLS ====================
+  async function callGeminiJSON(parts) {
+    const model = (cfg.geminiModel || 'gemini-3.5-flash-lite').trim();
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(cfg.geminiKey.trim())}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts }],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          temperature: 0.15
+        }
+      })
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      throw new Error(`Gemini HTTP ${res.status}: ${t.slice(0, 140)}`);
+    }
+    const data = await res.json();
+    const raw = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+    const cleaned = raw.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+    try {
+      return JSON.parse(cleaned);
+    } catch (_) {
+      const m = cleaned.match(/\{[\s\S]*\}/);
+      if (m) return JSON.parse(m[0]);
+      throw new Error('Could not parse Gemini JSON response');
+    }
+  }
+
+  async function runGeminiVision() {
+    setStatus('Reading cover, artist, title & catalog # with Gemini...', true);
+    const fmtHint = activeFormat === 'Auto' ? 'Auto-detect whether Cassette, CD, or Vinyl' : `User selected format: ${activeFormat}`;
+    const prompt = `You are a physical music media OCR & cataloging expert. Inspect the image(s) carefully. ${fmtHint}.
+Return ONLY valid JSON with these exact keys:
+{
+  "detected_format": "Cassette" | "CD" | "Vinyl",
+  "raw_catalog_number": "exact catalog/ID code printed on spine/shell/disc hub/sleeve, or empty string",
+  "cleaned_catalog_variants": ["variations stripping hyphens/spaces/price prefixes like 295XPR9708 -> XPR9708, XPR 9708"],
+  "barcode": "digits only UPC/EAN if clearly visible, else empty string",
+  "album_title": "album or release title",
+  "artists": ["main artist name(s)"],
+  "label": "record label name or empty string",
+  "year": "4-digit year if printed, else empty string",
+  "condition_note": "short note like 'Loose cassette shell', 'Cracked jewel case', or 'Standard'",
+  "visible_tracks": ["any song titles visible on the shell or back cover"]
+}`;
+
+    const parts = [{ text: prompt }];
+    if (currentPhotos.primaryB64) {
+      parts.push({ inline_data: { mime_type: 'image/jpeg', data: currentPhotos.primaryB64 } });
+    }
+    if (currentPhotos.extraB64) {
+      parts.push({ inline_data: { mime_type: 'image/jpeg', data: currentPhotos.extraB64 } });
+    }
+
+    try {
+      const ext = await callGeminiJSON(parts);
+      currentExtracted = ext;
+      if (activeFormat !== 'Auto') ext.detected_format = activeFormat;
+
+      document.getElementById('fTitle').value = ext.album_title || '';
+      document.getElementById('fArtist').value = Array.isArray(ext.artists) ? ext.artists.join(', ') : (ext.artists || '');
+      document.getElementById('fCatno').value = ext.raw_catalog_number || '';
+      document.getElementById('fFormat').value = ['Cassette', 'CD', 'Vinyl'].includes(ext.detected_format) ? ext.detected_format : 'Cassette';
+      document.getElementById('fLabel').value = ext.label || '';
+      document.getElementById('fYear').value = ext.barcode ? `${ext.year || ''} ${ext.barcode}`.trim() : (ext.year || '');
+      document.getElementById('fNote').value = ext.condition_note || 'Standard';
+
+      document.getElementById('extractCard').classList.remove('hidden');
+      speakText(`${ext.raw_catalog_number || ''} ${ext.artists?.[0] || ''} ${ext.album_title || ''}`);
+
+      await runDiscogsSearch();
+    } catch (err) {
+      setStatus('', false);
+      toast('Gemini error: ' + err.message, 4000);
+    }
+  }
+
+  window.toggleManualEntry = function() {
+    document.getElementById('extractCard').classList.remove('hidden');
+    if (activeFormat !== 'Auto') document.getElementById('fFormat').value = activeFormat;
+    document.getElementById('fCatno').focus();
+  };
+
+  // ==================== SMART DISCOGS SEARCH ====================
+  window.runDiscogsSearch = async function() {
+    if (!cfg.discogsToken) {
+      setStatus('', false);
+      toast('Add your Discogs Token in Settings to search Discogs');
+      return;
+    }
+
+    const title = document.getElementById('fTitle').value.trim();
+    const artist = document.getElementById('fArtist').value.trim();
+    const catno = document.getElementById('fCatno').value.trim();
+    const format = document.getElementById('fFormat').value;
+    const label = document.getElementById('fLabel').value.trim();
+    const yearOrBarcode = document.getElementById('fYear').value.trim();
+    const barcode = (currentExtracted?.barcode || '').replace(/\D/g, '') ||
+                    (yearOrBarcode.replace(/\D/g, '').length >= 10 ? yearOrBarcode.replace(/\D/g, '') : '');
+
+    if (!title && !artist && !catno && !barcode) {
+      toast('Enter at least a Catalog #, Title, or Artist');
+      return;
+    }
+
+    document.getElementById('inspectorCard').classList.add('hidden');
+    setStatus('Searching Discogs...', true);
+
+    const pool = new Map();
+    const addResults = (res, sourceTier) => {
+      (res?.results || []).forEach(item => {
+        if (!pool.has(item.id)) pool.set(item.id, { ...item, _tier: sourceTier });
+      });
+    };
+
+    const scoreItem = (item) => {
+      const targetStr = `${artist} ${title}`.trim();
+      const sim = targetStr ? similarity(targetStr, item.title || '') : 0.5;
+      const itemCat = norm(item.catno || '').replace(/\s+/g, '');
+      const rawCat = norm(catno).replace(/\s+/g, '');
+      const catMatch = rawCat && itemCat && (itemCat === rawCat || itemCat.includes(rawCat) || rawCat.includes(itemCat));
+      const score = sim * 0.72 + (catMatch ? 0.28 : 0);
+      return { sim, catMatch, score };
+    };
+
+    try {
+      // Tier 1: Barcode or Raw Cat#
+      if (barcode) {
+        addResults(await discogsFetch('/database/search', { type: 'release', barcode, format, per_page: 10 }), 'barcode');
+      }
+      if (catno && pool.size < 3) {
+        addResults(await discogsFetch('/database/search', { type: 'release', catno, format, per_page: 10 }), 'catno');
+      }
+
+      // Check whether Tier 1 actually matches the extracted Artist/Title (prevents PB2126 false collisions!)
+      let bestSim = 0;
+      pool.forEach(item => { bestSim = Math.max(bestSim, scoreItem(item).sim); });
+
+      // Tier 2: Cleaned catalog variants if 0 results or weak title/artist match
+      const variants = (currentExtracted?.cleaned_catalog_variants || []).filter(v => v && norm(v) !== norm(catno)).slice(0, 2);
+      if ((pool.size === 0 || bestSim < 0.45) && variants.length) {
+        for (const v of variants) {
+          addResults(await discogsFetch('/database/search', { type: 'release', catno: v, format, label, per_page: 8 }), 'variant');
+        }
+        pool.forEach(item => { bestSim = Math.max(bestSim, scoreItem(item).sim); });
+      }
+
+      // Tier 3: Artist + Title fallback (also runs if cat# collided with a totally different album!)
+      if ((pool.size === 0 || bestSim < 0.45) && (title || artist)) {
+        const q = `${artist} ${title}`.trim();
+        addResults(await discogsFetch('/database/search', { type: 'release', q, format, per_page: 10 }), 'text');
+        if (pool.size === 0) {
+          // Broaden without format filter as last resort
+          addResults(await discogsFetch('/database/search', { type: 'release', q, per_page: 8 }), 'broad');
+        }
+      }
+
+      const ranked = Array.from(pool.values()).map(item => ({
+        ...item,
+        _check: scoreItem(item)
+      })).sort((a, b) => b._check.score - a._check.score).slice(0, 6);
+
+      currentCandidates = ranked;
+      renderCandidates(ranked);
+      setStatus('', false);
+    } catch (err) {
+      setStatus('', false);
+      toast('Discogs search failed: ' + err.message, 4000);
+    }
+  };
+
+  function renderCandidates(items) {
+    const card = document.getElementById('candidatesCard');
+    const list = document.getElementById('candidatesList');
+    card.classList.remove('hidden');
+
+    if (!items.length) {
+      list.innerHTML = `<p style="margin-bottom:8px;">No Discogs matches found. Tweak the fields above or tap <strong>Not on Discogs? Check Taste</strong> to evaluate &amp; log it locally.</p>`;
+      return;
+    }
+
+    list.innerHTML = items.map((it, idx) => {
+      const verified = it._check.sim >= 0.48 && (it._check.catMatch || !document.getElementById('fCatno').value.trim());
+      const badge = verified
+        ? `<span class="badge badge-green">✅ Title &amp; Cat# Verified</span>`
+        : `<span class="badge badge-yellow">⚠️ Check Variant</span>`;
+      const fmtText = Array.isArray(it.format) ? it.format.slice(0, 3).join(', ') : (it.format || '');
+      const lblText = Array.isArray(it.label) ? it.label[0] : (it.label || '');
+      return `
+        <div class="candidate-card" id="cand-${idx}" onclick="inspectCandidate(${idx})">
+          <img class="candidate-thumb" src="${esc(it.thumb || '')}" onerror="this.style.visibility='hidden'" />
+          <div class="candidate-meta">
+            <div class="candidate-title">${esc(it.title)}</div>
+            <div class="candidate-sub">${esc(it.year || '?')} · ${esc(lblText)} · <strong>${esc(it.catno || 'No Cat#')}</strong> · ${esc(it.country || '')}</div>
+            <div>${badge}<span class="badge badge-blue">${esc(fmtText)}</span></div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  // ==================== INSPECT CANDIDATE (PRICE + SCARCITY + SPOTIFY TASTE) ====================
+  window.inspectCandidate = async function(idx) {
+    const cand = currentCandidates[idx];
+    if (!cand) return;
+
+    document.querySelectorAll('.candidate-card').forEach((el, i) => el.classList.toggle('selected', i === idx));
+    setStatus('Fetching release details, tracklist & pricing...', true);
+
+    try {
+      const release = await discogsFetch(`/releases/${cand.id}`);
+      const stats = await discogsFetch(`/marketplace/stats/${cand.id}`).catch(() => ({}));
+      let suggestions = null;
+      try {
+        suggestions = await discogsFetch(`/marketplace/price_suggestions/${cand.id}`);
+      } catch (_) {
+        suggestions = null; // Gracefully ignore if seller settings disabled
+      }
+
+      const artistName = (release.artists || []).map(a => a.name.replace(/\s*\(\d+\)$/, '')).join(', ') ||
+                         (cand.title.includes(' - ') ? cand.title.split(' - ')[0] : '');
+      const albumTitle = release.title || (cand.title.includes(' - ') ? cand.title.split(' - ').slice(1).join(' - ') : cand.title);
+      const catno = release.labels?.[0]?.catno || cand.catno || document.getElementById('fCatno').value.trim();
+      const label = release.labels?.[0]?.name || (Array.isArray(cand.label) ? cand.label[0] : '');
+      const format = document.getElementById('fFormat').value;
+      const tracklist = (release.tracklist || []).filter(t => t.type_ !== 'heading').map(t => ({
+        pos: t.position || '',
+        title: t.title || ''
+      }));
+
+      const lowestPrice = stats?.lowest_price?.value ?? release.lowest_price ?? null;
+      const numForSale = stats?.num_for_sale ?? release.num_for_sale ?? 0;
+      const vgPlusPrice = suggestions?.['Very Good Plus (VG+)']?.value ?? null;
+      const estPrice = vgPlusPrice ?? lowestPrice;
+      const have = release.community?.have ?? 0;
+      const want = release.community?.want ?? 0;
+
+      const isHighValue = estPrice !== null && estPrice >= Number(cfg.threshold || 20);
+      const isScarce = numForSale === 0 && (want > have || want >= 10);
+
+      currentInspected = {
+        discogs_id: release.id,
+        title: albumTitle,
+        artist: artistName,
+        catno,
+        format,
+        year: release.year || cand.year || '',
+        label,
+        country: release.country || cand.country || '',
+        genres: [...(release.genres || []), ...(release.styles || [])],
+        condition_note: document.getElementById('fNote').value.trim() || 'Standard',
+        lowest_price: lowestPrice,
+        vg_plus_price: vgPlusPrice,
+        est_price: estPrice,
+        num_for_sale: numForSale,
+        have,
+        want,
+        is_high_value: isHighValue,
+        is_scarce: isScarce,
+        tracklist,
+        discogs_url: release.uri || `https://www.discogs.com/release/${release.id}`,
+        discogs_thumb: release.thumb || cand.thumb || '',
+        taste_score: null,
+        taste_verdict: null,
+        taste_summary: '',
+        notable_songs: [],
+        spotify_matches: { artistHit: false, matchedTracks: [] }
+      };
+
+      renderInspector(currentInspected, true);
+      setStatus('', false);
+      document.getElementById('inspectorCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+      if (isHighValue || isScarce) playChime();
+      await runTasteAnalysis(currentInspected);
+    } catch (err) {
+      setStatus('', false);
+      toast('Error loading release: ' + err.message, 4000);
+    }
+  };
+
+  window.inspectUnlistedItem = async function() {
+    const title = document.getElementById('fTitle').value.trim() || 'Untitled Release';
+    const artist = document.getElementById('fArtist').value.trim() || 'Unknown Artist';
+    const catno = document.getElementById('fCatno').value.trim();
+    const format = document.getElementById('fFormat').value;
+    const tracks = (currentExtracted?.visible_tracks || []).map((t, i) => ({ pos: String(i + 1), title: t }));
+
+    currentInspected = {
+      discogs_id: null,
+      title,
+      artist,
+      catno,
+      format,
+      year: document.getElementById('fYear').value.trim(),
+      label: document.getElementById('fLabel').value.trim(),
+      country: '',
+      genres: [],
+      condition_note: document.getElementById('fNote').value.trim() || 'Standard',
+      lowest_price: null,
+      vg_plus_price: null,
+      est_price: null,
+      num_for_sale: null,
+      have: 0,
+      want: 0,
+      is_high_value: false,
+      is_scarce: false,
+      tracklist: tracks,
+      discogs_url: '',
+      discogs_thumb: '',
+      taste_score: null,
+      taste_verdict: null,
+      taste_summary: '',
+      notable_songs: [],
+      spotify_matches: { artistHit: false, matchedTracks: [] }
+    };
+
+    renderInspector(currentInspected, false);
+    document.getElementById('inspectorCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    await runTasteAnalysis(currentInspected);
+  };
+
+  function renderInspector(item, hasDiscogs) {
+    const card = document.getElementById('inspectorCard');
+    card.classList.remove('hidden');
+
+    document.getElementById('inspTitle').textContent = `${item.artist} — ${item.title}`;
+    document.getElementById('inspSub').textContent = `${item.format} · ${item.year || '?'} · ${item.label || 'Unknown Label'} · ${item.catno || 'No Cat#'}`;
+    document.getElementById('inspBadge').innerHTML = hasDiscogs
+      ? `<span class="badge badge-blue">#${item.discogs_id}</span>`
+      : `<span class="badge badge-yellow">Unlisted</span>`;
+
+    // Alerts
+    let alertsHtml = '';
+    const dup = stashCache.find(s =>
+      (item.discogs_id && s.discogs_id === item.discogs_id) ||
+      (norm(s.artist) === norm(item.artist) && norm(s.title) === norm(item.title))
+    );
+    if (dup) {
+      alertsHtml += `<div class="alert-box alert-dup">⚠️ Already in your Local Stash (added ${new Date(dup.created_at).toLocaleDateString()}).</div>`;
+    }
+    if (item.is_high_value) {
+      alertsHtml += `<div class="alert-box alert-high-value">🔥 HIGH VALUE ($${Number(item.est_price).toFixed(2)}) — SET ASIDE!</div>`;
+    }
+    if (item.is_scarce) {
+      alertsHtml += `<div class="alert-box alert-scarce">💎 SCARCE (0 for sale, ${item.want} want / ${item.have} have) — CHECK SOLD PRICES!</div>`;
+    }
+    document.getElementById('inspAlerts').innerHTML = alertsHtml;
+
+    // Metrics
+    document.getElementById('mLowest').textContent = item.lowest_price !== null ? `$${Number(item.lowest_price).toFixed(2)}` : 'N/A';
+    document.getElementById('mVgPlus').textContent = item.vg_plus_price !== null ? `$${Number(item.vg_plus_price).toFixed(2)}` : '—';
+    document.getElementById('mForSale').textContent = item.num_for_sale !== null ? `${item.num_for_sale} listed` : '—';
+    document.getElementById('mHaveWant').textContent = hasDiscogs ? `${item.have} / ${item.want}` : '—';
+
+    // External Links
+    const ebayQuery = encodeURIComponent(`${item.artist} ${item.title} ${item.format} ${item.catno}`.trim());
+    let links = `<a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="https://www.ebay.com/sch/i.html?_nkw=${ebayQuery}&LH_Sold=1&LH_Complete=1">💸 eBay Sold</a>`;
+    if (hasDiscogs) {
+      links = `
+        <a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="${esc(item.discogs_url)}">💿 Discogs</a>
+        <a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="https://www.discogs.com/sell/history/${item.discogs_id}">📈 Sales History</a>
+      ` + links;
+    }
+    document.getElementById('inspLinks').innerHTML = links;
+
+    // Button visibility
+    const saveBothBtn = document.getElementById('btnSaveBoth');
+    saveBothBtn.disabled = !hasDiscogs || !cfg.discogsToken || !cfg.discogsUser;
+    saveBothBtn.textContent = !hasDiscogs
+      ? 'Not on Discogs (Use Save Local Only below)'
+      : (!cfg.discogsUser ? 'Verify Discogs in Settings to Enable Save' : '✅ Confirm & Add to Discogs + Local Stash');
+
+    // Initial local Spotify match + tracklist render
+    const localMatch = checkLocalSpotifyMatch(item);
+    item.spotify_matches = localMatch;
+    renderTracklist(item.tracklist, localMatch.matchedTracks);
+
+    let localBadges = '';
+    if (localMatch.artistHit) localBadges += `<span class="badge badge-green">🎸 Artist in Your Spotify</span>`;
+    if (localMatch.matchedTracks.length) localBadges += `<span class="badge badge-green">🎵 ${localMatch.matchedTracks.length} Track(s) in Your Library</span>`;
+    if (!spotifyProfile) localBadges += `<span class="badge badge-yellow">Spotify not synced yet (using general hit check)</span>`;
+    document.getElementById('tasteLocalBadges').innerHTML = localBadges;
+    document.getElementById('tasteScore').textContent = '...';
+    document.getElementById('tasteBody').textContent = 'Asking Gemini to check your taste profile & famous tracks...';
+    document.getElementById('tasteHits').innerHTML = '';
+  }
+
+  function renderTracklist(tracks, matchedTitles = []) {
+    const matchedSet = new Set(matchedTitles.map(norm));
+    document.getElementById('trackCount').textContent = tracks.length;
+    const container = document.getElementById('inspTracklist');
+    if (!tracks.length) {
+      container.innerHTML = `<div style="color:var(--muted);">No tracklist available.</div>`;
+      return;
+    }
+    container.innerHTML = tracks.map(t => {
+      const hit = matchedSet.has(norm(t.title));
+      return `<div class="track-row ${hit ? 'track-hit' : ''}">
+        <span>${esc(t.pos ? t.pos + ' · ' : '')}${esc(t.title)}</span>
+        ${hit ? '<span class="badge badge-green" style="margin:0;">In Spotify</span>' : ''}
+      </div>`;
+    }).join('');
+  }
+
+  function checkLocalSpotifyMatch(item) {
+    if (!spotifyProfile) return { artistHit: false, matchedTracks: [] };
+    const artistNorms = String(item.artist || '').split(/,|&|\band\b|feat\.?/i).map(norm).filter(Boolean);
+    const artistHit = artistNorms.some(a => Boolean(spotifyProfile.allArtists?.[a]));
+
+    const matchedTracks = [];
+    const trackSet = new Set(spotifyProfile.trackTitles || []);
+    (item.tracklist || []).forEach(t => {
+      const nt = norm(t.title);
+      if (nt.length > 2 && trackSet.has(nt)) matchedTracks.push(t.title);
+    });
+    return { artistHit, matchedTracks };
+  }
+
+  async function runTasteAnalysis(item) {
+    if (!cfg.geminiKey) {
+      document.getElementById('tasteScore').textContent = '—';
+      document.getElementById('tasteBody').textContent = 'Add Gemini API Key to enable taste & hit song analysis.';
+      return;
+    }
+
+    const topArtists = (spotifyProfile?.topArtists || []).slice(0, 60).join(', ');
+    const tracksStr = (item.tracklist || []).slice(0, 24).map(t => t.title).join('; ');
+    const prompt = `Evaluate whether the user would like this physical music release and identify any famous/popular songs on it.
+Release: "${item.artist} - ${item.title}" (${item.year || 'unknown year'}, Format: ${item.format}, Genres: ${(item.genres || []).join(', ') || 'unknown'}).
+Tracklist: ${tracksStr || 'Unknown'}.
+Local Spotify Matches: Artist in library = ${item.spotify_matches.artistHit}, Exact tracks in library = ${item.spotify_matches.matchedTracks.join(', ') || 'None'}.
+User's Top Spotify Artists: ${topArtists || 'Not synced yet'}.
+
+Return ONLY valid JSON:
+{
+  "score": 1 to 10 integer (taste match for this user; if Spotify not synced, rate general appeal 1-10),
+  "verdict": "KEEP" | "LISTEN" | "SELL / SKIP",
+  "summary": "1-2 punchy sentences explaining why they will or won't like this, referencing their actual Spotify artists when relevant.",
+  "notable_songs": ["Track Name — brief note on why it's famous/popular (max 3 items, or empty array if obscure)"]
+}`;
+
+    try {
+      const res = await callGeminiJSON([{ text: prompt }]);
+      if (currentInspected !== item) return;
+      item.taste_score = res.score;
+      item.taste_verdict = res.verdict;
+      item.taste_summary = res.summary;
+      item.notable_songs = Array.isArray(res.notable_songs) ? res.notable_songs : [];
+
+      const vClass = res.verdict === 'KEEP' ? 'badge-green' : res.verdict === 'LISTEN' ? 'badge-blue' : 'badge-red';
+      document.getElementById('tasteScore').innerHTML = `${esc(res.score)}/10 <span class="badge ${vClass}" style="vertical-align:middle;">${esc(res.verdict)}</span>`;
+      document.getElementById('tasteBody').textContent = res.summary || '';
+      if (item.notable_songs.length) {
+        document.getElementById('tasteHits').innerHTML = `<strong>⭐ Notable / Recognizable Songs:</strong><br>` +
+          item.notable_songs.map(s => `• ${esc(s)}`).join('<br>');
+      } else {
+        document.getElementById('tasteHits').innerHTML = `<span style="color:var(--muted);">No major mainstream hits identified on this release.</span>`;
+      }
+    } catch (err) {
+      document.getElementById('tasteScore').textContent = '?';
+      document.getElementById('tasteBody').textContent = 'Taste check error: ' + err.message;
+    }
+  }
+
+  // ==================== SAVE TO DISCOGS + LOCAL STASH ====================
+  window.saveCurrentItem = async function(syncToDiscogs) {
+    if (!currentInspected) return;
+    let synced = false;
+
+    if (syncToDiscogs) {
+      if (!cfg.discogsToken || !cfg.discogsUser || !currentInspected.discogs_id) {
+        toast('Verify Discogs in Settings first');
+        return;
+      }
+      setStatus('Adding release to your official Discogs collection...', true);
+      try {
+        const folderId = cfg.discogsFolderId || '1';
+        await discogsFetch(
+          `/users/${encodeURIComponent(cfg.discogsUser)}/collection/folders/${encodeURIComponent(folderId)}/releases/${currentInspected.discogs_id}`,
+          {},
+          'POST'
+        );
+        synced = true;
+      } catch (err) {
+        setStatus('', false);
+        toast('Discogs save failed: ' + err.message, 4500);
+        return;
+      }
+    }
+
+    const record = {
+      ...currentInspected,
+      synced_to_discogs: synced,
+      thumb_data_url: currentPhotos.thumbWebp || currentInspected.discogs_thumb || '',
+      created_at: Date.now()
+    };
+
+    try {
+      await idbPut('stash', record);
+      await loadStashCache();
+      setStatus('', false);
+      toast(synced ? '✅ Saved to Discogs & Local Stash!' : '💾 Saved to Local Stash!');
+      resetScanner();
+    } catch (err) {
+      setStatus('', false);
+      toast('Local save failed: ' + err.message);
+    }
+  };
+
+  window.resetScanner = function() {
+    currentPhotos = { primaryB64: null, extraB64: null, thumbWebp: null };
+    currentExtracted = null;
+    currentCandidates = [];
+    currentInspected = null;
+    document.getElementById('camPrimary').value = '';
+    document.getElementById('camExtra').value = '';
+    document.getElementById('previewStrip').classList.add('hidden');
+    document.getElementById('previewStrip').innerHTML = '';
+    document.getElementById('extractCard').classList.add('hidden');
+    document.getElementById('candidatesCard').classList.add('hidden');
+    document.getElementById('inspectorCard').classList.add('hidden');
+    ['fTitle', 'fArtist', 'fCatno', 'fLabel', 'fYear', 'fNote'].forEach(id => document.getElementById(id).value = '');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // ==================== LOCAL STASH ====================
+  async function loadStashCache() {
+    stashCache = (await idbGetAll('stash')).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+    document.getElementById('navStashLabel').textContent = `Stash (${stashCache.length})`;
+  }
+
+  window.renderStash = function() {
+    const q = norm(document.getElementById('stashSearch').value);
+    const filtered = stashCache.filter(item => {
+      if (activeStashFilter === 'Cassette' || activeStashFilter === 'CD' || activeStashFilter === 'Vinyl') {
+        if (item.format !== activeStashFilter) return false;
+      } else if (activeStashFilter === 'highvalue') {
+        if (!item.is_high_value && !item.is_scarce) return false;
+      } else if (activeStashFilter === 'keep') {
+        if ((item.taste_score || 0) < 7) return false;
+      } else if (activeStashFilter === 'localonly') {
+        if (item.synced_to_discogs) return false;
+      }
+      if (!q) return true;
+      const hay = norm(`${item.artist} ${item.title} ${item.catno} ${item.label} ${item.condition_note} ${(item.tracklist || []).map(t => t.title).join(' ')}`);
+      return hay.includes(q);
+    });
+
+    const totalVal = filtered.reduce((sum, it) => sum + (Number(it.est_price) || 0), 0);
+    document.getElementById('stashStats').textContent = `${filtered.length} items · ~$${totalVal.toFixed(0)}`;
+
+    const list = document.getElementById('stashList');
+    if (!filtered.length) {
+      list.innerHTML = `<div class="card"><p>No matching items in your stash yet.</p></div>`;
+      return;
+    }
+
+    list.innerHTML = filtered.map(it => {
+      const priceBadge = it.est_price !== null && it.est_price !== undefined
+        ? `<span class="badge ${it.is_high_value ? 'badge-yellow' : 'badge-blue'}">$${Number(it.est_price).toFixed(2)}</span>` : '';
+      const scarceBadge = it.is_scarce ? `<span class="badge badge-purple">💎 Scarce</span>` : '';
+      const tasteBadge = it.taste_score ? `<span class="badge ${it.taste_score >= 7 ? 'badge-green' : 'badge-blue'}">🎧 ${it.taste_score}/10</span>` : '';
+      const syncBadge = it.synced_to_discogs
+        ? `<span class="badge badge-green">In Discogs</span>`
+        : `<span class="badge badge-yellow">Local Only</span>`;
+
+      return `
+        <div class="stash-item">
+          <img class="stash-thumb" src="${esc(it.thumb_data_url || '')}" onerror="this.style.visibility='hidden'" />
+          <div class="stash-body">
+            <div class="candidate-title">${esc(it.artist)} — ${esc(it.title)}</div>
+            <div class="candidate-sub">${esc(it.format)} · ${esc(it.year || '?')} · ${esc(it.catno || 'No Cat#')} · ${esc(it.condition_note || '')}</div>
+            <div style="margin-bottom:6px;">${priceBadge}${scarceBadge}${tasteBadge}${syncBadge}</div>
+            ${it.taste_summary ? `<div style="font-size:0.78rem; color:var(--muted); margin-bottom:6px;">${esc(it.taste_summary)}</div>` : ''}
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+              ${it.discogs_url ? `<a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="${esc(it.discogs_url)}">Discogs</a>` : ''}
+              ${(!it.synced_to_discogs && it.discogs_id) ? `<button class="btn btn-green btn-sm" onclick="pushStashToDiscogs(${it.id})">Push to Discogs</button>` : ''}
+              <button class="btn btn-danger btn-sm" onclick="deleteStashItem(${it.id})">Delete</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  };
+
+  window.pushStashToDiscogs = async function(id) {
+    const it = stashCache.find(x => x.id === id);
+    if (!it || !it.discogs_id || !cfg.discogsUser) { toast('Verify Discogs in Settings first'); return; }
+    try {
+      await discogsFetch(`/users/${encodeURIComponent(cfg.discogsUser)}/collection/folders/${encodeURIComponent(cfg.discogsFolderId || '1')}/releases/${it.discogs_id}`, {}, 'POST');
+      it.synced_to_discogs = true;
+      await idbPut('stash', it);
+      await loadStashCache();
+      renderStash();
+      toast('✅ Added to Discogs!');
+    } catch (e) { toast('Failed: ' + e.message); }
+  };
+
+  window.deleteStashItem = async function(id) {
+    if (!confirm('Remove this item from your Local Stash?')) return;
+    await idbDelete('stash', id);
+    await loadStashCache();
+    renderStash();
+    toast('Deleted from local stash');
+  };
+
+  // ==================== EXPORT / IMPORT ====================
+  window.exportCSV = function() {
+    if (!stashCache.length) { toast('Nothing to export yet'); return; }
+    const cols = ['artist', 'title', 'format', 'catno', 'label', 'year', 'est_price', 'lowest_price', 'num_for_sale', 'have', 'want', 'is_high_value', 'is_scarce', 'taste_score', 'taste_verdict', 'synced_to_discogs', 'condition_note', 'discogs_url'];
+    const csvCell = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const rows = [cols.join(','), ...stashCache.map(it => cols.map(c => csvCell(it[c])).join(','))];
+    downloadFile(rows.join('\n'), `cratecheck-stash-${new Date().toISOString().slice(0,10)}.csv`, 'text/csv');
+  };
+
+  window.exportJSON = function() {
+    const payload = { version: 1, exportedAt: new Date().toISOString(), stash: stashCache, spotifyProfile };
+    downloadFile(JSON.stringify(payload), `cratecheck-backup-${new Date().toISOString().slice(0,10)}.json`, 'application/json');
+    toast('JSON backup downloaded');
+  };
+
+  window.importJSON = async function(file) {
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      if (Array.isArray(data.stash)) {
+        for (const item of data.stash) {
+          const copy = { ...item };
+          delete copy.id;
+          await idbPut('stash', copy);
+        }
+      }
+      if (data.spotifyProfile) {
+        spotifyProfile = data.spotifyProfile;
+        await idbPut('meta', { key: 'spotify_profile', value: spotifyProfile });
+        updateSpotifyUI();
+      }
+      await loadStashCache();
+      renderStash();
+      toast('Backup restored!');
+    } catch (e) { toast('Invalid JSON backup: ' + e.message); }
+  };
+
+  function downloadFile(content, filename, type) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([content], { type }));
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+  }
+
+  // ==================== SPOTIFY PKCE OAUTH & 2026 SYNC ====================
+  function randomString(len) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    const arr = new Uint8Array(len);
+    crypto.getRandomValues(arr);
+    return Array.from(arr, x => chars[x % chars.length]).join('');
+  }
+
+  async function sha256Base64Url(plain) {
+    const data = new TextEncoder().encode(plain);
+    const hash = await crypto.subtle.digest('SHA-256', data);
+    return btoa(String.fromCharCode(...new Uint8Array(hash)))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  window.startSpotifyAuth = async function() {
+    saveSettings(true);
+    if (!cfg.spotifyClientId) {
+      toast('Paste your Spotify Client ID first (see Guide tab)');
+      return;
+    }
+    if (!window.crypto?.subtle) {
+      toast('Spotify login requires HTTPS (host on GitHub Pages)');
+      return;
+    }
+
+    // If we already have a valid/refreshable token, just re-sync directly!
+    if (cfg.spotifyRefreshToken) {
+      const ok = await refreshSpotifyToken();
+      if (ok) { await syncSpotifyLibrary(); return; }
+    }
+
+    const verifier = randomString(64);
+    const state = randomString(16);
+    const challenge = await sha256Base64Url(verifier);
+    localStorage.setItem('sp_pkce_verifier', verifier);
+    localStorage.setItem('sp_pkce_state', state);
+
+    const scopes = 'user-library-read user-top-read playlist-read-private playlist-read-collaborative user-read-private';
+    const authUrl = new URL('https://accounts.spotify.com/authorize');
+    authUrl.searchParams.set('client_id', cfg.spotifyClientId.trim());
+    authUrl.searchParams.set('response_type', 'code');
+    authUrl.searchParams.set('redirect_uri', REDIRECT_URI);
+    authUrl.searchParams.set('code_challenge_method', 'S256');
+    authUrl.searchParams.set('code_challenge', challenge);
+    authUrl.searchParams.set('scope', scopes);
+    authUrl.searchParams.set('state', state);
+    location.href = authUrl.toString();
+  };
+
+  async function handleSpotifyCallback() {
+    const params = new URLSearchParams(location.search);
+    const code = params.get('code');
+    const state = params.get('state');
+    const err = params.get('error');
+    if (err) {
+      history.replaceState({}, '', location.pathname);
+      toast('Spotify login cancelled: ' + err);
+      return;
+    }
+    if (!code) return;
+    history.replaceState({}, '', location.pathname);
+
+    const savedState = localStorage.getItem('sp_pkce_state');
+    const verifier = localStorage.getItem('sp_pkce_verifier');
+    if (!verifier || state !== savedState) {
+      toast('Spotify state mismatch — try connecting again');
+      return;
+    }
+
+    setStatus('Exchanging Spotify token...', true);
+    try {
+      const body = new URLSearchParams({
+        client_id: cfg.spotifyClientId.trim(),
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: REDIRECT_URI,
+        code_verifier: verifier
+      });
+      const res = await fetch('https://accounts.spotify.com/api/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body
+      });
+      const tok = await res.json();
+      if (!res.ok) throw new Error(tok.error_description || tok.error || 'Token exchange failed');
+      cfg.spotifyAccessToken = tok.access_token;
+      if (tok.refresh_token) cfg.spotifyRefreshToken = tok.refresh_token;
+      cfg.spotifyExpiresAt = Date.now() + (tok.expires_in - 60) * 1000;
+      persistCfg();
+      await syncSpotifyLibrary();
+    } catch (e) {
+      setStatus('', false);
+      toast('Spotify auth error: ' + e.message, 4500);
+    }
+  }
+
+  async function refreshSpotifyToken() {
+    if (!cfg.spotifyRefreshToken || !cfg.spotifyClientId) return false;
+    try {
+      const res = await fetch('https://accounts.spotify.com/api/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: cfg.spotifyClientId.trim(),
+          grant_type: 'refresh_token',
+          refresh_token: cfg.spotifyRefreshToken
+        })
+      });
+      if (!res.ok) return false;
+      const tok = await res.json();
+      cfg.spotifyAccessToken = tok.access_token;
+      if (tok.refresh_token) cfg.spotifyRefreshToken = tok.refresh_token;
+      cfg.spotifyExpiresAt = Date.now() + (tok.expires_in - 60) * 1000;
+      persistCfg();
+      return true;
+    } catch (_) { return false; }
+  }
+
+  async function spFetch(url) {
+    if (Date.now() > cfg.spotifyExpiresAt && cfg.spotifyRefreshToken) {
+      await refreshSpotifyToken();
+    }
+    const res = await fetch(url, { headers: { Authorization: 'Bearer ' + cfg.spotifyAccessToken } });
+    if (res.status === 429) {
+      const wait = (Number(res.headers.get('Retry-After')) || 3) * 1000;
+      await new Promise(r => setTimeout(r, wait));
+      return spFetch(url);
+    }
+    if (!res.ok) throw new Error(`Spotify HTTP ${res.status}`);
+    return res.json();
+  }
+
+  async function syncSpotifyLibrary() {
+    switchView('settings');
+    setStatus('Syncing Spotify profile (Top Artists, Liked Songs, Playlists)...', true);
+    const artistCounts = {};
+    const trackTitles = new Set();
+
+    const recordArtist = (name, weight = 1) => {
+      const n = norm(name);
+      if (!n) return;
+      if (!artistCounts[n]) artistCounts[n] = { name, count: 0 };
+      artistCounts[n].count += weight;
+    };
+    const recordTrack = (trackObj, weight = 1) => {
+      if (!trackObj || !trackObj.name) return;
+      const nt = norm(trackObj.name);
+      if (nt) trackTitles.add(nt);
+      (trackObj.artists || []).forEach(a => recordArtist(a.name, weight));
+    };
+
+    try {
+      const me = await spFetch('https://api.spotify.com/v1/me');
+
+      // 1. Top Artists (long & medium term)
+      for (const range of ['long_term', 'medium_term']) {
+        const topA = await spFetch(`https://api.spotify.com/v1/me/top/artists?limit=50&time_range=${range}`).catch(() => ({ items: [] }));
+        (topA.items || []).forEach((a, i) => recordArtist(a.name, Math.max(5, 25 - Math.floor(i / 2))));
+      }
+
+      // 2. Top Tracks
+      const topT = await spFetch('https://api.spotify.com/v1/me/top/tracks?limit=50&time_range=long_term').catch(() => ({ items: [] }));
+      (topT.items || []).forEach(t => recordTrack(t, 4));
+
+      // 3. Liked Songs (up to 1500)
+      let next = 'https://api.spotify.com/v1/me/tracks?limit=50';
+      let pages = 0;
+      while (next && pages < 30) {
+        pages++;
+        setStatus(`Syncing Spotify Liked Songs (page ${pages})...`, true);
+        const d = await spFetch(next);
+        (d.items || []).forEach(it => recordTrack(it.track, 2));
+        next = d.next;
+      }
+
+      // 4. Saved Albums (up to 300)
+      next = 'https://api.spotify.com/v1/me/albums?limit=50';
+      pages = 0;
+      while (next && pages < 6) {
+        pages++;
+        const d = await spFetch(next).catch(() => ({ items: [] }));
+        (d.items || []).forEach(it => {
+          (it.album?.artists || []).forEach(a => recordArtist(a.name, 4));
+          (it.album?.tracks?.items || []).forEach(t => recordTrack(t, 1));
+        });
+        next = d.next;
+      }
+
+      // 5. Owned / Collaborative Playlists (2026 API uses /playlists/{id}/items & entry.item)
+      const pls = await spFetch('https://api.spotify.com/v1/me/playlists?limit=50').catch(() => ({ items: [] }));
+      const owned = (pls.items || []).filter(p => p && (p.owner?.id === me.id || p.collaborative)).slice(0, 20);
+      for (let i = 0; i < owned.length; i++) {
+        setStatus(`Syncing playlist ${i + 1}/${owned.length}: ${owned[i].name}...`, true);
+        let pNext = `https://api.spotify.com/v1/playlists/${owned[i].id}/items?limit=50`;
+        let pPages = 0;
+        while (pNext && pPages < 4) {
+          pPages++;
+          const pd = await spFetch(pNext).catch(() => ({ items: [] }));
+          (pd.items || []).forEach(entry => recordTrack(entry.item || entry.track, 1));
+          pNext = pd.next;
+        }
+      }
+
+      const topArtists = Object.values(artistCounts)
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 120)
+        .map(x => x.name);
+
+      spotifyProfile = {
+        syncedAt: Date.now(),
+        userDisplayName: me.display_name || me.id,
+        topArtists,
+        allArtists: artistCounts,
+        trackTitles: Array.from(trackTitles),
+        totalTracks: trackTitles.size,
+        totalArtists: Object.keys(artistCounts).length
+      };
+
+      await idbPut('meta', { key: 'spotify_profile', value: spotifyProfile });
+      updateSpotifyUI();
+      setStatus('', false);
+      toast(`🎧 Synced ${spotifyProfile.totalTracks} tracks & ${spotifyProfile.totalArtists} artists!`);
+    } catch (err) {
+      setStatus('', false);
+      toast('Spotify sync error: ' + err.message, 5000);
+    }
+  }
+
+  window.importExportifyCSV = async function(file) {
+    if (!file) return;
+    const text = await file.text();
+    const rows = parseCSV(text);
+    if (rows.length < 2) { toast('CSV looks empty'); return; }
+    const headers = rows[0].map(h => h.toLowerCase());
+    const tIdx = headers.findIndex(h => h.includes('track name'));
+    const aIdx = headers.findIndex(h => h.includes('artist'));
+    if (tIdx === -1 || aIdx === -1) { toast('Could not find Track Name / Artist columns'); return; }
+
+    const artistCounts = Object.assign({}, spotifyProfile?.allArtists || {});
+    const trackSet = new Set(spotifyProfile?.trackTitles || []);
+
+    for (let i = 1; i < rows.length; i++) {
+      const tr = rows[i][tIdx], ar = rows[i][aIdx];
+      if (tr) trackSet.add(norm(tr));
+      if (ar) {
+        ar.split(/;|,/).forEach(name => {
+          const clean = name.trim();
+          const n = norm(clean);
+          if (!n) return;
+          if (!artistCounts[n]) artistCounts[n] = { name: clean, count: 0 };
+          artistCounts[n].count += 1;
+        });
+      }
+    }
+
+    const topArtists = Object.values(artistCounts).sort((a, b) => b.count - a.count).slice(0, 120).map(x => x.name);
+    spotifyProfile = {
+      syncedAt: Date.now(),
+      userDisplayName: 'Exportify CSV',
+      topArtists,
+      allArtists: artistCounts,
+      trackTitles: Array.from(trackSet),
+      totalTracks: trackSet.size,
+      totalArtists: Object.keys(artistCounts).length
+    };
+    await idbPut('meta', { key: 'spotify_profile', value: spotifyProfile });
+    updateSpotifyUI();
+    toast(`Imported ${spotifyProfile.totalTracks} tracks & ${spotifyProfile.totalArtists} artists!`);
+  };
+
+  function parseCSV(text) {
+    const out = [];
+    let row = [], cur = '', inQ = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i], next = text[i + 1];
+      if (inQ) {
+        if (c === '"' && next === '"') { cur += '"'; i++; }
+        else if (c === '"') inQ = false;
+        else cur += c;
+      } else {
+        if (c === '"') inQ = true;
+        else if (c === ',') { row.push(cur); cur = ''; }
+        else if (c === '\n' || c === '\r') {
+          if (c === '\r' && next === '\n') i++;
+          row.push(cur);
+          if (row.some(x => x !== '')) out.push(row);
+          row = []; cur = '';
+        } else cur += c;
+      }
+    }
+    if (cur || row.length) { row.push(cur); out.push(row); }
+    return out;
+  }
+
+  function updateSpotifyUI() {
+    const pill = document.getElementById('spotifyPill');
+    const summary = document.getElementById('spotifySummary');
+    if (spotifyProfile) {
+      pill.textContent = `Spotify: ${spotifyProfile.totalArtists} art`;
+      pill.className = 'pill ok';
+      summary.textContent = `✅ Synced (${spotifyProfile.userDisplayName}): ${spotifyProfile.totalTracks} tracks · ${spotifyProfile.totalArtists} artists (${new Date(spotifyProfile.syncedAt).toLocaleDateString()})`;
+    } else {
+      pill.textContent = 'Spotify: Off';
+      pill.className = 'pill';
+      summary.textContent = 'Not synced yet.';
+    }
+  }
+
+  // ==================== SETTINGS ====================
+  function persistCfg() {
+    localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
+    document.getElementById('setupNotice').classList.toggle('hidden', Boolean(cfg.geminiKey && cfg.discogsToken));
+  }
+
+  window.saveSettings = function(silent = false) {
+    cfg.geminiKey = document.getElementById('cfgGeminiKey').value.trim();
+    cfg.geminiModel = document.getElementById('cfgGeminiModel').value;
+    cfg.discogsToken = document.getElementById('cfgDiscogsToken').value.trim();
+    cfg.discogsFolderId = document.getElementById('cfgDiscogsFolder').value || '1';
+    cfg.threshold = Number(document.getElementById('cfgThreshold').value) || 20;
+    cfg.voice = document.getElementById('cfgVoice').checked;
+    cfg.spotifyClientId = document.getElementById('cfgSpotifyClientId').value.trim();
+    persistCfg();
+    if (!silent) toast('Settings saved!');
+  };
+
+  window.verifyDiscogsAccount = async function() {
+    saveSettings(true);
+    if (!cfg.discogsToken) { toast('Paste your Discogs Token first'); return; }
+    setStatus('Verifying Discogs account & loading folders...', true);
+    try {
+      const id = await discogsFetch('/oauth/identity');
+      cfg.discogsUser = id.username;
+      const fRes = await discogsFetch(`/users/${encodeURIComponent(id.username)}/collection/folders`);
+      cfg.discogsFolders = (fRes.folders || []).filter(f => f.id !== 0); // Exclude virtual "All" folder
+      if (!cfg.discogsFolders.length) cfg.discogsFolders = [{ id: 1, name: 'Uncategorized' }];
+      populateFolders();
+      persistCfg();
+      setStatus('', false);
+      toast(`✅ Connected as ${id.username}`);
+    } catch (err) {
+      setStatus('', false);
+      toast('Discogs verify failed: ' + err.message, 4000);
+    }
+  };
+
+  function populateFolders() {
+    const sel = document.getElementById('cfgDiscogsFolder');
+    sel.innerHTML = (cfg.discogsFolders || [{ id: 1, name: 'Uncategorized' }]).map(f =>
+      `<option value="${f.id}">${esc(f.name)} (${f.count ?? 0})</option>`
+    ).join('');
+    sel.value = cfg.discogsFolderId || '1';
+    document.getElementById('discogsUserBadge').textContent = cfg.discogsUser ? `Connected: @${cfg.discogsUser}` : '';
+  }
+
+  window.copyRedirectUri = async function() {
+    try {
+      await navigator.clipboard.writeText(REDIRECT_URI);
+      toast('Redirect URI copied!');
+    } catch (_) {
+      prompt('Copy this Redirect URI:', REDIRECT_URI);
+    }
+  };
+
+  // ==================== INIT ====================
+  async function init() {
+    db = await openDB();
+    await loadStashCache();
+    const spRec = await idbGet('meta', 'spotify_profile');
+    if (spRec?.value) spotifyProfile = spRec.value;
+
+    // Populate settings inputs
+    document.getElementById('cfgGeminiKey').value = cfg.geminiKey || '';
+    document.getElementById('cfgGeminiModel').value = cfg.geminiModel || 'gemini-3.5-flash-lite';
+    document.getElementById('cfgDiscogsToken').value = cfg.discogsToken || '';
+    document.getElementById('cfgThreshold').value = cfg.threshold ?? 20;
+    document.getElementById('cfgVoice').checked = Boolean(cfg.voice);
+    document.getElementById('cfgSpotifyClientId').value = cfg.spotifyClientId || '';
+    document.getElementById('redirectUriText').textContent = REDIRECT_URI;
+    document.getElementById('guideRedirectUri').textContent = REDIRECT_URI;
+    populateFolders();
+    updateSpotifyUI();
+    persistCfg();
+
+    // Format toggle
+    document.querySelectorAll('#formatSeg .seg-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('#formatSeg .seg-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        activeFormat = btn.dataset.fmt;
+      });
+    });
+
+    // Stash filter chips
+    document.querySelectorAll('#stashFilters .chip').forEach(ch => {
+      ch.addEventListener('click', () => {
+        document.querySelectorAll('#stashFilters .chip').forEach(c => c.classList.remove('active'));
+        ch.classList.add('active');
+        activeStashFilter = ch.dataset.filter;
+        renderStash();
+      });
+    });
+
+    // Camera inputs
+    document.getElementById('camPrimary').addEventListener('change', (e) => handlePhotoCapture(e.target.files[0], false));
+    document.getElementById('camExtra').addEventListener('change', (e) => handlePhotoCapture(e.target.files[0], true));
+
+    // Check Spotify OAuth redirect return
+    await handleSpotifyCallback();
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>
