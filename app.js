@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   const CC = window.CC;
-  const { cfg, esc, norm, similarity, MEDIA_GRADES, SLEEVE_GRADES } = CC;
+  const { cfg, esc, norm, normFull, similarity, MEDIA_GRADES, SLEEVE_GRADES } = CC;
 
   // Dynamic PWA Manifest
   (function injectManifest() {
@@ -18,10 +18,11 @@
   let spotifyProfile = null;
   let tasteFeedback = [];
   let stashCache = [];
+  let currentView = 'scan';
   let activeFormat = 'Auto';
   let activeStashFilter = 'all';
 
-  let stagedPhotos = []; // [{ apiB64, thumbWebp }]
+  let stagedPhotos = [];
   let stagedUpc = '';
   let currentExtracted = null;
   let currentCandidates = [];
@@ -30,7 +31,7 @@
   let detectivePickId = null;
   let detectiveEliminatedIds = new Set();
   let currentInspected = null;
-  let activeStashItem = null; // Currently opened Stash Detail item
+  let activeStashItem = null;
 
   const tasteCache = new Map();
   let barcodeStream = null;
@@ -108,23 +109,70 @@
     return fuzzy || fallback;
   }
 
-  window.switchView = (name) => {
-    closeStashDetail();
+  // ==================== NAVIGATION & ANDROID BACK GESTURE ====================
+  function hideStashDetailUI() {
+    activeStashItem = null;
+    document.getElementById('stashDetailModal').classList.add('hidden');
+  }
+
+  function hideBarcodeUI() {
+    if (barcodeRaf) cancelAnimationFrame(barcodeRaf);
+    barcodeRaf = null;
+    if (barcodeStream) { barcodeStream.getTracks().forEach(t => t.stop()); barcodeStream = null; }
+    document.getElementById('barcodeVideo').srcObject = null;
+    document.getElementById('barcodeModal').classList.add('hidden');
+  }
+
+  window.switchView = (name, fromPop = false) => {
+    const viewChanged = name !== currentView;
+    hideStashDetailUI();
+    hideBarcodeUI();
+
+    if (!fromPop) {
+      try {
+        if (history.state?.modal) {
+          history.replaceState({ view: name, modal: null }, '');
+        } else if (viewChanged) {
+          history.pushState({ view: name, modal: null }, '');
+        }
+      } catch (_) {}
+    }
+
+    currentView = name;
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
     document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === name));
     document.getElementById('view-' + name).classList.add('active');
-    if (name === 'stash') renderStash();
-    window.scrollTo({ top: 0, behavior: 'instant' });
+
+    if (viewChanged) {
+      if (name === 'stash') renderStash();
+      window.scrollTo({ top: 0, behavior: 'instant' });
+    }
   };
 
-  // ==================== VOICE MEMO DICTATION ====================
-  window.startDictation = (textareaId, btnId) => {
+  window.addEventListener('popstate', (e) => {
+    const st = e.state || { view: 'scan', modal: null };
+    if (st.modal !== 'barcode') hideBarcodeUI();
+
+    if (st.modal === 'stashDetail' && st.itemId) {
+      if (currentView !== 'stash') switchView('stash', true);
+      openStashDetail(st.itemId, true);
+    } else {
+      hideStashDetailUI();
+      switchView(st.view || 'scan', true);
+    }
+  });
+
+  // ==================== 1-TAP AI VOICE RE-GRADE ====================
+  const VOICE_BTN_IDLE = "🎤 Don't Agree? AI Voice Re-Grade";
+
+  window.voiceRegrade = (source, btnId) => {
+    if (!cfg.geminiKey) { toast('Add your Gemini API Key in Settings first'); return; }
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
-      toast('Tap inside the Notes box and use your Android keyboard mic 🎤!', 3500);
-      document.getElementById(textareaId)?.focus();
+      toast('Voice mic not supported in this browser — use Chrome on Android!', 3800);
       return;
     }
+
     const btn = document.getElementById(btnId);
     if (activeRecognition) {
       try { activeRecognition.stop(); } catch (_) {}
@@ -138,27 +186,112 @@
     rec.maxAlternatives = 1;
     activeRecognition = rec;
 
-    if (btn) { btn.classList.add('listening'); btn.textContent = '🔴 Listening...'; }
-    // Pause preview music while dictating so mic hears cleanly
+    if (btn) { btn.classList.add('listening'); btn.textContent = '🔴 Listening... describe any flaws (tap to stop)'; }
     if (!audioEl.paused) audioEl.pause();
 
+    let gotResult = false;
     rec.onresult = (e) => {
       const spoken = e.results?.[0]?.[0]?.transcript?.trim();
-      const box = document.getElementById(textareaId);
-      if (spoken && box) {
-        box.value = box.value.trim() ? `${box.value.trim()}; ${spoken}` : spoken;
-        toast('🎤 Memo added!');
+      if (spoken) {
+        gotResult = true;
+        regradeWithAI(source, spoken, btnId);
       }
     };
     rec.onerror = (e) => {
-      if (e.error !== 'aborted') toast('Mic error: ' + e.error + ' (you can also use keyboard mic)');
+      if (e.error !== 'aborted') toast('Mic error: ' + e.error, 3200);
     };
     rec.onend = () => {
       activeRecognition = null;
-      if (btn) { btn.classList.remove('listening'); btn.textContent = '🎤 Voice Memo'; }
+      if (btn && !gotResult) {
+        btn.classList.remove('listening');
+        btn.textContent = VOICE_BTN_IDLE;
+      }
     };
     try { rec.start(); } catch (_) { activeRecognition = null; }
   };
+
+  async function regradeWithAI(source, spokenDescription, btnId) {
+    const isStash = source === 'stash';
+    const item = isStash ? activeStashItem : currentInspected;
+    if (!item) return;
+
+    const mediaEl = document.getElementById(isStash ? 'sdMediaCond' : 'gMediaCond');
+    const sleeveEl = document.getElementById(isStash ? 'sdSleeveCond' : 'gSleeveCond');
+    const notesEl = document.getElementById(isStash ? 'sdNotes' : 'gNotes');
+    const btn = document.getElementById(btnId);
+
+    const priorNote = (notesEl?.value || '').trim();
+    if (btn) {
+      btn.classList.remove('listening');
+      btn.disabled = true;
+      btn.textContent = '⏳ Re-checking photos & re-grading...';
+    }
+    toast(`🎤 Heard: "${spokenDescription.slice(0, 65)}${spokenDescription.length > 65 ? '…' : ''}"`, 3000);
+
+    const prompt = `You are a strict, conservative Discogs/Goldmine seller grading assistant.
+The seller is NOT a professional grader, so they just described the item's flaws out loud in plain English.
+Re-examine the attached photo(s) closely using what they just told you, TRUST their physical and playback observations completely, pick the exact conservative Discogs Media Condition and Sleeve Condition grades for them, and rewrite their observations into a clean, concise, buyer-ready Discogs condition report.
+
+Item: "${item.artist} - ${item.title}" (${item.format || 'Cassette'})
+Previous AI estimate: Media="${mediaEl?.value || ''}", Sleeve="${sleeveEl?.value || ''}"
+Previous note: "${priorNote || 'None'}"
+Seller's voice description: "${spokenDescription}"
+
+STRICT DISCOGS GOLDMINE RULES:
+- Media Condition MUST be one of: ${JSON.stringify(MEDIA_GRADES)}
+  * "Mint (M)" ONLY if factory sealed in shrink wrap.
+  * "Near Mint (NM or M-)" = spotless, zero visible flaws, plays flawlessly.
+  * "Very Good Plus (VG+)" = very clean, only tiny handling scuffs, crisp flat label, plays cleanly.
+  * "Very Good (VG)" = noticeable scratches/scuffs, light label wear/fading, or light background noise; structurally intact.
+  * "Good Plus (G+)" = heavy scratches/scuffing on shell/disc, peeling/warped/bubbling/stained label, writing, or noticeable playback issues (e.g. slightly sluggish/warbly).
+  * "Good (G)" / "Fair (F)" / "Poor (P)" = cracked/broken shell, missing felt pressure pad, mangled tape, heavy skips/sluggish playback, or torn/unreadable label.
+- Sleeve Condition MUST be one of: ${JSON.stringify(SLEEVE_GRADES)}
+  * Loose with no case/cover = "No Cover". Plain blank replacement = "Generic".
+  * "Very Good Plus (VG+)" = clean insert, minor edge wear, light case scuffs, no cracks.
+  * "Very Good (VG)" = creases, sticker residue, moderate case scratches, or a small crack.
+  * "Good Plus (G+)" = paint/ink/water stains on insert, heavy creases, ripped flap, heavily scratched or cracked case.
+  * "Good (G)" / "Fair (F)" / "Poor (P)" = severe stains obscuring artwork, torn/missing pieces, or heavy water/mold damage.
+- CONSERVATIVE RULE: When between two grades, ALWAYS choose the LOWER grade so buyers are never disappointed. NEVER use the word "mint" unless factory sealed.
+
+Return ONLY valid JSON:
+{
+  "media_condition": "exact Discogs media grade from list",
+  "sleeve_condition": "exact Discogs sleeve grade from list",
+  "polished_note": "clean, factual, buyer-ready Discogs listing note rewording all flaws the seller mentioned plus anything visible in photos (1-2 short sentences, no fluff)"
+}`;
+
+    const parts = [{ text: prompt }];
+    if (!isStash && stagedPhotos.length) {
+      stagedPhotos.forEach(p => parts.push({ inline_data: { mime_type: 'image/jpeg', data: p.apiB64 } }));
+    } else if (isStash) {
+      const thumbs = (Array.isArray(item.thumbs) && item.thumbs.length) ? item.thumbs : (item.thumb_data_url ? [item.thumb_data_url] : []);
+      thumbs.forEach(src => {
+        const m = String(src || '').match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+        if (m) parts.push({ inline_data: { mime_type: m[1], data: m[2] } });
+      });
+    }
+
+    try {
+      const res = await CC.callGeminiJSON(parts, 'MEDIUM');
+      const newMedia = normalizeGrade(res.media_condition, MEDIA_GRADES, mediaEl.value);
+      const newSleeve = normalizeGrade(res.sleeve_condition, SLEEVE_GRADES, sleeveEl.value);
+      mediaEl.value = newMedia;
+      sleeveEl.value = newSleeve;
+      if (res.polished_note) notesEl.value = res.polished_note.trim();
+
+      item.media_condition = newMedia;
+      item.sleeve_condition = newSleeve;
+      item.condition_note = notesEl.value.trim();
+
+      const hint = !isStash ? document.getElementById('aiGradeHint') : null;
+      if (hint) hint.textContent = '✅ Voice Re-Graded';
+      toast(`✅ Re-graded: ${shortGrade(newMedia)} / ${shortGrade(newSleeve)}`, 3400);
+    } catch (err) {
+      toast('Re-grade error: ' + err.message, 4000);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = VOICE_BTN_IDLE; }
+    }
+  }
 
   // ==================== FLOATING 30s AUDIO MINI-PLAYER ====================
   const audioEl = document.getElementById('previewAudio');
@@ -213,7 +346,7 @@
     const { forceReplace = true, forcePlay = cfg.autoPlayHighlight, strictTrack = true, notifyUser = false, ignoreRunId = false } = opts;
     if (!artist && !track && !album) return;
 
-    const key = norm(`${artist}|${track || album}`);
+    const key = normFull(`${artist}|${track || album}`);
     if (key === activeClipKey && audioEl.src && audioEl.src !== SILENT_WAV) {
       if (forcePlay) {
         audioEl.muted = false;
@@ -256,7 +389,8 @@
     }
 
     activeClipKey = key;
-    titleEl.textContent = `🎵 ${clip.trackName} — ${clip.artistName}`;
+    const fallbackNote = clip.exactVersion === false ? ' (closest stream)' : '';
+    titleEl.textContent = `🎵 ${clip.trackName} — ${clip.artistName}${fallbackNote}`;
     audioEl.muted = false;
     audioEl.src = clip.previewUrl;
     audioEl.load();
@@ -378,6 +512,7 @@
       barcodeStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } });
       video.srcObject = barcodeStream;
       await video.play();
+      try { history.pushState({ view: currentView, modal: 'barcode' }, ''); } catch (_) {}
       hint.textContent = 'Center the barcode on the red line...';
 
       const loop = async () => {
@@ -401,17 +536,16 @@
       };
       barcodeRaf = requestAnimationFrame(loop);
     } catch (err) {
-      closeBarcodeScanner();
+      hideBarcodeUI();
       toast('Camera error: ' + err.message);
     }
   };
 
   window.closeBarcodeScanner = () => {
-    if (barcodeRaf) cancelAnimationFrame(barcodeRaf);
-    barcodeRaf = null;
-    if (barcodeStream) { barcodeStream.getTracks().forEach(t => t.stop()); barcodeStream = null; }
-    document.getElementById('barcodeVideo').srcObject = null;
-    document.getElementById('barcodeModal').classList.add('hidden');
+    hideBarcodeUI();
+    if (history.state?.modal === 'barcode') {
+      try { history.back(); } catch (_) {}
+    }
   };
 
   // ==================== SINGLE-BUTTON SEARCH & ANALYZE ====================
@@ -435,23 +569,29 @@
   };
 
   async function runGeminiVision(myRunId) {
-    setStatus(`Reading ${stagedPhotos.length} photo(s) & visually grading condition...`, true);
+    setStatus(`Inspecting ${stagedPhotos.length} photo(s) closely & strictly grading...`, true);
     const fmtHint = activeFormat === 'Auto' ? 'Auto-detect Cassette, CD, or Vinyl' : `User selected format: ${activeFormat}`;
     const upcHint = stagedUpc ? `User also scanned UPC barcode: ${stagedUpc}.` : '';
-    const prompt = `You are a physical music media OCR, Discogs pressing-ID, and Goldmine/Discogs visual grading expert. Inspect ALL attached photos carefully (often Photo 1 = Front/Side A, Photo 2 = Back/Side B). ${fmtHint}. ${upcHint}
+    const prompt = `You are a physical music media OCR, Discogs pressing-ID, and strict Goldmine/Discogs visual grading expert. Inspect ALL attached photos carefully (often Photo 1 = Front/Side A, Photo 2 = Back/Side B). ${fmtHint}. ${upcHint}
 
-GRADING RULES (strict Discogs Goldmine standards — visual estimate):
-- Media Condition MUST be one of: ${JSON.stringify(MEDIA_GRADES)}
-  * Never choose "Mint (M)" unless factory sealed in shrink wrap.
-  * Clean, crisp print, intact shell/disc = "Very Good Plus (VG+)" (or "Near Mint (NM or M-)" if spotless).
-  * Noticeable scuffs, faded ink, sticker on shell, light scratches = "Very Good (VG)".
-  * Heavy wear, cracked shell, missing felt pressure pad, warped/mangled tape = "Good Plus (G+)" or lower.
-- Sleeve Condition MUST be one of: ${JSON.stringify(SLEEVE_GRADES)}
-  * If loose cassette/disc with NO case or cover in the photos = "No Cover".
-  * Plain blank replacement sleeve/case with no artwork = "Generic".
-  * Otherwise grade case + paper cover honestly (note cracks in plastic case, corner wear, creases, cut-out notches, price stickers, water stains).
+STRICT DISCOGS SELLER GRADING RULES (Be brutally honest and conservative — never over-grade!):
+1. FIRST scan every square inch of the photo(s) for flaws and list every single one in "media_defects" and "sleeve_defects": scratches, scuffs, peeling/bubbling/warped/stained labels, faded ink, yellowing, cracks, paint/ink/water stains, creases, rips, stickers, missing felt pressure pad, or dirty/cloudy plastic.
+2. Media Condition MUST be one of: ${JSON.stringify(MEDIA_GRADES)}
+   * "Mint (M)": ONLY if factory sealed in unopened shrink wrap.
+   * "Near Mint (NM or M-)": Spotless, looks brand new, ZERO visible scratches, scuffs, or label wear.
+   * "Very Good Plus (VG+)": Very clean; only tiny barely-visible handling scuffs; label/print crisp and flat.
+   * "Very Good (VG)": Clear surface scuffs/scratches, light label wear, minor fading, or small sticker — structurally intact.
+   * "Good Plus (G+)": Heavy scratching/scuffing on shell/disc, OR peeling/warped/bubbling/stained label, OR writing/heavy yellowing.
+   * "Good (G)" / "Fair (F)" / "Poor (P)": Cracked/broken shell, missing/loose felt pressure pad, torn/unreadable label, or damaged tape/deep gouges.
+3. Sleeve Condition MUST be one of: ${JSON.stringify(SLEEVE_GRADES)}
+   * Loose item with no case/cover shown = "No Cover". Plain blank replacement = "Generic".
+   * "Very Good Plus (VG+)": Clean insert with minimal edge wear; light case scuffs, no cracks.
+   * "Very Good (VG)": Noticeable creases, edge/corner wear, sticker residue, moderate case scratches, or a small case crack.
+   * "Good Plus (G+)": Paint/ink/liquid stains on insert, heavy creasing, ripped flap, heavily scratched/cracked case, or water warping.
+   * "Good (G)" / "Fair (F)" / "Poor (P)": Severe paint/stains obscuring artwork, torn/missing pieces, or heavy water/mold damage.
+4. CONSERVATIVE RULE: When between two grades, ALWAYS pick the LOWER grade. NEVER use the word "mint" in "condition_note" unless factory sealed. Summarize the exact visible defects in "condition_note".
 
-Return ONLY valid JSON:
+Return ONLY valid JSON (list defects BEFORE grades):
 {
   "detected_format": "Cassette" | "CD" | "Vinyl",
   "raw_catalog_number": "exact catalog code printed on shell/spine/disc, or empty string",
@@ -464,16 +604,18 @@ Return ONLY valid JSON:
   "country_clues": "country printed (e.g. 'Printed in U.S.A.') or 'Not visible'",
   "club_edition": "None" | "CRC" | "BMG" | "Unknown",
   "physical_details": "plain-English description of visible physical features (plastic shell color, paper label vs direct print, numbers in tape window, cover color, club stamps)",
+  "media_defects": ["list every visible flaw on cassette shell/label/disc, or empty array if spotless"],
+  "sleeve_defects": ["list every visible flaw on case/insert (paint, stains, cracks, scratches, creases), or empty array if spotless"],
   "media_condition": "exact Discogs media grade from list above",
   "sleeve_condition": "exact Discogs sleeve grade from list above",
-  "condition_note": "concise factual seller-ready visual note (e.g. 'Clean shell, intact pad; minor surface scuffing on plastic case' or 'Loose tape, no case')",
+  "condition_note": "blunt, factual seller note listing the actual flaws found above (NEVER say 'mint' unless factory sealed)",
   "visible_tracks": ["any song titles visible in the photos"]
 }`;
 
     const parts = [{ text: prompt }, ...stagedPhotos.map(p => ({ inline_data: { mime_type: 'image/jpeg', data: p.apiB64 } }))];
 
     try {
-      const ext = await CC.callGeminiJSON(parts);
+      const ext = await CC.callGeminiJSON(parts, 'MEDIUM');
       if (myRunId !== scanRunId) return false;
       currentExtracted = ext;
       if (activeFormat !== 'Auto') ext.detected_format = activeFormat;
@@ -823,7 +965,6 @@ Return ONLY valid JSON:
       if (entry && typeof entry === 'object' && entry.title) {
         return { artist: entry.artist || fallbackArtist || '', title: entry.title, reason: entry.reason || '' };
       }
-      // Backward compatibility for string entries
       const str = String(entry || '');
       const [head, ...rest] = str.split(/\s+[—–]\s+/);
       const reason = rest.join(' — ');
@@ -1030,12 +1171,10 @@ Return ONLY valid JSON:
     }
     document.getElementById('inspLinks').innerHTML = links;
 
-    // Open Pressing Notes
     const pnCard = document.getElementById('pressingNotesCard');
     pnCard.classList.toggle('hidden', !item.pressing_notes);
     if (item.pressing_notes) document.getElementById('inspNotes').textContent = item.pressing_notes;
 
-    // Populate AI Grading & Notes inputs
     document.getElementById('gMediaCond').innerHTML = gradeOptionsHtml(MEDIA_GRADES, item.media_condition);
     document.getElementById('gSleeveCond').innerHTML = gradeOptionsHtml(SLEEVE_GRADES, item.sleeve_condition);
     document.getElementById('gNotes').value = item.condition_note || '';
@@ -1239,7 +1378,7 @@ Return ONLY valid JSON:
       return;
     }
 
-    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v15`;
+    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v151`;
     if (tasteCache.has(cacheKey)) { applyTasteUI(item, tasteCache.get(cacheKey), myRunId); return; }
 
     const topArtists = (spotifyProfile?.topArtists || []).slice(0, 60).join(', ');
@@ -1401,7 +1540,6 @@ Include ALL genuinely famous/recognizable songs on the release in notable_songs 
     const list = document.getElementById('stashList');
     if (!filtered.length) { list.innerHTML = `<div class="card"><p>No matching items yet.</p></div>`; return; }
 
-    // Clean, compact cards — tap to view full breakdown & play songs!
     list.innerHTML = filtered.map(it => {
       const pBadge = it.est_price != null ? `<span class="badge ${it.is_high_value ? 'badge-yellow' : 'badge-blue'}">$${Number(it.est_price).toFixed(2)}</span>` : '';
       const sBadge = it.is_scarce ? `<span class="badge badge-purple">💎 Scarce</span>` : '';
@@ -1426,10 +1564,20 @@ Include ALL genuinely famous/recognizable songs on the release in notable_songs 
     }).join('');
   };
 
-  window.openStashDetail = (id) => {
+  window.openStashDetail = (id, fromPop = false) => {
     const it = stashCache.find(x => x.id === id);
     if (!it) return;
     activeStashItem = it;
+
+    if (!fromPop) {
+      try {
+        if (history.state?.modal === 'stashDetail') {
+          history.replaceState({ view: 'stash', modal: 'stashDetail', itemId: id }, '');
+        } else {
+          history.pushState({ view: 'stash', modal: 'stashDetail', itemId: id }, '');
+        }
+      } catch (_) {}
+    }
 
     document.getElementById('sdHeaderTitle').textContent = `${it.artist} — ${it.title}`;
     const photos = (Array.isArray(it.thumbs) && it.thumbs.length) ? it.thumbs : (it.thumb_data_url ? [it.thumb_data_url] : []);
@@ -1518,11 +1666,11 @@ Include ALL genuinely famous/recognizable songs on the release in notable_songs 
             <select id="sdSleeveCond">${gradeOptionsHtml(SLEEVE_GRADES, it.sleeve_condition || 'Very Good Plus (VG+)')}</select>
           </div>
         </div>
+        <button id="btnVoiceRegradeStash" type="button" class="btn btn-purple dictate-btn" style="width:100%; min-height:42px; font-size:0.86rem; margin-bottom:8px;" onclick="voiceRegrade('stash', 'btnVoiceRegradeStash')">
+          ${VOICE_BTN_IDLE}
+        </button>
         <div style="margin-bottom:10px;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-            <label class="field-label" style="margin:0;">Condition / Listing Notes</label>
-            <button id="btnDictateStash" type="button" class="btn btn-secondary btn-sm dictate-btn" onclick="startDictation('sdNotes', 'btnDictateStash')">🎤 Voice Memo</button>
-          </div>
+          <label class="field-label">Condition / Listing Report</label>
           <textarea id="sdNotes" rows="2">${esc(it.condition_note || '')}</textarea>
         </div>
         <div class="inline-actions">
@@ -1539,8 +1687,10 @@ Include ALL genuinely famous/recognizable songs on the release in notable_songs 
   };
 
   window.closeStashDetail = () => {
-    activeStashItem = null;
-    document.getElementById('stashDetailModal').classList.add('hidden');
+    hideStashDetailUI();
+    if (history.state?.modal === 'stashDetail') {
+      try { history.back(); } catch (_) {}
+    }
   };
 
   window.saveStashEdits = async (id) => {
@@ -1566,7 +1716,6 @@ Include ALL genuinely famous/recognizable songs on the release in notable_songs 
   window.pushStashToDiscogs = async (id) => {
     const it = stashCache.find(x => x.id === id);
     if (!it || !it.discogs_id || !cfg.discogsUser) { toast('Verify Discogs in Settings first'); return; }
-    // Grab any unsaved edits from detail modal if open
     if (activeStashItem?.id === id) {
       it.media_condition = document.getElementById('sdMediaCond')?.value || it.media_condition;
       it.sleeve_condition = document.getElementById('sdSleeveCond')?.value || it.sleeve_condition;
@@ -1680,7 +1829,6 @@ Include ALL genuinely famous/recognizable songs on the release in notable_songs 
       cfg.discogsFolders = (fRes.folders || []).filter(f => f.id !== 0);
       if (!cfg.discogsFolders.length) cfg.discogsFolders = [{ id: 1, name: 'Uncategorized' }];
 
-      // Dynamically map Media Condition, Sleeve Condition & Notes field IDs
       const fieldsRes = await CC.discogsFetch(`/users/${encodeURIComponent(id.username)}/collection/fields`).catch(() => null);
       if (fieldsRes?.fields?.length) {
         const findId = (rx, def) => (fieldsRes.fields.find(x => rx.test(x.name || ''))?.id) || def;
@@ -1833,13 +1981,17 @@ Include ALL genuinely famous/recognizable songs on the release in notable_songs 
     });
 
     const p = new URLSearchParams(location.search);
-    if (p.get('error')) { history.replaceState({}, '', location.pathname); toast('Spotify login cancelled'); }
-    else if (p.get('code')) {
+    if (p.get('error')) {
+      history.replaceState({ view: 'scan', modal: null }, '', location.pathname);
+      toast('Spotify login cancelled');
+    } else if (p.get('code')) {
       const code = p.get('code'), state = p.get('state');
-      history.replaceState({}, '', location.pathname);
+      history.replaceState({ view: 'scan', modal: null }, '', location.pathname);
       setStatus('Connecting Spotify...', true);
       try { await CC.exchangeSpotifyCode(code, state); await runSpotifySyncUI(); }
       catch (e) { setStatus('', false); toast('Spotify error: ' + e.message, 4500); }
+    } else {
+      try { history.replaceState({ view: 'scan', modal: null }, ''); } catch (_) {}
     }
   }
 

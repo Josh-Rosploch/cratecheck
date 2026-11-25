@@ -54,17 +54,20 @@
   CC.sleep = (ms) => new Promise(r => setTimeout(r, ms));
   CC.esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   CC.norm = (s) => String(s || '').toLowerCase().replace(/\(.*?\)|\[.*?\]/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
+  CC.normFull = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
-  CC.similarity = (a, b) => {
-    const ta = new Set(CC.norm(a).split(' ').filter(w => w.length > 1));
-    const tb = new Set(CC.norm(b).split(' ').filter(w => w.length > 1));
+  function tokenSim(na, nb) {
+    const ta = new Set(na.split(' ').filter(w => w.length > 1));
+    const tb = new Set(nb.split(' ').filter(w => w.length > 1));
     if (!ta.size || !tb.size) return 0;
     let inter = 0;
     ta.forEach(w => { if (tb.has(w)) inter++; });
-    const na = CC.norm(a), nb = CC.norm(b);
     const sub = (na && nb && (na.includes(nb) || nb.includes(na))) ? 0.25 : 0;
     return Math.min(1, inter / (ta.size + tb.size - inter) + sub);
-  };
+  }
+
+  CC.similarity = (a, b) => tokenSim(CC.norm(a), CC.norm(b));
+  CC.simFull = (a, b) => tokenSim(CC.normFull(a), CC.normFull(b));
 
   let statusCb = () => {};
   let rateCb = () => {};
@@ -178,7 +181,6 @@
     return data;
   };
 
-  // Push Media Condition, Sleeve Condition, and Notes to a Discogs Collection Instance
   CC.syncDiscogsInstanceFields = async (folderId, releaseId, instanceId, mediaCond, sleeveCond, notes) => {
     if (!CC.cfg.discogsUser || !releaseId || !instanceId) return 0;
     const f = CC.cfg.discogsFields || { media: 1, sleeve: 2, notes: 3 };
@@ -202,18 +204,22 @@
     return okCount;
   };
 
-  // ==================== GEMINI API ====================
-  CC.callGeminiJSON = async (parts) => {
+  // ==================== GEMINI API (WITH THINKING LEVEL + AUTO FALLBACK) ====================
+  CC.callGeminiJSON = async (parts, thinkingLevel = null) => {
     const model = (CC.cfg.geminiModel || 'gemini-3.5-flash-lite').trim();
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(CC.cfg.geminiKey.trim())}`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts }],
-        generationConfig: { responseMimeType: 'application/json', temperature: 0.15 }
-      })
-    });
+    const send = (useThinking) => {
+      const genCfg = { responseMimeType: 'application/json', temperature: 0.1 };
+      if (useThinking && thinkingLevel) genCfg.thinkingConfig = { thinkingLevel };
+      return fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts }], generationConfig: genCfg })
+      });
+    };
+
+    let res = await send(true);
+    if (res.status === 400 && thinkingLevel) res = await send(false);
     if (!res.ok) {
       const t = await res.text().catch(() => '');
       throw new Error(`Gemini HTTP ${res.status}: ${t.slice(0, 140)}`);
@@ -229,58 +235,107 @@
     }
   };
 
-  // ==================== STRICT 30s AUDIO HIGHLIGHT FETCHER ====================
-  function scoreAudioCandidate(candArtist, candTrack, candAlbum, targetArtist, targetTrack, targetAlbum, strictTrack) {
+  // ==================== REMIX/VERSION-AWARE 30s AUDIO HIGHLIGHT FETCHER ====================
+  function splitTrackVersion(raw) {
+    const str = String(raw || '').trim();
+    const parts = [];
+    const parens = str.match(/[\(\[]([^\)\]]+)[\)\]]/g);
+    if (parens) parens.forEach(p => parts.push(p.slice(1, -1).trim()));
+    let base = str.replace(/[\(\[][^\)\]]*[\)\]]/g, '').trim();
+
+    // Also catch trailing "- Mad Cow Mix" / "- Radio Version"
+    const dashMatch = base.match(/^(.*?)\s+[-–—]\s+(.*\b(?:mix|remix|version|edit|dub|extended|radio|club|instrumental|acoustic|live|remaster\w*)\b.*)$/i);
+    if (dashMatch) {
+      base = dashMatch[1].trim();
+      parts.push(dashMatch[2].trim());
+    }
+    return { base, version: parts.join(' ').trim() };
+  }
+
+  function scoreAudioCandidate(candArtist, candTrack, candAlbum, targetArtist, rawTrack, targetAlbum, strictTrack) {
     const isVarious = !targetArtist || /^various(\s+artists)?$/i.test(targetArtist.trim());
     const aSim = isVarious ? 0.7 : CC.similarity(targetArtist, candArtist || '');
-    const tSim = targetTrack ? CC.similarity(targetTrack, candTrack || '') : 0;
-    const albSim = targetAlbum ? CC.similarity(targetAlbum, candAlbum || '') : 0;
     const isTribute = /karaoke|tribute|cover band|lullaby|in the style of/i.test(`${candArtist} ${candAlbum} ${candTrack}`);
+    if (isTribute) return { score: -1, versionMatched: false };
 
-    if (isTribute) return -1;
-    if (strictTrack && targetTrack) {
-      if (tSim < 0.45) return -1;
-      if (!isVarious && aSim < 0.35) return -1;
-      return tSim * 0.6 + aSim * 0.3 + albSim * 0.1;
+    const req = splitTrackVersion(rawTrack);
+    const cand = splitTrackVersion(candTrack);
+    const tSimBase = req.base ? CC.similarity(req.base, cand.base || candTrack || '') : 0;
+    const albSim = targetAlbum ? CC.similarity(targetAlbum, candAlbum || '') : 0;
+
+    if (strictTrack && req.base) {
+      if (tSimBase < 0.45) return { score: -1, versionMatched: false };
+      if (!isVarious && aSim < 0.35) return { score: -1, versionMatched: false };
+
+      let score = tSimBase * 0.50 + aSim * 0.25 + albSim * 0.05;
+      let versionMatched = !req.version;
+
+      if (req.version) {
+        const reqV = CC.normFull(req.version);
+        const candFull = CC.normFull(candTrack || '');
+        const candV = CC.normFull(cand.version || '');
+        const vSim = Math.max(CC.simFull(req.version, cand.version || ''), CC.simFull(req.version, candTrack || ''));
+
+        // Check specific distinctive words (ignore generic words like mix/version/remix)
+        const stop = new Set(['mix', 'remix', 'version', 'edit', 'the', 'and', 'original', 'single']);
+        const reqDistinct = reqV.split(' ').filter(w => w.length > 2 && !stop.has(w));
+        const distinctHits = reqDistinct.filter(w => candFull.includes(w)).length;
+        const distinctRatio = reqDistinct.length ? (distinctHits / reqDistinct.length) : vSim;
+
+        if (distinctRatio >= 0.5 || vSim >= 0.55) {
+          score += 0.45 + distinctRatio * 0.25;
+          versionMatched = true;
+        } else if (reqV.includes('radio') && (candV.includes('radio') || (!candV && !/remix|mix|extended|club|dub/i.test(candFull)))) {
+          score += 0.30;
+          versionMatched = candV.includes('radio');
+        } else if (candV && /remix|mix|line dance|dub|club|extended|karaoke/i.test(candV)) {
+          // Different remix than what was asked for -> penalize so real match wins
+          score -= 0.22;
+        }
+      } else {
+        // User asked for standard album track (no remix requested) -> prefer non-remix original
+        if (cand.version && /remix|line dance|dub|club mix|extended|karaoke|instrumental/i.test(cand.version)) {
+          score -= 0.20;
+        } else {
+          score += 0.12;
+        }
+      }
+      return { score, versionMatched };
     }
-    if (!isVarious && aSim < 0.45) return -1;
-    if (targetAlbum && albSim < 0.35) return -1;
-    return aSim * 0.55 + albSim * 0.45;
+
+    if (!isVarious && aSim < 0.45) return { score: -1, versionMatched: false };
+    if (targetAlbum && albSim < 0.35) return { score: -1, versionMatched: false };
+    return { score: aSim * 0.55 + albSim * 0.45, versionMatched: true };
   }
 
-  async function searchKeylessClip(artist, track, album, strictTrack = true) {
-    const isVarious = !artist || /^various(\s+artists)?$/i.test(artist.trim());
-    const cleanTrack = String(track || '').replace(/\(.*?\)|\[.*?\]/g, '').trim();
-    const queries = [];
-    if (cleanTrack) queries.push(isVarious ? cleanTrack : `${artist} ${cleanTrack}`);
-    else if (album) queries.push(isVarious ? album : `${artist} ${album}`);
-    if (!queries.length) return null;
+  async function queryApple(term, artist, rawTrack, album, strictTrack) {
+    try {
+      const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(term)}&media=music&entity=song&limit=20`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      const items = (data.results || []).filter(r => r.previewUrl);
+      if (!items.length) return null;
 
-    for (const term of queries) {
-      try {
-        const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(term)}&media=music&entity=song&limit=12`);
-        if (!res.ok) continue;
-        const data = await res.json();
-        const items = (data.results || []).filter(r => r.previewUrl);
-        if (!items.length) continue;
+      const best = items
+        .map(r => {
+          const ev = scoreAudioCandidate(r.artistName, r.trackName, r.collectionName, artist, rawTrack, album, strictTrack);
+          return { r, score: ev.score, versionMatched: ev.versionMatched };
+        })
+        .filter(x => x.score > 0)
+        .sort((a, b) => b.score - a.score)[0];
 
-        const best = items
-          .map(r => ({ r, score: scoreAudioCandidate(r.artistName, r.trackName, r.collectionName, artist, cleanTrack, album, strictTrack) }))
-          .filter(x => x.score > 0)
-          .sort((a, b) => b.score - a.score)[0];
-
-        if (best) return { previewUrl: best.r.previewUrl, trackName: best.r.trackName, artistName: best.r.artistName };
-      } catch (_) {}
-    }
-
-    for (const q of queries) {
-      const dz = await searchDeezerJSONP(q, artist, cleanTrack, album, strictTrack);
-      if (dz) return dz;
-    }
-    return null;
+      if (!best) return null;
+      return {
+        previewUrl: best.r.previewUrl,
+        trackName: best.r.trackName,
+        artistName: best.r.artistName,
+        score: best.score,
+        exactVersion: best.versionMatched
+      };
+    } catch (_) { return null; }
   }
 
-  function searchDeezerJSONP(query, artist, track, album, strictTrack) {
+  function queryDeezerJSONP(query, artist, rawTrack, album, strictTrack) {
     return new Promise((resolve) => {
       const cbName = '_dzcb_' + Math.random().toString(36).slice(2, 9);
       const script = document.createElement('script');
@@ -292,17 +347,70 @@
         const list = (payload?.data || []).filter(x => x.preview);
         if (!list.length) { resolve(null); return; }
         const best = list
-          .map(x => ({ x, score: scoreAudioCandidate(x.artist?.name, x.title, x.album?.title, artist, track, album, strictTrack) }))
+          .map(x => {
+            const ev = scoreAudioCandidate(x.artist?.name, x.title, x.album?.title, artist, rawTrack, album, strictTrack);
+            return { x, score: ev.score, versionMatched: ev.versionMatched };
+          })
           .filter(y => y.score > 0)
           .sort((a, b) => b.score - a.score)[0];
-        if (best) resolve({ previewUrl: best.x.preview, trackName: best.x.title, artistName: best.x.artist?.name || artist });
-        else resolve(null);
+        if (best) {
+          resolve({
+            previewUrl: best.x.preview,
+            trackName: best.x.title,
+            artistName: best.x.artist?.name || artist,
+            score: best.score,
+            exactVersion: best.versionMatched
+          });
+        } else resolve(null);
       };
 
       script.onerror = () => { cleanup(); resolve(null); };
-      script.src = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=10&output=jsonp&callback=${cbName}`;
+      script.src = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=15&output=jsonp&callback=${cbName}`;
       document.body.appendChild(script);
     });
+  }
+
+  async function searchKeylessClip(artist, track, album, strictTrack = true) {
+    const isVarious = !artist || /^various(\s+artists)?$/i.test(artist.trim());
+    const rawTrack = String(track || '').trim();
+    const { base, version } = splitTrackVersion(rawTrack);
+    const prefix = isVarious ? '' : `${artist} `;
+
+    const queries = [];
+    if (base && version) {
+      queries.push(`${prefix}${base} ${version}`.trim());
+      queries.push(`${prefix}${base}`.trim());
+    } else if (base) {
+      queries.push(`${prefix}${base}`.trim());
+    } else if (album) {
+      queries.push(`${prefix}${album}`.trim());
+    }
+    if (!queries.length) return null;
+
+    let bestOverall = null;
+    const consider = (cand) => {
+      if (!cand) return;
+      if (!bestOverall) { bestOverall = cand; return; }
+      if (cand.exactVersion && !bestOverall.exactVersion) { bestOverall = cand; return; }
+      if (cand.exactVersion === bestOverall.exactVersion && cand.score > bestOverall.score) bestOverall = cand;
+    };
+
+    // Pass 1: Specific version/remix query on Apple & (if needed) Deezer
+    const firstQ = queries[0];
+    consider(await queryApple(firstQ, artist, rawTrack, album, strictTrack));
+    if (bestOverall?.exactVersion) return bestOverall;
+
+    consider(await queryDeezerJSONP(firstQ, artist, rawTrack, album, strictTrack));
+    if (bestOverall?.exactVersion) return bestOverall;
+
+    // Pass 2: Base track fallback if exact cassette-only mix wasn't found
+    if (queries.length > 1) {
+      consider(await queryApple(queries[1], artist, rawTrack, album, strictTrack));
+      if (bestOverall?.exactVersion) return bestOverall;
+      consider(await queryDeezerJSONP(queries[1], artist, rawTrack, album, strictTrack));
+    }
+
+    return bestOverall;
   }
 
   CC.fetchAudioHighlight = searchKeylessClip;
