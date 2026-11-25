@@ -5,6 +5,31 @@
   CC.REDIRECT_URI = location.origin + location.pathname;
   CC.CFG_KEY = 'cratecheck_cfg_v1';
 
+  CC.MEDIA_GRADES = [
+    'Mint (M)',
+    'Near Mint (NM or M-)',
+    'Very Good Plus (VG+)',
+    'Very Good (VG)',
+    'Good Plus (G+)',
+    'Good (G)',
+    'Fair (F)',
+    'Poor (P)'
+  ];
+
+  CC.SLEEVE_GRADES = [
+    'Mint (M)',
+    'Near Mint (NM or M-)',
+    'Very Good Plus (VG+)',
+    'Very Good (VG)',
+    'Good Plus (G+)',
+    'Good (G)',
+    'Fair (F)',
+    'Poor (P)',
+    'Generic',
+    'Not Graded',
+    'No Cover'
+  ];
+
   CC.cfg = Object.assign({
     geminiKey: '',
     geminiModel: 'gemini-3.5-flash-lite',
@@ -14,6 +39,7 @@
     discogsUser: '',
     discogsFolderId: '1',
     discogsFolders: [{ id: 1, name: 'Uncategorized' }],
+    discogsFields: { media: 1, sleeve: 2, notes: 3 },
     homeCountry: 'US',
     fetchVgSuggestions: true,
     threshold: 20,
@@ -88,8 +114,8 @@
     return recentDCalls.length;
   };
 
-  CC.discogsFetch = (path, params = {}, method = 'GET') => new Promise((resolve, reject) => {
-    dQueue.push({ path, params, method, resolve, reject });
+  CC.discogsFetch = (path, params = {}, method = 'GET', body = null) => new Promise((resolve, reject) => {
+    dQueue.push({ path, params, method, body, resolve, reject });
     runDQueue();
   });
 
@@ -116,11 +142,17 @@
       recentDCalls.push(lastDCall);
       rateCb(recentDCalls.length);
 
-      const res = await fetch(url.toString(), { method: job.method });
+      const fetchOpts = { method: job.method };
+      if (job.body !== null && job.body !== undefined) {
+        fetchOpts.headers = { 'Content-Type': 'application/json' };
+        fetchOpts.body = JSON.stringify(job.body);
+      }
+
+      const res = await fetch(url.toString(), fetchOpts);
       if (res.status === 429) {
         statusCb('Discogs rate limit hit — waiting 60s...', true);
         await CC.sleep(60000);
-        const retry = await fetch(url.toString(), { method: job.method });
+        const retry = await fetch(url.toString(), fetchOpts);
         if (!retry.ok) throw new Error(`Discogs HTTP ${retry.status}`);
         job.resolve(await retry.json().catch(() => ({})));
       } else if (!res.ok) {
@@ -144,6 +176,30 @@
     const data = await CC.discogsFetch(`/releases/${releaseId}`);
     CC.releaseDetailCache.set(releaseId, data);
     return data;
+  };
+
+  // Push Media Condition, Sleeve Condition, and Notes to a Discogs Collection Instance
+  CC.syncDiscogsInstanceFields = async (folderId, releaseId, instanceId, mediaCond, sleeveCond, notes) => {
+    if (!CC.cfg.discogsUser || !releaseId || !instanceId) return 0;
+    const f = CC.cfg.discogsFields || { media: 1, sleeve: 2, notes: 3 };
+    const updates = [];
+    if (f.media && mediaCond) updates.push({ id: f.media, val: mediaCond });
+    if (f.sleeve && sleeveCond) updates.push({ id: f.sleeve, val: sleeveCond });
+    if (f.notes && notes) updates.push({ id: f.notes, val: notes });
+
+    let okCount = 0;
+    for (const u of updates) {
+      try {
+        await CC.discogsFetch(
+          `/users/${encodeURIComponent(CC.cfg.discogsUser)}/collection/folders/${encodeURIComponent(folderId)}/releases/${releaseId}/instances/${instanceId}/fields/${u.id}`,
+          {},
+          'POST',
+          { value: u.val }
+        );
+        okCount++;
+      } catch (_) {}
+    }
+    return okCount;
   };
 
   // ==================== GEMINI API ====================
@@ -196,14 +252,10 @@
     const isVarious = !artist || /^various(\s+artists)?$/i.test(artist.trim());
     const cleanTrack = String(track || '').replace(/\(.*?\)|\[.*?\]/g, '').trim();
     const queries = [];
-    if (cleanTrack) {
-      queries.push(isVarious ? cleanTrack : `${artist} ${cleanTrack}`);
-    } else if (album) {
-      queries.push(isVarious ? album : `${artist} ${album}`);
-    }
+    if (cleanTrack) queries.push(isVarious ? cleanTrack : `${artist} ${cleanTrack}`);
+    else if (album) queries.push(isVarious ? album : `${artist} ${album}`);
     if (!queries.length) return null;
 
-    // 1. Keyless Apple Search API (direct CORS, 30s M4A clip, no account needed)
     for (const term of queries) {
       try {
         const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(term)}&media=music&entity=song&limit=12`);
@@ -217,17 +269,10 @@
           .filter(x => x.score > 0)
           .sort((a, b) => b.score - a.score)[0];
 
-        if (best) {
-          return {
-            previewUrl: best.r.previewUrl,
-            trackName: best.r.trackName,
-            artistName: best.r.artistName
-          };
-        }
+        if (best) return { previewUrl: best.r.previewUrl, trackName: best.r.trackName, artistName: best.r.artistName };
       } catch (_) {}
     }
 
-    // 2. Fallback: Deezer JSONP (keyless 30s MP3 clip)
     for (const q of queries) {
       const dz = await searchDeezerJSONP(q, artist, cleanTrack, album, strictTrack);
       if (dz) return dz;
@@ -240,12 +285,7 @@
       const cbName = '_dzcb_' + Math.random().toString(36).slice(2, 9);
       const script = document.createElement('script');
       const timer = setTimeout(() => { cleanup(); resolve(null); }, 4500);
-
-      function cleanup() {
-        clearTimeout(timer);
-        delete window[cbName];
-        if (script.parentNode) script.parentNode.removeChild(script);
-      }
+      function cleanup() { clearTimeout(timer); delete window[cbName]; if (script.parentNode) script.parentNode.removeChild(script); }
 
       window[cbName] = (payload) => {
         cleanup();
@@ -255,10 +295,8 @@
           .map(x => ({ x, score: scoreAudioCandidate(x.artist?.name, x.title, x.album?.title, artist, track, album, strictTrack) }))
           .filter(y => y.score > 0)
           .sort((a, b) => b.score - a.score)[0];
-
-        if (best) {
-          resolve({ previewUrl: best.x.preview, trackName: best.x.title, artistName: best.x.artist?.name || artist });
-        } else resolve(null);
+        if (best) resolve({ previewUrl: best.x.preview, trackName: best.x.title, artistName: best.x.artist?.name || artist });
+        else resolve(null);
       };
 
       script.onerror = () => { cleanup(); resolve(null); };

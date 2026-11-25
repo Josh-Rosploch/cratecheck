@@ -7,12 +7,12 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>CrateCheck — Media Scanner</title>
-  <link rel="stylesheet" href="style.css?v=1.3" />
+  <link rel="stylesheet" href="style.css?v=1.5" />
 </head>
 <body>
 
 <header>
-  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.3</span></div>
+  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.5</span></div>
   <div class="status-pills">
     <span id="ratePill" class="pill" title="Discogs API sliding window (max 50/min)">API 0/50</span>
     <span id="spotifyPill" class="pill">Spotify: Off</span>
@@ -38,18 +38,18 @@
       <button class="seg-btn" data-fmt="Vinyl">Vinyl</button>
     </div>
 
-    <!-- Staged Capture Card -->
+    <!-- Staged Capture Card (Side A/Front + Side B/Back + UPC) -->
     <div class="card">
       <input id="camStage" class="hidden-file" type="file" accept="image/*" capture="environment" />
 
       <div class="btn-row-3" style="margin-top:0;">
-        <button class="btn btn-secondary" style="min-height:54px; flex-direction:column; gap:2px; font-size:0.82rem;" onclick="document.getElementById('camStage').click()">
-          <span style="font-size:1.25rem;">📷</span><span>Add Photo</span>
+        <button id="btnAddPhoto" class="btn btn-secondary stage-btn" onclick="document.getElementById('camStage').click()">
+          <span style="font-size:1.25rem;">📷</span><span id="btnAddPhotoLabel">Front / Side A</span>
         </button>
-        <button class="btn btn-secondary" style="min-height:54px; flex-direction:column; gap:2px; font-size:0.82rem;" onclick="openBarcodeScanner()">
+        <button class="btn btn-secondary stage-btn" onclick="openBarcodeScanner()">
           <span style="font-size:1.25rem;">║▌</span><span>Scan UPC</span>
         </button>
-        <button class="btn btn-secondary" style="min-height:54px; flex-direction:column; gap:2px; font-size:0.82rem;" onclick="toggleManualEntry()">
+        <button class="btn btn-secondary stage-btn" onclick="toggleManualEntry()">
           <span style="font-size:1.25rem;">⌨️</span><span>Type Info</span>
         </button>
       </div>
@@ -67,16 +67,6 @@
           Clear
         </button>
       </div>
-    </div>
-
-    <!-- Floating / Inline Audio Highlight Bar (plays even while scanning!) -->
-    <div id="audioBar" class="audio-bar hidden">
-      <button id="audioPlayBtn" class="audio-play-btn" onclick="toggleHighlightAudio()">▶</button>
-      <div class="audio-meta">
-        <div id="audioTitle" class="audio-title">Loading 30s highlight...</div>
-        <div class="audio-progress-wrap"><div id="audioProgress" class="audio-progress"></div></div>
-      </div>
-      <div id="audioExtLinks" class="inline-actions" style="gap:4px;"></div>
     </div>
 
     <div id="statusBanner" class="status-banner">
@@ -131,17 +121,17 @@
 
       <div class="link-row" id="inspLinks"></div>
 
-      <!-- Spotify Taste, Test Song & Feedback -->
+      <!-- Taste, Cultural Significance & Notable Songs -->
       <div class="taste-box">
         <div class="taste-header">
-          <strong style="font-size:0.9rem;">🎧 Taste &amp; Test Song</strong>
+          <strong style="font-size:0.92rem;">🎧 Taste &amp; Cultural Check</strong>
           <span class="taste-score" id="tasteScore">...</span>
         </div>
         <div id="tasteLocalBadges" style="margin-bottom:6px;"></div>
-        <div id="tasteBody" style="font-size:0.86rem; color:#e2e8f0;">Analyzing against your Spotify &amp; ratings...</div>
-        <div id="tasteHits" style="margin-top:8px; font-size:0.82rem; color:#cbd5e1;"></div>
+        <div id="tasteBody" style="font-size:0.87rem; color:#e2e8f0;">Analyzing against your Spotify &amp; ratings...</div>
+        <div id="culturalBox" class="cultural-box hidden"></div>
+        <div id="tasteHits" style="margin-top:10px; font-size:0.84rem; color:#cbd5e1;"></div>
 
-        <!-- Feedback Loop -->
         <div id="tasteVoteRow" class="vote-row hidden">
           <span style="font-size:0.78rem; color:var(--muted); font-weight:600;">Like this vibe?</span>
           <div class="inline-actions" style="gap:6px;">
@@ -151,15 +141,42 @@
         </div>
       </div>
 
-      <details id="pressingNotesDetails" class="hidden" style="margin-bottom:8px;">
-        <summary>🔎 Discogs Pressing Notes</summary>
-        <div class="notes-box" id="inspNotes"></div>
-      </details>
+      <!-- Full Open Tracklist (No Dropdown!) -->
+      <div class="section-block">
+        <div class="section-heading">🎵 Tracklist (<span id="trackCount">0</span>)</div>
+        <div class="tracklist-open" id="inspTracklist"></div>
+      </div>
 
-      <details id="tracklistDetails">
-        <summary>🎵 Tracklist (<span id="trackCount">0</span>)</summary>
-        <div class="tracklist" id="inspTracklist"></div>
-      </details>
+      <!-- Full Open Pressing Notes (No Dropdown!) -->
+      <div id="pressingNotesCard" class="section-block hidden">
+        <div class="section-heading">🔎 Pressing Notes &amp; Identifiers</div>
+        <div class="notes-box" id="inspNotes"></div>
+      </div>
+
+      <!-- AI Discogs Grading & Voice-Type Notes -->
+      <div class="grade-box">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px;">
+          <strong style="font-size:0.92rem;">🏷️ Discogs Grading &amp; Notes</strong>
+          <span id="aiGradeHint" class="badge badge-purple" style="margin:0;">AI Estimate</span>
+        </div>
+        <div class="field-grid" style="margin-bottom:8px;">
+          <div>
+            <label class="field-label">Media Condition</label>
+            <select id="gMediaCond"></select>
+          </div>
+          <div>
+            <label class="field-label">Sleeve / Case Condition</label>
+            <select id="gSleeveCond"></select>
+          </div>
+        </div>
+        <div>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+            <label class="field-label" style="margin:0;">Condition / Listing Notes</label>
+            <button id="btnDictateScan" type="button" class="btn btn-secondary btn-sm dictate-btn" onclick="startDictation('gNotes', 'btnDictateScan')">🎤 Voice Memo</button>
+          </div>
+          <textarea id="gNotes" rows="2" placeholder="Tap 🎤 or keyboard mic: e.g. plays sluggish, missing pressure pad, cracked case..."></textarea>
+        </div>
+      </div>
 
       <div style="margin-top:12px; display:flex; flex-direction:column; gap:8px;">
         <button id="btnSaveBoth" class="btn btn-green" onclick="saveCurrentItem(true)">
@@ -180,7 +197,7 @@
       </button>
     </div>
 
-    <!-- Discogs Candidates (Hidden by default unless needed or expanded) -->
+    <!-- Discogs Candidates (Hidden unless needed or expanded) -->
     <div id="candidatesCard" class="card hidden">
       <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px;">
         <h3 style="margin:0;">Other Discogs Matches (<span id="candCount">0</span>)</h3>
@@ -192,7 +209,7 @@
     <!-- Scanned Details (Collapsed unless typing manually or tweaking) -->
     <div id="extractCard" class="card hidden">
       <details id="extractDetails">
-        <summary>✏️ Edit Details / Re-Search</summary>
+        <summary>✏️ Edit Scanned Metadata / Re-Search</summary>
         <div style="margin-top:10px;">
           <div class="field-grid">
             <div class="field-full">
@@ -223,13 +240,9 @@
               <label class="field-label">Year</label>
               <input id="fYear" type="text" placeholder="e.g., 1982" />
             </div>
-            <div>
+            <div class="field-full">
               <label class="field-label">Label</label>
               <input id="fLabel" type="text" placeholder="e.g., MCA Records" />
-            </div>
-            <div>
-              <label class="field-label">Condition / Notes</label>
-              <input id="fNote" type="text" placeholder="Standard / Loose shell" />
             </div>
           </div>
           <div id="detectedCluesLine" style="font-size:0.76rem; color:var(--muted); margin-top:8px;"></div>
@@ -249,7 +262,7 @@
         <h2 style="margin:0;">My Local Stash</h2>
         <span id="stashStats" class="pill">0 items</span>
       </div>
-      <input id="stashSearch" type="text" placeholder="Search artist, title, cat#, tracks, notes..." oninput="renderStash()" style="margin-bottom:10px;" />
+      <input id="stashSearch" type="text" placeholder="Search artist, title, cat#, songs, notes..." oninput="renderStash()" style="margin-bottom:10px;" />
       <div class="chip-row" id="stashFilters">
         <button class="chip active" data-filter="all">All</button>
         <button class="chip" data-filter="Cassette">Cassette</button>
@@ -257,6 +270,7 @@
         <button class="chip" data-filter="Vinyl">Vinyl</button>
         <button class="chip" data-filter="highvalue">🔥 Value / Scarce</button>
         <button class="chip" data-filter="keep">🎧 Taste 7+</button>
+        <button class="chip" data-filter="iconic">🏛️ Iconic</button>
         <button class="chip" data-filter="localonly">Local Only</button>
       </div>
       <div class="btn-row" style="margin-top:0;">
@@ -279,14 +293,14 @@
         <label class="field-label">Gemini Model</label>
         <select id="cfgGeminiModel">
           <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Fast &amp; Cheap Default)</option>
-          <option value="gemini-3.8-flash">gemini-3.8-flash (Sharpest OCR &amp; Variant Detective)</option>
+          <option value="gemini-3.8-flash">gemini-3.8-flash (Sharpest OCR &amp; Grading)</option>
           <option value="gemini-3.6-flash">gemini-3.6-flash (Balanced)</option>
         </select>
       </div>
       <div class="toggle-row">
         <div>
-          <div style="font-size:0.9rem; font-weight:600;">🔊 Auto-Play 30s Song Highlight</div>
-          <div style="font-size:0.76rem; color:var(--muted);">Plays a 30s clip right in the app during/after scanning (doesn't interrupt Spotify)</div>
+          <div style="font-size:0.9rem; font-weight:600;">🔊 Auto-Play 30s Test Song</div>
+          <div style="font-size:0.76rem; color:var(--muted);">Plays a 30s clip in the floating bar without interrupting Spotify</div>
         </div>
         <input id="cfgAutoPlay" type="checkbox" style="width:22px; height:22px;" />
       </div>
@@ -384,7 +398,7 @@
 
     <div class="card">
       <h2>4. Data Backup &amp; Restore</h2>
-      <p>Export a JSON backup after big scanning sessions (includes photos, stash, Spotify sync &amp; 👍/👎 ratings).</p>
+      <p>Export a JSON backup after big scanning sessions (includes photos, grades, stash, Spotify sync &amp; 👍/👎 ratings).</p>
       <div class="btn-row">
         <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="exportJSON()">⬇️ Export JSON</button>
         <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="document.getElementById('jsonRestoreInput').click()">⬆️ Restore JSON</button>
@@ -396,20 +410,21 @@
   <!-- ==================== SETUP GUIDE VIEW ==================== -->
   <section id="view-guide" class="view">
     <div class="card">
-      <h2>Fast Workflow &amp; Setup</h2>
+      <h2>Best Cataloging Workflow &amp; Setup</h2>
       <div class="guide-step">
-        <h3>Recommended Fast Scanning Loop</h3>
+        <h3>Recommended 2-Photo + UPC Loop</h3>
         <ol>
-          <li>Tap <strong>📷 Add Photo</strong> once or twice (shell + case) and/or tap <strong>║▌ Scan UPC</strong>. Nothing searches yet.</li>
-          <li>Tap <strong>🔍 Search &amp; Analyze</strong> once — the 30-second highlight clip starts playing while AI locks onto the exact Discogs pressing and checks your taste.</li>
-          <li>Vote <strong>👍 / 👎</strong> if you want to train future recommendations, then tap <strong>Confirm &amp; Add</strong> or <strong>Check Only / Next</strong>.</li>
+          <li>Lay cassette Side A next to front of box → tap <strong>📷 Front / Side A</strong>.</li>
+          <li>Flip both over (Side B + back of box) → tap <strong>📷 Back / Side B</strong>.</li>
+          <li>Tap <strong>║▌ Scan UPC</strong> if there's a barcode, then tap <strong>🔍 Search &amp; Analyze</strong>.</li>
+          <li>Listen to the Test Song in the bottom mini-player, tweak AI's Media/Sleeve grades or tap <strong>🎤 Voice Memo</strong> to add playback flaws, and hit <strong>Confirm &amp; Add</strong>.</li>
         </ol>
       </div>
       <div class="guide-step">
         <h3>API Setup Links</h3>
         <ol>
           <li><strong>Gemini Key:</strong> <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> → Create API Key → paste in Settings → Test.</li>
-          <li><strong>Discogs Token:</strong> <a href="https://www.discogs.com/settings/developers" target="_blank" rel="noopener">discogs.com/settings/developers</a> → Generate token → Verify in Settings.</li>
+          <li><strong>Discogs Token:</strong> <a href="https://www.discogs.com/settings/developers" target="_blank" rel="noopener">discogs.com/settings/developers</a> → Generate token → tap <strong>Verify Account &amp; Load Folders</strong> (also maps your Media/Sleeve/Notes fields).</li>
           <li><strong>Spotify Client ID:</strong> <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a> → check only <strong>Web API</strong> → paste this Redirect URI:
             <div class="code-copy">
               <span id="guideRedirectUri" style="flex:1;"></span>
@@ -422,7 +437,25 @@
   </section>
 </main>
 
-<!-- Persistent Audio Element (unlocked on Search click for Android autoplay) -->
+<!-- Stash Full Detail Overlay -->
+<div id="stashDetailModal" class="detail-overlay hidden">
+  <div class="detail-header">
+    <button class="btn btn-secondary btn-sm" onclick="closeStashDetail()">← Back</button>
+    <div id="sdHeaderTitle" class="detail-header-title">Details</div>
+  </div>
+  <div id="sdBody" class="detail-body"></div>
+</div>
+
+<!-- Floating 30s Audio Mini-Player (Fixed Above Bottom Nav) -->
+<div id="audioBar" class="audio-bar hidden">
+  <button id="audioPlayBtn" class="audio-play-btn" onclick="toggleHighlightAudio()">▶</button>
+  <div class="audio-meta">
+    <div id="audioTitle" class="audio-title">Loading 30s highlight...</div>
+    <div class="audio-progress-wrap"><div id="audioProgress" class="audio-progress"></div></div>
+  </div>
+  <div id="audioExtLinks" class="inline-actions" style="gap:4px;"></div>
+  <button class="audio-close-btn" onclick="stopHighlightAudio()" title="Stop &amp; Close">✕</button>
+</div>
 <audio id="previewAudio" preload="none" playsinline></audio>
 
 <!-- Live UPC Barcode Scanner Modal -->
@@ -447,7 +480,7 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="apis.js?v=1.3.1"></script>
-<script src="app.js?v=1.3.1"></script>
+<script src="apis.js?v=1.5"></script>
+<script src="app.js?v=1.5"></script>
 </body>
 </html>
