@@ -21,7 +21,7 @@
   let activeFormat = 'Auto';
   let activeStashFilter = 'all';
 
-  let stagedPhotos = []; // [{ apiB64, thumbWebp }]
+  let stagedPhotos = [];
   let stagedUpc = '';
   let currentExtracted = null;
   let currentCandidates = [];
@@ -36,6 +36,7 @@
   let barcodeRaf = null;
   let activeClipKey = '';
   let scanRunId = 0;
+  let clipReqId = 0;
 
   // ==================== UI HELPERS ====================
   function toast(msg, ms = 2800) {
@@ -96,17 +97,28 @@
   // ==================== 30s AUDIO HIGHLIGHT PLAYER ====================
   const audioEl = document.getElementById('previewAudio');
 
-  function unlockAudioForAutoplay() {
-    if (!cfg.autoPlayHighlight) return;
+  function unlockAudioForAutoplay(force = false) {
+    if (!force && !cfg.autoPlayHighlight) return;
     try {
-      audioEl.pause();
+      audioEl.muted = true;
       audioEl.src = SILENT_WAV;
       const p = audioEl.play();
-      if (p && p.then) p.then(() => { audioEl.pause(); audioEl.currentTime = 0; }).catch(() => {});
-    } catch (_) {}
+      if (p && p.then) {
+        p.then(() => {
+          if (audioEl.src === SILENT_WAV) {
+            audioEl.pause();
+            audioEl.currentTime = 0;
+          }
+          audioEl.muted = false;
+        }).catch(() => { audioEl.muted = false; });
+      } else {
+        audioEl.muted = false;
+      }
+    } catch (_) { audioEl.muted = false; }
   }
 
   function stopHighlightAudio() {
+    clipReqId++;
     try { audioEl.pause(); audioEl.removeAttribute('src'); audioEl.load(); } catch (_) {}
     activeClipKey = '';
     document.getElementById('audioBar').classList.add('hidden');
@@ -116,60 +128,84 @@
 
   window.toggleHighlightAudio = () => {
     if (!audioEl.src || audioEl.src === SILENT_WAV) return;
+    audioEl.muted = false;
     if (audioEl.paused) {
-      audioEl.play().catch(() => toast('Tap play again to start audio'));
+      audioEl.play().catch(() => toast('Tap ▶ again to start audio'));
     } else {
       audioEl.pause();
     }
   };
 
-  audioEl.addEventListener('play', () => { document.getElementById('audioPlayBtn').textContent = '⏸'; });
+  audioEl.addEventListener('play', () => {
+    if (audioEl.src !== SILENT_WAV) document.getElementById('audioPlayBtn').textContent = '⏸';
+  });
   audioEl.addEventListener('pause', () => { document.getElementById('audioPlayBtn').textContent = '▶'; });
   audioEl.addEventListener('ended', () => {
     document.getElementById('audioPlayBtn').textContent = '▶';
     document.getElementById('audioProgress').style.width = '0%';
   });
   audioEl.addEventListener('timeupdate', () => {
-    if (audioEl.duration && isFinite(audioEl.duration)) {
+    if (audioEl.src !== SILENT_WAV && audioEl.duration && isFinite(audioEl.duration)) {
       document.getElementById('audioProgress').style.width = `${Math.min(100, (audioEl.currentTime / audioEl.duration) * 100)}%`;
     }
   });
 
-  async function loadHighlightClip(artist, track, album, myRunId, forceReplace = false) {
+  async function loadHighlightClip(artist, track, album, myRunId, opts = {}) {
+    const { forceReplace = true, forcePlay = cfg.autoPlayHighlight, strictTrack = true, notifyUser = false } = opts;
     if (!artist && !track && !album) return;
-    const key = norm(`${artist}|${track || album}`);
-    if (!forceReplace && activeClipKey && !audioEl.paused) return;
-    if (key === activeClipKey && audioEl.src && audioEl.src !== SILENT_WAV) return;
 
+    const key = norm(`${artist}|${track || album}`);
+    if (key === activeClipKey && audioEl.src && audioEl.src !== SILENT_WAV) {
+      if (forcePlay) {
+        audioEl.muted = false;
+        audioEl.currentTime = 0;
+        audioEl.play().catch(() => {});
+        if (notifyUser) toast(`▶ Replaying: ${track || album}`);
+      }
+      return;
+    }
+    if (!forceReplace && activeClipKey && !audioEl.paused) return;
+
+    const myClipReq = ++clipReqId;
     const bar = document.getElementById('audioBar');
     const titleEl = document.getElementById('audioTitle');
     const linksEl = document.getElementById('audioExtLinks');
-    const ytQ = encodeURIComponent(`${artist} ${track || album}`.trim());
-    const spQ = encodeURIComponent(`${artist} ${track || album}`.trim());
+    const labelTarget = track || album;
+    const searchQ = encodeURIComponent(`${artist} ${labelTarget}`.trim());
 
     bar.classList.remove('hidden');
-    titleEl.textContent = `Finding 30s highlight: ${track || album}...`;
+    document.getElementById('audioPlayBtn').textContent = '…';
+    document.getElementById('audioProgress').style.width = '0%';
+    titleEl.textContent = `Finding 30s clip: ${labelTarget}...`;
     linksEl.innerHTML = `
-      <a class="btn btn-secondary btn-sm" style="padding:5px 8px;" target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${ytQ}">▶ YT</a>
-      <a class="btn btn-secondary btn-sm" style="padding:5px 8px;" target="_blank" rel="noopener" href="https://open.spotify.com/search/${spQ}">🎧</a>
+      <a class="btn btn-secondary btn-sm" style="padding:5px 8px;" target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${searchQ}">▶ YT</a>
+      <a class="btn btn-secondary btn-sm" style="padding:5px 8px;" target="_blank" rel="noopener" href="https://open.spotify.com/search/${searchQ}">🎧</a>
     `;
+    if (notifyUser) toast(`🎵 Loading clip: ${labelTarget}...`, 1800);
 
-    const clip = await CC.fetchAudioHighlight(artist, track, album);
-    if (myRunId !== scanRunId) return;
+    const clip = await CC.fetchAudioHighlight(artist, track, album, strictTrack);
+    if (myRunId !== scanRunId || myClipReq !== clipReqId) return;
 
     if (!clip) {
-      titleEl.textContent = `No 30s stream found for "${track || album}" — try ▶ YT`;
+      activeClipKey = '';
+      try { audioEl.pause(); audioEl.removeAttribute('src'); } catch (_) {}
+      titleEl.textContent = `No 30s clip for "${labelTarget}" — tap ▶ YT`;
       document.getElementById('audioPlayBtn').textContent = '—';
+      if (notifyUser) toast(`No 30s stream for "${labelTarget}" — try ▶ YT`, 3200);
       return;
     }
 
     activeClipKey = key;
     titleEl.textContent = `🎵 ${clip.trackName} — ${clip.artistName}`;
+    audioEl.muted = false;
     audioEl.src = clip.previewUrl;
+    audioEl.load();
     audioEl.currentTime = 0;
 
-    if (cfg.autoPlayHighlight) {
-      audioEl.play().catch(() => {
+    if (forcePlay) {
+      audioEl.play().then(() => {
+        if (notifyUser) toast(`▶ Playing: ${clip.trackName}`, 2200);
+      }).catch(() => {
         document.getElementById('audioPlayBtn').textContent = '▶';
         titleEl.textContent = `Tap ▶ for 30s clip: ${clip.trackName}`;
       });
@@ -178,7 +214,7 @@
     }
   }
 
-  // ==================== PHOTO & UPC STAGING (ZERO API CALLS UNTIL SEARCH) ====================
+  // ==================== PHOTO & UPC STAGING ====================
   function compressImage(file, maxDim, mime, quality) {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -268,7 +304,7 @@
     document.getElementById('fCatno').focus();
   };
 
-  // ==================== LIVE UPC SCANNER (STAGES ONLY, DOES NOT AUTO-SEARCH) ====================
+  // ==================== LIVE UPC SCANNER ====================
   window.openBarcodeScanner = async () => {
     if (!('BarcodeDetector' in window) || !navigator.mediaDevices?.getUserMedia) {
       toast('Live UPC scanner not supported here — snap a photo of the barcode instead!', 3500);
@@ -322,12 +358,12 @@
     document.getElementById('barcodeModal').classList.add('hidden');
   };
 
-  // ==================== SINGLE-BUTTON SEARCH & ANALYZE PIPELINE ====================
+  // ==================== SINGLE-BUTTON SEARCH & ANALYZE ====================
   window.runFullScan = async () => {
     scanRunId++;
     const myRunId = scanRunId;
     stopHighlightAudio();
-    unlockAudioForAutoplay();
+    unlockAudioForAutoplay(false);
 
     document.getElementById('inspectorCard').classList.add('hidden');
     document.getElementById('detectiveCard').classList.add('hidden');
@@ -361,7 +397,6 @@ Return ONLY valid JSON:
   "club_edition": "None" | "CRC" | "BMG" | "Unknown",
   "physical_details": "plain-English description of visible physical features (plastic shell color, paper label vs printed directly on plastic, numbers inside the little tape window like 100-50-0, cover colors, club logos)",
   "condition_note": "short note like 'Loose cassette shell' or 'Standard'",
-  "signature_song": "the single most famous or representative song on this album if you recognize it (so we can play a 30s highlight immediately), else empty string",
   "visible_tracks": ["any song titles visible in the photos"]
 }`;
 
@@ -393,12 +428,6 @@ Return ONLY valid JSON:
       document.getElementById('extractCard').classList.remove('hidden');
       document.getElementById('extractDetails').open = false;
       speakText(`${ext.artists?.[0] || ''} ${ext.album_title || ''}`);
-
-      // Kick off 30s highlight immediately while Discogs searches!
-      const leadArtist = Array.isArray(ext.artists) ? ext.artists[0] : (ext.artists || '');
-      if (leadArtist && (ext.signature_song || ext.album_title)) {
-        loadHighlightClip(leadArtist, ext.signature_song || '', ext.album_title || '', myRunId, false);
-      }
       return true;
     } catch (err) {
       setStatus('', false);
@@ -502,7 +531,7 @@ Return ONLY valid JSON:
         .sort((a, b) => b._check.score - a._check.score).slice(0, 6);
 
       currentCandidates = ranked;
-      renderCandidates(false); // keep hidden by default!
+      renderCandidates(false);
 
       if (ranked.length === 0) {
         setStatus('', false);
@@ -666,7 +695,6 @@ Return ONLY valid JSON:
       }
     } catch (err) {
       setStatus('', false);
-      // Fallback: inspect top ranked match so user isn't stalled
       await inspectCandidate(0, myRunId);
     }
   };
@@ -707,6 +735,7 @@ Return ONLY valid JSON:
   window.answerDetective = async (optIdx) => {
     const opt = (window._detectiveOptions || [])[optIdx];
     if (!opt) return;
+    unlockAudioForAutoplay(false);
     const ids = (opt.matching_ids || []).filter(id => currentCandidates.some(c => c.id === id));
 
     if (ids.length === 1) {
@@ -768,6 +797,10 @@ Return ONLY valid JSON:
       if (release.notes) notesParts.push('\nNotes:\n' + release.notes);
       if (release.identifiers?.length) notesParts.push('\nIdentifiers:\n' + release.identifiers.map(x => `• ${x.type}: ${x.value}`).join('\n'));
 
+      const prevAlbumKey = currentInspected ? `${norm(currentInspected.artist)}|${norm(currentInspected.title)}` : '';
+      const nextAlbumKey = `${norm(artistName)}|${norm(albumTitle)}`;
+      if (prevAlbumKey && prevAlbumKey !== nextAlbumKey) stopHighlightAudio();
+
       currentInspected = {
         discogs_id: release.id, title: albumTitle, artist: artistName, catno, format,
         year: release.year || cand.year || '', label, country: release.country || cand.country || '',
@@ -782,7 +815,6 @@ Return ONLY valid JSON:
         spotify_matches: { artistHit: false, matchedTracks: [] }
       };
 
-      // Keep candidates panel hidden unless user explicitly opened it
       renderCandidates(false);
       renderInspector(currentInspected, true);
       setStatus('', false);
@@ -800,6 +832,9 @@ Return ONLY valid JSON:
     const title = document.getElementById('fTitle').value.trim() || 'Untitled Release';
     const artist = document.getElementById('fArtist').value.trim() || 'Unknown Artist';
     const tracks = (currentExtracted?.visible_tracks || []).map((t, i) => ({ pos: String(i + 1), title: t }));
+
+    stopHighlightAudio();
+    unlockAudioForAutoplay(false);
 
     currentInspected = {
       discogs_id: null, title, artist,
@@ -862,7 +897,6 @@ Return ONLY valid JSON:
     saveBtn.textContent = !hasDiscogs ? 'Not on Discogs (Use Save Local Only below)'
       : (!cfg.discogsUser ? 'Verify Discogs in Settings to Enable Save' : '✅ Confirm & Add to Discogs + Local Stash');
 
-    // Local Spotify match
     const localMatch = checkLocalSpotify(item);
     item.spotify_matches = localMatch;
     renderTracklist(item.tracklist, localMatch.matchedTracks);
@@ -883,25 +917,39 @@ Return ONLY valid JSON:
     document.getElementById('trackCount').textContent = tracks.length;
     const el = document.getElementById('inspTracklist');
     if (!tracks.length) { el.innerHTML = `<div style="color:var(--muted);">No tracklist available.</div>`; return; }
-    el.innerHTML = tracks.map(t => {
+    el.innerHTML = tracks.map((t, i) => {
       const hit = mSet.has(norm(t.title));
       return `<div class="track-row ${hit ? 'track-hit' : ''}">
         <span>${esc(t.pos ? t.pos + ' · ' : '')}${esc(t.title)}</span>
         <div class="inline-actions" style="gap:4px;">
           ${hit ? '<span class="badge badge-green" style="margin:0;">In Spotify</span>' : ''}
-          <button class="btn btn-secondary btn-sm" style="min-height:26px; padding:2px 7px; font-size:0.72rem;" onclick="previewSpecificTrack(${JSON.stringify(t.title)})">▶</button>
+          <button type="button" class="btn btn-secondary btn-sm" style="min-height:28px; padding:3px 9px; font-size:0.74rem;" onclick="previewTrackByIndex(${i})">▶</button>
         </div>
       </div>`;
     }).join('');
   }
 
-  window.previewSpecificTrack = (trackTitle) => {
-    if (!currentInspected) return;
-    unlockAudioForAutoplay();
-    const prevAuto = cfg.autoPlayHighlight;
-    cfg.autoPlayHighlight = true;
-    loadHighlightClip(currentInspected.artist, trackTitle, currentInspected.title, scanRunId, true)
-      .finally(() => { cfg.autoPlayHighlight = prevAuto; });
+  window.previewTrackByIndex = (idx) => {
+    const track = currentInspected?.tracklist?.[idx];
+    if (!track || !track.title) return;
+    unlockAudioForAutoplay(true);
+    loadHighlightClip(currentInspected.artist, track.title, currentInspected.title, scanRunId, {
+      forceReplace: true,
+      forcePlay: true,
+      strictTrack: true,
+      notifyUser: true
+    });
+  };
+
+  window.previewLitmusTrack = () => {
+    if (!currentInspected?.litmus_track) return;
+    unlockAudioForAutoplay(true);
+    loadHighlightClip(currentInspected.artist, currentInspected.litmus_track, currentInspected.title, scanRunId, {
+      forceReplace: true,
+      forcePlay: true,
+      strictTrack: true,
+      notifyUser: true
+    });
   };
 
   function checkLocalSpotify(item) {
@@ -971,7 +1019,10 @@ Return ONLY valid JSON:
 
     let hitsHtml = '';
     if (item.litmus_track) {
-      hitsHtml += `<div style="margin-bottom:5px;"><strong>🎧 Test Song:</strong> ${esc(item.litmus_track)}</div>`;
+      hitsHtml += `<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px;">
+        <span><strong>🎧 Test Song:</strong> ${esc(item.litmus_track)}</span>
+        <button type="button" class="btn btn-secondary btn-sm" style="min-height:28px; padding:3px 10px; font-size:0.76rem;" onclick="previewLitmusTrack()">▶ Play</button>
+      </div>`;
     }
     if (item.notable_songs.length) {
       hitsHtml += `<strong>⭐ Notable Songs:</strong><br>` + item.notable_songs.map(s => `• ${esc(s)}`).join('<br>');
@@ -979,9 +1030,21 @@ Return ONLY valid JSON:
     document.getElementById('tasteHits').innerHTML = hitsHtml || `<span style="color:var(--muted);">No major mainstream hits identified.</span>`;
     renderVoteState(item);
 
-    // Load 30s highlight if nothing is playing yet (e.g. UPC-only scan or album Gemini didn't recognize by cover)
-    if (item.litmus_track || item.title) {
-      loadHighlightClip(item.artist, item.litmus_track, item.title, myRunId, false);
+    // Play the exact recommended Test Song from the real tracklist
+    if (item.litmus_track) {
+      loadHighlightClip(item.artist, item.litmus_track, item.title, myRunId, {
+        forceReplace: true,
+        forcePlay: cfg.autoPlayHighlight,
+        strictTrack: true,
+        notifyUser: false
+      });
+    } else if (item.title) {
+      loadHighlightClip(item.artist, '', item.title, myRunId, {
+        forceReplace: true,
+        forcePlay: cfg.autoPlayHighlight,
+        strictTrack: false,
+        notifyUser: false
+      });
     }
   }
 
@@ -1012,7 +1075,7 @@ Return ONLY valid JSON:
 {
   "score": 1 to 10 integer,
   "verdict": "KEEP" | "LISTEN" | "SELL / SKIP",
-  "litmus_track": "exact title of the single best/most famous track from the tracklist to play a 30s clip of",
+  "litmus_track": "exact title from the Tracklist above of the single best/most famous track to play a 30s clip of",
   "summary": "1-2 punchy sentences speaking directly to 'you', referencing your Spotify artists or past 👍/👎 ratings when relevant.",
   "notable_songs": ["Track Name — short reason it's recognizable (max 3 items, or empty array)"]
 }`;
@@ -1364,7 +1427,6 @@ Return ONLY valid JSON:
       e.target.value = '';
     });
 
-    // Handle Spotify OAuth return
     const p = new URLSearchParams(location.search);
     if (p.get('error')) { history.replaceState({}, '', location.pathname); toast('Spotify login cancelled'); }
     else if (p.get('code')) {

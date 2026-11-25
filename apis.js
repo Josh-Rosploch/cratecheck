@@ -173,29 +173,51 @@
     }
   };
 
-  // ==================== KEYLESS 30s AUDIO HIGHLIGHT FETCHER ====================
-  async function searchKeylessClip(artist, track, album) {
-    const queries = [];
-    if (artist && track) queries.push(`${artist} ${track}`);
-    if (artist && album) queries.push(`${artist} ${album}`);
+  // ==================== STRICT 30s AUDIO HIGHLIGHT FETCHER ====================
+  function scoreAudioCandidate(candArtist, candTrack, candAlbum, targetArtist, targetTrack, targetAlbum, strictTrack) {
+    const isVarious = !targetArtist || /^various(\s+artists)?$/i.test(targetArtist.trim());
+    const aSim = isVarious ? 0.7 : CC.similarity(targetArtist, candArtist || '');
+    const tSim = targetTrack ? CC.similarity(targetTrack, candTrack || '') : 0;
+    const albSim = targetAlbum ? CC.similarity(targetAlbum, candAlbum || '') : 0;
+    const isTribute = /karaoke|tribute|cover band|lullaby|in the style of/i.test(`${candArtist} ${candAlbum} ${candTrack}`);
 
-    // 1. Keyless Apple/iTunes Search API (direct CORS, 30s M4A clip, no app/account)
+    if (isTribute) return -1;
+    if (strictTrack && targetTrack) {
+      if (tSim < 0.45) return -1;
+      if (!isVarious && aSim < 0.35) return -1;
+      return tSim * 0.6 + aSim * 0.3 + albSim * 0.1;
+    }
+    if (!isVarious && aSim < 0.45) return -1;
+    if (targetAlbum && albSim < 0.35) return -1;
+    return aSim * 0.55 + albSim * 0.45;
+  }
+
+  async function searchKeylessClip(artist, track, album, strictTrack = true) {
+    const isVarious = !artist || /^various(\s+artists)?$/i.test(artist.trim());
+    const cleanTrack = String(track || '').replace(/\(.*?\)|\[.*?\]/g, '').trim();
+    const queries = [];
+    if (cleanTrack) {
+      queries.push(isVarious ? cleanTrack : `${artist} ${cleanTrack}`);
+    } else if (album) {
+      queries.push(isVarious ? album : `${artist} ${album}`);
+    }
+    if (!queries.length) return null;
+
+    // 1. Keyless Apple Search API (direct CORS, 30s M4A clip, no account needed)
     for (const term of queries) {
       try {
-        const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(term)}&media=music&entity=song&limit=8`);
+        const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(term)}&media=music&entity=song&limit=12`);
         if (!res.ok) continue;
         const data = await res.json();
         const items = (data.results || []).filter(r => r.previewUrl);
         if (!items.length) continue;
 
-        const best = items.map(r => {
-          const aSim = artist ? CC.similarity(artist, r.artistName || '') : 0.5;
-          const tSim = track ? CC.similarity(track, r.trackName || '') : 0.4;
-          const isTribute = /karaoke|tribute|cover band|lullaby/i.test(`${r.artistName} ${r.collectionName}`);
-          return { r, score: aSim * 0.6 + tSim * 0.4 - (isTribute ? 0.5 : 0) };
-        }).sort((a, b) => b.score - a.score)[0];
+        const best = items
+          .map(r => ({ r, score: scoreAudioCandidate(r.artistName, r.trackName, r.collectionName, artist, cleanTrack, album, strictTrack) }))
+          .filter(x => x.score > 0)
+          .sort((a, b) => b.score - a.score)[0];
 
-        if (best && best.score >= 0.35) {
+        if (best) {
           return {
             previewUrl: best.r.previewUrl,
             trackName: best.r.trackName,
@@ -207,13 +229,13 @@
 
     // 2. Fallback: Deezer JSONP (keyless 30s MP3 clip)
     for (const q of queries) {
-      const dz = await searchDeezerJSONP(q, artist, track);
+      const dz = await searchDeezerJSONP(q, artist, cleanTrack, album, strictTrack);
       if (dz) return dz;
     }
     return null;
   }
 
-  function searchDeezerJSONP(query, artist, track) {
+  function searchDeezerJSONP(query, artist, track, album, strictTrack) {
     return new Promise((resolve) => {
       const cbName = '_dzcb_' + Math.random().toString(36).slice(2, 9);
       const script = document.createElement('script');
@@ -229,19 +251,18 @@
         cleanup();
         const list = (payload?.data || []).filter(x => x.preview);
         if (!list.length) { resolve(null); return; }
-        const best = list.map(x => ({
-          x,
-          score: (artist ? CC.similarity(artist, x.artist?.name || '') * 0.6 : 0.3) +
-                 (track ? CC.similarity(track, x.title || '') * 0.4 : 0.2)
-        })).sort((a, b) => b.score - a.score)[0];
+        const best = list
+          .map(x => ({ x, score: scoreAudioCandidate(x.artist?.name, x.title, x.album?.title, artist, track, album, strictTrack) }))
+          .filter(y => y.score > 0)
+          .sort((a, b) => b.score - a.score)[0];
 
-        if (best && best.score >= 0.3) {
+        if (best) {
           resolve({ previewUrl: best.x.preview, trackName: best.x.title, artistName: best.x.artist?.name || artist });
         } else resolve(null);
       };
 
       script.onerror = () => { cleanup(); resolve(null); };
-      script.src = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=6&output=jsonp&callback=${cbName}`;
+      script.src = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=10&output=jsonp&callback=${cbName}`;
       document.body.appendChild(script);
     });
   }
