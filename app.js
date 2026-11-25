@@ -24,7 +24,7 @@
   let activeFormat = 'Auto';
   let activeStashFilter = 'all';
 
-  let stagedPhotos = []; // [{ apiB64, saveWebp }] (saved at 1200px WebP @ 80%)
+  let stagedPhotos = [];
   let stagedUpc = '';
   let currentExtracted = null;
   let currentCandidates = [];
@@ -35,11 +35,12 @@
   let detectiveInspectedCount = 0;
   let currentInspected = null;
   let activeStashItem = null;
-  let editingStashItem = null; // Non-null when editing/re-checking an existing Stash item
+  let editingStashItem = null;
 
-  // Pile Scan state
-  let pilePhoto = null; // { apiB64, saveWebp }
+  // Pile Scan + Tap-to-Highlight state
+  let pilePhoto = null;
   let pileResults = [];
+  let activePileIdx = null;
 
   // Audio + Platform Menu state
   const tasteCache = new Map();
@@ -63,10 +64,14 @@
   let voiceWantListening = false;
   let voiceTranscriptFinal = '';
   let voiceTranscriptInterim = '';
-  let voiceContext = null; // { source, btnId, liveId }
+  let voiceContext = null;
   let pendingVoiceRetry = null;
 
   // ==================== UI HELPERS & CANCELLABLE STATUS ====================
+  function aiEngineLabel() {
+    return cfg.aiProvider === 'ollama' ? `Local PC (${cfg.ollamaModel || 'Ollama'})` : `Gemini (${cfg.geminiModel || 'Cloud'})`;
+  }
+
   function toast(msg, ms = 2800) {
     const el = document.getElementById('toast');
     el.textContent = msg;
@@ -94,7 +99,7 @@
   }
 
   window.cancelActiveAI = () => {
-    CC.cancelGemini();
+    CC.cancelAI();
     setStatus('', false);
     toast('Cancelled');
   };
@@ -176,20 +181,32 @@
   }
 
   function updateSettingsPills() {
-    const pG = document.getElementById('pillGemini');
+    const hAi = document.getElementById('aiPill');
+    const pAi = document.getElementById('pillAi');
     const pD = document.getElementById('pillDiscogs');
     const pM = document.getElementById('pillMusic');
     const pB = document.getElementById('pillData');
 
-    if (cfg.geminiKey) { pG.textContent = 'Ready'; pG.className = 'pill ok'; }
-    else { pG.textContent = 'Setup'; pG.className = 'pill warn'; }
+    if (cfg.aiProvider === 'ollama') {
+      const ok = CC.isAiReady();
+      hAi.textContent = ok ? 'AI: PC' : 'AI: PC?';
+      hAi.className = 'pill ' + (ok ? 'local' : 'warn');
+      pAi.textContent = ok ? 'Local PC' : 'Setup PC';
+      pAi.className = 'pill ' + (ok ? 'local' : 'warn');
+    } else {
+      const ok = CC.isAiReady();
+      hAi.textContent = ok ? 'AI: Cloud' : 'AI: Off';
+      hAi.className = 'pill ' + (ok ? 'ok' : 'warn');
+      pAi.textContent = ok ? 'Gemini' : 'Setup';
+      pAi.className = 'pill ' + (ok ? 'ok' : 'warn');
+    }
 
     if (cfg.discogsToken && cfg.discogsUser) { pD.textContent = `@${cfg.discogsUser}`; pD.className = 'pill ok'; }
     else if (cfg.discogsToken) { pD.textContent = 'Verify'; pD.className = 'pill warn'; }
     else { pD.textContent = 'Setup'; pD.className = 'pill warn'; }
 
     if (spotifyProfile) {
-      pM.textContent = spotifyProfile.tasteDna ? `DNA Ready` : `${spotifyProfile.totalArtists} art`;
+      pM.textContent = spotifyProfile.tasteDna ? 'DNA Ready' : `${spotifyProfile.totalArtists} art`;
       pM.className = 'pill ' + (spotifyProfile.tasteDna ? 'ok' : 'warn');
     } else { pM.textContent = 'Off'; pM.className = 'pill'; }
 
@@ -226,10 +243,10 @@
     document.getElementById('lbImg').classList.remove('zoomed');
   }
 
-  function closeOpenInMenu() {
+  window.closeOpenInMenu = () => {
     document.getElementById('openInMenu').classList.add('hidden');
     document.getElementById('audioOpenInBtn').classList.remove('open');
-  }
+  };
 
   window.switchView = (name, fromPop = false) => {
     const viewChanged = name !== currentView;
@@ -365,12 +382,10 @@
       await video.play();
       try { history.pushState({ view: currentView, modal: 'camera' }, ''); } catch (_) {}
 
-      // Show torch button if rear camera supports flash
       const track = camStream.getVideoTracks()[0];
       const caps = track?.getCapabilities ? track.getCapabilities() : {};
       document.getElementById('camTorchBtn').style.visibility = caps.torch ? 'visible' : 'hidden';
 
-      // Passive live UPC barcode reader while framing!
       if ('BarcodeDetector' in window) {
         const detector = new BarcodeDetector({ formats: ['upc_a', 'upc_e', 'ean_13', 'ean_8', 'code_128'] });
         let lastCheck = 0;
@@ -394,7 +409,7 @@
         };
         camUpcRaf = requestAnimationFrame(detectLoop);
       }
-    } catch (err) {
+    } catch (_) {
       hideCameraUI();
       toast('In-app camera unavailable — opening phone camera');
       document.getElementById('nativeCamInput').click();
@@ -426,11 +441,8 @@
     updateStageUI();
     updateCameraOverlayUI();
 
-    if (stagedPhotos.length === 1) {
-      toast('Front / Side A captured! Flip for Back / Side B');
-    } else if (stagedPhotos.length === 2) {
-      toast('Back / Side B captured! Tap Finish or take another');
-    }
+    if (stagedPhotos.length === 1) toast('Front / Side A captured! Flip for Back / Side B');
+    else if (stagedPhotos.length === 2) toast('Back / Side B captured! Tap Finish or take another');
   };
 
   window.closeCameraViewfinder = () => {
@@ -536,9 +548,7 @@
     `).join('');
   };
 
-  window.openStagedLightbox = (idx) => {
-    openLightbox(stagedPhotos.map(p => p.saveWebp), idx);
-  };
+  window.openStagedLightbox = (idx) => openLightbox(stagedPhotos.map(p => p.saveWebp), idx);
 
   window.toggleManualEntry = () => {
     document.getElementById('extractCard').classList.remove('hidden');
@@ -557,28 +567,25 @@
 
   // ==================== CONTINUOUS VOICE RE-GRADE (MANUAL STOP ONLY) ====================
   window.voiceRegrade = (source, btnId) => {
-    if (!cfg.geminiKey) { toast('Add your Gemini API Key in Settings first'); return; }
+    if (!CC.isAiReady()) { toast('Configure your AI Engine in Settings first'); return; }
     const btn = document.getElementById(btnId);
     const liveId = source === 'stash' ? 'voiceLiveStash' : 'voiceLiveScan';
     const liveEl = document.getElementById(liveId);
 
-    // If user is currently recording -> MANUAL STOP & RUN RE-GRADE
     if (voiceWantListening && voiceContext?.btnId === btnId) {
       voiceWantListening = false;
       try { activeRecognition?.stop(); } catch (_) {}
       activeRecognition = null;
       const fullMemo = `${voiceTranscriptFinal} ${voiceTranscriptInterim}`.trim();
       if (liveEl) { liveEl.classList.add('hidden'); liveEl.textContent = ''; }
-      if (fullMemo) {
-        regradeWithAI(source, fullMemo, btnId);
-      } else {
+      if (fullMemo) regradeWithAI(source, fullMemo, btnId);
+      else {
         if (btn) { btn.classList.remove('listening'); btn.textContent = VOICE_BTN_IDLE; }
         toast('No speech heard — try again');
       }
       return;
     }
 
-    // If previous re-grade was cancelled/failed on 503, retry with saved memo without re-speaking!
     if (pendingVoiceRetry && pendingVoiceRetry.source === source && pendingVoiceRetry.btnId === btnId) {
       const saved = pendingVoiceRetry;
       pendingVoiceRetry = null;
@@ -627,7 +634,6 @@
         }
       };
 
-      // Android Chrome auto-ends continuous sessions on silence -> seamlessly resume until user taps Stop!
       rec.onend = () => {
         if (voiceWantListening) {
           if (voiceTranscriptInterim) {
@@ -659,7 +665,7 @@
       btn.disabled = true;
       btn.textContent = '⏳ Re-checking photos & re-grading...';
     }
-    setStatus('Re-grading with Gemini (will auto-retry every 5s if busy)...', true, { cancellable: true });
+    setStatus(`Re-grading via ${aiEngineLabel()}...`, true, { cancellable: true });
 
     const prompt = `You are a strict, conservative Discogs/Goldmine seller grading assistant.
 The seller just described the item's flaws out loud in plain English.
@@ -704,7 +710,7 @@ Return ONLY valid JSON:
     }
 
     try {
-      const res = await CC.callGeminiJSON(parts, 'MEDIUM', { retryLabel: 'Voice Re-Grade' });
+      const res = await CC.callAI(parts, 'MEDIUM', { retryLabel: 'Voice Re-Grade' });
       pendingVoiceRetry = null;
       const newMedia = normalizeGrade(res.media_condition, MEDIA_GRADES, mediaEl.value);
       const newSleeve = normalizeGrade(res.sleeve_condition, SLEEVE_GRADES, sleeveEl.value);
@@ -738,7 +744,7 @@ Return ONLY valid JSON:
     }
   }
 
-  // ==================== FLOATING 30s AUDIO MINI-PLAYER (MARQUEE + ▲ OPEN-IN MENU) ====================
+  // ==================== FLOATING 30s AUDIO MINI-PLAYER ====================
   const audioEl = document.getElementById('previewAudio');
 
   function updateAudioMarquee(text) {
@@ -832,9 +838,7 @@ Return ONLY valid JSON:
     btn.classList.add('open');
   };
 
-  audioEl.addEventListener('play', () => {
-    if (audioEl.src !== SILENT_WAV) document.getElementById('audioPlayBtn').textContent = '⏸';
-  });
+  audioEl.addEventListener('play', () => { if (audioEl.src !== SILENT_WAV) document.getElementById('audioPlayBtn').textContent = '⏸'; });
   audioEl.addEventListener('pause', () => { document.getElementById('audioPlayBtn').textContent = '▶'; });
   audioEl.addEventListener('ended', () => {
     document.getElementById('audioPlayBtn').textContent = '▶';
@@ -880,7 +884,6 @@ Return ONLY valid JSON:
 
     activePlatforms = res.platforms;
 
-    // Exact stream found
     if (res.clip) {
       activeClipKey = key;
       updateAudioMarquee(`🎵 ${res.clip.trackName} — ${res.clip.artistName}`);
@@ -893,13 +896,10 @@ Return ONLY valid JSON:
           document.getElementById('audioPlayBtn').textContent = '▶';
           updateAudioMarquee(`Tap ▶ for 30s clip: ${res.clip.trackName} — ${res.clip.artistName}`);
         });
-      } else {
-        document.getElementById('audioPlayBtn').textContent = '▶';
-      }
+      } else document.getElementById('audioPlayBtn').textContent = '▶';
       return;
     }
 
-    // No exact mix found — NEVER silently substitute a wrong remix! Offer explicit ▶ tap for closest.
     activeClipKey = '';
     try { audioEl.pause(); audioEl.removeAttribute('src'); } catch (_) {}
     if (res.fallbackClip) {
@@ -1029,17 +1029,17 @@ Return ONLY valid JSON:
     document.getElementById('candidatesCard').classList.add('hidden');
 
     if (stagedPhotos.length > 0) {
-      if (!cfg.geminiKey) { toast('Add your Gemini API Key in Settings first'); switchView('settings'); return; }
-      const ok = await runGeminiVision(myRunId);
+      if (!CC.isAiReady()) { toast('Configure your AI Engine in Settings first'); switchView('settings'); return; }
+      const ok = await runVisionOCR(myRunId);
       if (!ok || myRunId !== scanRunId) return;
     }
 
     await runDiscogsSearch(myRunId);
   };
 
-  async function runGeminiVision(myRunId) {
+  async function runVisionOCR(myRunId) {
     const keepOldGrades = Boolean(editingStashItem && !document.getElementById('chkRegradeEdit').checked);
-    setStatus(`Inspecting ${stagedPhotos.length} photo(s) with Gemini (${keepOldGrades ? 'OCR only' : 'OCR + strict grading'})...`, true, { cancellable: true });
+    setStatus(`Inspecting ${stagedPhotos.length} photo(s) on ${aiEngineLabel()}...`, true, { cancellable: true });
 
     const fmtHint = activeFormat === 'Auto' ? 'Auto-detect Cassette, CD, or Vinyl' : `User selected format: ${activeFormat}`;
     const upcHint = stagedUpc ? `User also scanned UPC barcode: ${stagedUpc}.` : '';
@@ -1091,10 +1091,9 @@ Return ONLY valid JSON:
     const parts = [{ text: prompt }, ...stagedPhotos.map(p => ({ inline_data: { mime_type: 'image/jpeg', data: p.apiB64 } }))];
 
     try {
-      const ext = await CC.callGeminiJSON(parts, 'MEDIUM', { retryLabel: 'Photo Vision' });
+      const ext = await CC.callAI(parts, 'MEDIUM', { retryLabel: 'Photo Vision' });
       if (myRunId !== scanRunId) return false;
 
-      // Preserve existing grades & notes if editing a Stash item and Re-grade is unchecked
       if (keepOldGrades && editingStashItem) {
         ext.media_condition = editingStashItem.media_condition;
         ext.sleeve_condition = editingStashItem.sleeve_condition;
@@ -1125,7 +1124,7 @@ Return ONLY valid JSON:
       return true;
     } catch (err) {
       setStatus('', false);
-      if (err.name !== 'AbortError') toast('Gemini error: ' + err.message, 4500);
+      if (err.name !== 'AbortError') toast('AI Vision error: ' + err.message, 4500);
       return false;
     }
   }
@@ -1143,7 +1142,6 @@ Return ONLY valid JSON:
     return '';
   }
 
-  // Uncapped 100-result Discogs Search (no 6-item cap, no blind 1-item auto-accept!)
   window.runDiscogsSearch = async (myRunId = scanRunId) => {
     if (!cfg.discogsToken) { setStatus('', false); toast('Add your Discogs Token in Settings'); return; }
 
@@ -1194,13 +1192,11 @@ Return ONLY valid JSON:
       }
       if (clubDetected === 'None' && isClub) score -= 0.14;
       if ((clubDetected === 'CRC' || clubDetected === 'BMG') && isClub) score += 0.18;
-      // Mild tie-breaker for community activity (does NOT bury rare outliers)
       score += Math.min(0.12, Math.log10(have + want + 1) * 0.04);
       return { sim, catMatch, isClub, yearMatch, score };
     };
 
     try {
-      // Run ALL applicable queries without early cutoffs
       if (barcode) {
         const bp = { type: 'release', barcode, per_page: 100 };
         if (activeFormat !== 'Auto') bp.format = format;
@@ -1222,13 +1218,11 @@ Return ONLY valid JSON:
 
       if (myRunId !== scanRunId) return;
 
-      // Filter out completely unrelated garbage matches locally, keep ALL plausible matches (NO 6-item cap!)
       const allScored = Array.from(pool.values())
         .map(it => ({ ...it, _check: scoreItem(it) }))
         .filter(it => it._check.sim >= 0.25 || it._check.catMatch || it._tier === 'barcode')
         .sort((a, b) => b._check.score - a._check.score);
 
-      // If photo gave an explicit country (e.g. "Printed in U.S.A.") and matches exist in that country, put them first
       currentCandidates = allScored;
       renderCandidates(false);
 
@@ -1238,8 +1232,7 @@ Return ONLY valid JSON:
         return;
       }
 
-      // Always verify with Zero-Guessing Engine (even for 1 result!) when Gemini is configured
-      if (cfg.autoDetective && cfg.geminiKey) {
+      if (cfg.autoDetective && CC.isAiReady()) {
         await runVariantDetective(null, myRunId, 0);
       } else {
         setStatus('', false);
@@ -1328,9 +1321,9 @@ Return ONLY valid JSON:
     await runVariantDetective(null, scanRunId, detectiveInspectedCount);
   };
 
-  // ==================== ZERO-GUESSING VERIFICATION ENGINE (UNTRUNCATED + [r=ID] AUTO-FOLLOW + MEDIUM THINKING) ====================
+  // ==================== ZERO-GUESSING VERIFICATION ENGINE ====================
   window.runVariantDetective = async (subsetIds = null, myRunId = scanRunId, offset = 0) => {
-    if (!cfg.geminiKey || !currentCandidates.length) return;
+    if (!CC.isAiReady() || !currentCandidates.length) return;
 
     const batch = subsetIds
       ? currentCandidates.filter(c => subsetIds.includes(c.id))
@@ -1362,15 +1355,14 @@ Return ONLY valid JSON:
           catno: rel.labels?.[0]?.catno || fallbackCat || '',
           label: rel.labels?.[0]?.name || '',
           formats: (rel.formats || []).map(f => [f.name, ...(f.descriptions || []), f.text || ''].filter(Boolean).join(', ')).join(' | '),
-          notes: rel.notes || '', // UNTRUNCATED!
-          identifiers: (rel.identifiers || []).map(x => `${x.type}${x.description ? ` (${x.description})` : ''}: ${x.value}`), // UNTRUNCATED!
+          notes: rel.notes || '',
+          identifiers: (rel.identifiers || []).map(x => `${x.type}${x.description ? ` (${x.description})` : ''}: ${x.value}`),
           companies: (rel.companies || []).map(c => `${c.entity_type_name}: ${c.name}`),
-          tracklist: tracks, // FULL TRACKLIST FOR VERIFICATION!
+          tracklist: tracks,
           have: rel.community?.have || 0,
           want: rel.community?.want || 0
         });
 
-        // Auto-collect sibling [r=XXXX] links mentioned in pressing notes!
         extractReferencedIds(rel.notes).forEach(refId => {
           if (!fetchedIds.has(refId)) refQueue.push(refId);
         });
@@ -1383,7 +1375,6 @@ Return ONLY valid JSON:
         pushReleaseDossier(rel, batch[i].catno);
       }
 
-      // Auto-follow sibling [r=XXXX] pointers so e.g. The Doors #1429179 is NEVER missed!
       const uniqueRefs = Array.from(new Set(refQueue)).filter(id => !fetchedIds.has(id)).slice(0, 8);
       for (let i = 0; i < uniqueRefs.length; i++) {
         setStatus(`🔗 Auto-following sibling pressing #${uniqueRefs[i]} (${i + 1}/${uniqueRefs.length})...`, true);
@@ -1410,7 +1401,7 @@ Return ONLY valid JSON:
         } catch (_) {}
       }
 
-      setStatus(`🕵️ Verifying ${dossiers.length} complete pressing(s) against your photos (zero-guessing)...`, true, { cancellable: true });
+      setStatus(`🕵️ Verifying ${dossiers.length} pressing(s) on ${aiEngineLabel()}...`, true, { cancellable: true });
 
       const prompt = `You are a STRICT, ZERO-GUESSING Discogs Verification Engine. Accuracy is everything. NEVER guess or force a match!
 Compare the user's photo(s), visible songs, catalog #, barcode, and physical details against ALL ${dossiers.length} complete, untruncated Discogs listings below.
@@ -1423,7 +1414,7 @@ STRICT VERIFICATION RULES:
    - If the photo clearly shows a shell color (white vs clear vs black), country ("Printed in U.S.A." vs Canada/Turkey/Europe), club edition ("CRC"/"BMG" vs retail), or barcode presence/absence that contradicts a listing, DISQUALIFY it.
 2. THREE HONEST OUTCOMES:
    - "exact_match": ONLY when ONE listing aligns with ALL visible evidence with ZERO contradictions AND no other remaining listing is equally plausible.
-   - "needs_user": When 2+ listings remain plausible without contradiction, OR when a single remaining listing has unverified details not visible in the photos (e.g. missing back cover, hidden shell, club vs retail). Ask ONE crystal-clear, jargon-free question (no "J-card", "matrix", "runout", "IFPI" — use everyday words like "the plastic cassette", "the paper cover", "the little numbers inside the clear middle window of the tape").
+   - "needs_user": When 2+ listings remain plausible without contradiction, OR when a single remaining listing has unverified details not visible in the photos. Ask ONE crystal-clear, jargon-free question (no "J-card", "matrix", "runout", "IFPI" — use everyday words like "the plastic cassette", "the paper cover", "the little numbers inside the clear middle window of the tape").
    - "not_found": When EVERY listing has clear contradictions (wrong album, wrong songs, wrong window scale/plant code with no matching sibling, or clearly an unlisted regional tape). NEVER force a wrong listing!
 
 Scanned Info: ${JSON.stringify({
@@ -1446,7 +1437,7 @@ Return ONLY valid JSON:
   "outcome": "exact_match" | "needs_user" | "not_found",
   "best_release_id": number or null,
   "eliminated_ids": [numbers disqualified by contradictions],
-  "reasoning": "1-2 blunt, factual sentences explaining what matched or what specifically contradicted (e.g. 'Photo shows 100-50-0 window + SR code, matching #1429179 and ruling out #37410321 which is 0-50-0').",
+  "reasoning": "1-2 blunt, factual sentences explaining what matched or what specifically contradicted.",
   "candidate_diffs": [{ "id": number, "short_diff": "plain-English 6-12 word summary of distinguishing features" }],
   "question": null or {
     "prompt": "Direct, plain-English question to separate the remaining candidates",
@@ -1456,7 +1447,7 @@ Return ONLY valid JSON:
 }`;
 
       const parts = [{ text: prompt }, ...stagedPhotos.map(p => ({ inline_data: { mime_type: 'image/jpeg', data: p.apiB64 } }))];
-      const verdict = await CC.callGeminiJSON(parts, 'MEDIUM', { retryLabel: 'Verification' });
+      const verdict = await CC.callAI(parts, 'MEDIUM', { retryLabel: 'Verification' });
       if (myRunId !== scanRunId) return;
 
       (verdict.candidate_diffs || []).forEach(d => { if (d.id && d.short_diff) detectiveDiffs[d.id] = d.short_diff; });
@@ -1491,11 +1482,10 @@ Return ONLY valid JSON:
     } catch (err) {
       setStatus('', false);
       if (err.name === 'AbortError') return;
-      // HONEST failure — NEVER silently pick candidate #0!
       const card = document.getElementById('detectiveCard');
       card.classList.remove('hidden');
       document.getElementById('detectiveBadge').innerHTML = `<span class="badge badge-yellow" style="margin:0;">⚠️ Verification Stopped</span>`;
-      document.getElementById('detectiveReasoning').textContent = `Could not auto-verify (${err.message}). Pick a match manually below or retry verification.`;
+      document.getElementById('detectiveReasoning').textContent = `Could not auto-verify (${err.message}). Pick a match manually below or retry.`;
       document.getElementById('detectiveQuestionBox').classList.add('hidden');
       document.getElementById('detectiveActions').innerHTML = `
         <button type="button" class="btn btn-purple btn-sm" onclick="runVariantDetective()">🔄 Retry Verification</button>
@@ -1524,7 +1514,7 @@ Return ONLY valid JSON:
           ${window._detectiveOptions.map((opt, i) => `
             <button class="opt-btn" onclick="answerDetective(${i})">${esc(opt.label)}</button>
           `).join('')}
-          <button class="opt-btn fallback-opt" onclick="toggleCandidatesPanel()">🔎 None of these / let me inspect all ${currentCandidates.length} listings</button>
+          <button class="opt-btn fallback-opt" onclick="toggleCandidatesPanel()">🔎 None of these / inspect all ${currentCandidates.length} listings</button>
         </div>
       `;
     } else {
@@ -1587,7 +1577,7 @@ Return ONLY valid JSON:
       let suggestions = null;
       if (cfg.fetchVgSuggestions) {
         try { suggestions = await CC.discogsFetch(`/marketplace/price_suggestions/${cand.id}`); }
-        catch (_) { suggestions = null; } // Do NOT silently turn off user's setting!
+        catch (_) { suggestions = null; }
       }
 
       const artistName = cleanDiscogsArtist(release.artists) ||
@@ -1823,12 +1813,11 @@ Return ONLY valid JSON:
     document.getElementById('tasteLocalBadges').innerHTML = badges;
 
     document.getElementById('tasteScore').textContent = '...';
-    document.getElementById('tasteBody').textContent = 'Analyzing against your full Spotify Taste DNA...';
+    document.getElementById('tasteBody').textContent = `Analyzing against your full Taste DNA on ${aiEngineLabel()}...`;
     document.getElementById('contextBox').classList.add('hidden');
     document.getElementById('tasteHits').innerHTML = '';
   }
 
-  // ==================== EXACT LOCAL SPOTIFY CHECK (ARTIST + TRACK PAIRS) ====================
   function checkLocalSpotify(item) {
     if (!spotifyProfile) return { artistHit: false, matchedArtists: [], matchedTracks: [], details: '' };
     const matchedArtists = [];
@@ -1861,20 +1850,12 @@ Return ONLY valid JSON:
       const trackArt = t.artist || item.artist || '';
       const artParts = String(trackArt).split(/,|&|\band\b|feat\.?/i).map(norm).filter(Boolean);
       let isHit = false;
-      if (pairSet && pairSet.size && artParts.length) {
-        isHit = artParts.some(na => pairSet.has(`${na}|${nt}`));
-      } else if (nt.length > 2) {
-        isHit = titleSet.has(nt);
-      }
+      if (pairSet && pairSet.size && artParts.length) isHit = artParts.some(na => pairSet.has(`${na}|${nt}`));
+      else if (nt.length > 2) isHit = titleSet.has(nt);
       if (isHit) matchedTracks.push(t.artist ? `${t.artist} - ${t.title}` : t.title);
     });
 
-    return {
-      artistHit: matchedArtists.length > 0,
-      matchedArtists,
-      matchedTracks,
-      details: matchedArtists.join('; ') || 'None'
-    };
+    return { artistHit: matchedArtists.length > 0, matchedArtists, matchedTracks, details: matchedArtists.join('; ') || 'None' };
   }
 
   function resolveLitmusArtist(item) {
@@ -1963,16 +1944,15 @@ Return ONLY valid JSON:
   };
 
   async function runTasteAnalysis(item, myRunId) {
-    if (!cfg.geminiKey) {
+    if (!CC.isAiReady()) {
       document.getElementById('tasteScore').textContent = '—';
-      document.getElementById('tasteBody').textContent = 'Add Gemini API Key to enable Taste & Context analysis.';
+      document.getElementById('tasteBody').textContent = 'Configure AI Engine in Settings to enable Taste & Context.';
       return;
     }
 
-    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v16`;
+    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v17|${cfg.aiProvider}`;
     if (tasteCache.has(cacheKey)) { applyTasteUI(item, tasteCache.get(cacheKey), myRunId); return; }
 
-    // Full untruncated tracklist!
     const tracksStr = (item.tracklist || []).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title).join('; ');
     const dna = spotifyProfile?.tasteDna || '';
     const fallbackTop = !dna && spotifyProfile ? (spotifyProfile.topArtists || []).slice(0, 200).join(', ') : '';
@@ -2008,7 +1988,7 @@ Return ONLY valid JSON:
 Include up to 6 genuinely recognizable songs in notable_songs (or empty array if none).`;
 
     try {
-      const res = await CC.callGeminiJSON([{ text: prompt }], null, { retryLabel: 'Taste Check' });
+      const res = await CC.callAI([{ text: prompt }], null, { retryLabel: 'Taste Check' });
       setStatus('', false);
       tasteCache.set(cacheKey, res);
       if (myRunId !== scanRunId || currentInspected !== item) return;
@@ -2024,10 +2004,10 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
     }
   }
 
-  // ==================== FULL SPOTIFY LIBRARY -> TASTE DNA ANALYZER (ALL ARTISTS, ALL TRACKS, ALL PLAYLISTS) ====================
+  // ==================== FULL SPOTIFY LIBRARY -> TASTE DNA ANALYZER ====================
   window.analyzeFullSpotifyDNA = async () => {
     saveSettings(true);
-    if (!cfg.geminiKey) { toast('Add your Gemini API Key first'); return; }
+    if (!CC.isAiReady()) { toast('Configure your AI Engine in Settings first'); return; }
     if (!spotifyProfile) { toast('Sync your Spotify library first'); return; }
 
     const btn = document.getElementById('btnAnalyzeDna');
@@ -2038,20 +2018,19 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
       const playlistsText = (spotifyProfile.playlistSummaries || []).map(p => `${p.name} (${p.count})`).join(', ') || 'None (re-sync Spotify to capture playlist names)';
       const decadesText = Object.entries(spotifyProfile.decades || {}).sort((a, b) => b[1] - a[1]).map(([d, c]) => `${d}: ${c}`).join(', ') || 'N/A';
 
-      // Build compact lossless representation of EVERY single artist & song (ZERO truncation!)
       const lines = artistsList.map(a => {
         const tracks = Array.isArray(a.tracks) && a.tracks.length ? `: ${a.tracks.join(' | ')}` : '';
         return `${a.name} (${a.count || 1})${tracks}`;
       });
 
-      // Fallback if synced on older v1.5 before per-artist tracks were stored
       const hasPerArtistTracks = artistsList.some(a => Array.isArray(a.tracks) && a.tracks.length);
       if (!hasPerArtistTracks && Array.isArray(spotifyProfile.trackTitles) && spotifyProfile.trackTitles.length) {
         lines.push('\nALL TRACK TITLES:\n' + spotifyProfile.trackTitles.join(' | '));
       }
 
       const fullDump = lines.join('\n');
-      const MAX_CHUNK_CHARS = 360000; // ~90k tokens (well under 250k TPM free-tier cap!)
+      // Keep chunks comfortably inside 32GB VRAM on local RTX 5090 (full speed) while Gemini handles 1-shot
+      const MAX_CHUNK_CHARS = cfg.aiProvider === 'ollama' ? 75000 : 360000;
       const chunks = [];
       for (let i = 0; i < fullDump.length; i += MAX_CHUNK_CHARS) {
         chunks.push(fullDump.slice(i, i + MAX_CHUNK_CHARS));
@@ -2059,7 +2038,7 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
 
       let finalDna = '';
       if (chunks.length === 1) {
-        setStatus(`🧠 Analyzing ALL ${spotifyProfile.totalArtists} artists & ${spotifyProfile.totalTracks} tracks in 1 shot...`, true, { cancellable: true });
+        setStatus(`🧠 Analyzing ALL ${spotifyProfile.totalArtists} artists & ${spotifyProfile.totalTracks} tracks on ${aiEngineLabel()}...`, true, { cancellable: true });
         const prompt = `You are a musicologist building a permanent, hyper-accurate "Taste DNA" profile for a physical media collector from 100% of their Spotify library (EVERY artist, EVERY song, and EVERY playlist — nothing skipped).
 
 LIBRARY STATS: ${spotifyProfile.totalArtists} unique artists · ${spotifyProfile.totalTracks} tracks · ${spotifyProfile.totalPlaylists || 0} playlists.
@@ -2075,18 +2054,18 @@ Write a dense, super-specific ~450-word Taste DNA dossier with these exact secti
 3. ERA & PRODUCTION SWEET SPOTS: Favorite decades and production aesthetics.
 4. CLEAR BLIND SPOTS / LIKELY SKIPS: Genres/styles noticeably absent or rare in the library.`;
 
-        finalDna = await CC.callGeminiJSON([{ text: prompt }], 'MEDIUM', { expectJSON: false, retryLabel: 'Taste DNA' });
+        finalDna = await CC.callAI([{ text: prompt }], 'MEDIUM', { expectJSON: false, retryLabel: 'Taste DNA' });
       } else {
         const partials = [];
         for (let i = 0; i < chunks.length; i++) {
-          setStatus(`🧠 Analyzing library chunk ${i + 1}/${chunks.length}...`, true, { cancellable: true });
+          setStatus(`🧠 Analyzing library chunk ${i + 1}/${chunks.length} on ${aiEngineLabel()}...`, true, { cancellable: true });
           const p = `Analyze chunk ${i + 1} of ${chunks.length} of a user's complete Spotify library. List EVERY distinct genre, sub-genre, era, sonic trait, and notable artist pocket present in this chunk (250 words max).\n\n${chunks[i]}`;
-          partials.push(await CC.callGeminiJSON([{ text: p }], 'MEDIUM', { expectJSON: false, retryLabel: `Taste DNA (${i + 1}/${chunks.length})` }));
-          if (i < chunks.length - 1) await CC.sleep(4000);
+          partials.push(await CC.callAI([{ text: p }], 'MEDIUM', { expectJSON: false, retryLabel: `Taste DNA (${i + 1}/${chunks.length})` }));
+          if (i < chunks.length - 1 && cfg.aiProvider === 'gemini') await CC.sleep(4000);
         }
-        setStatus('🧠 Merging chunks into master Taste DNA...', true, { cancellable: true });
+        setStatus(`🧠 Merging ${partials.length} chunks into master Taste DNA...`, true, { cancellable: true });
         const mergeP = `Merge these ${partials.length} library chunk analyses + playlists (${playlistsText}) + decades (${decadesText}) into one cohesive ~450-word Taste DNA dossier covering: 1. CORE OBSESSIONS, 2. SECONDARY & NICHE POCKETS, 3. ERA & PRODUCTION SWEET SPOTS, 4. CLEAR BLIND SPOTS / LIKELY SKIPS.\n\n${partials.join('\n\n---\n\n')}`;
-        finalDna = await CC.callGeminiJSON([{ text: mergeP }], 'MEDIUM', { expectJSON: false, retryLabel: 'Taste DNA Merge' });
+        finalDna = await CC.callAI([{ text: mergeP }], 'MEDIUM', { expectJSON: false, retryLabel: 'Taste DNA Merge' });
       }
 
       spotifyProfile.tasteDna = finalDna;
@@ -2117,7 +2096,21 @@ Write a dense, super-specific ~450-word Taste DNA dossier with these exact secti
     toast('Taste DNA saved!');
   };
 
-  // ==================== BULK / PILE SCAN MODE ====================
+  // ==================== BULK / PILE SCAN MODE + TAP-TO-HIGHLIGHT SPOTLIGHT ====================
+  function normalizeBox2D(raw) {
+    if (!Array.isArray(raw) || raw.length !== 4) return null;
+    let nums = raw.map(Number);
+    if (nums.some(n => !Number.isFinite(n))) return null;
+    const maxVal = Math.max(...nums);
+    if (maxVal > 0 && maxVal <= 1.01) nums = nums.map(n => n * 1000);
+    nums = nums.map(n => Math.max(0, Math.min(1000, n)));
+    let [y1, x1, y2, x2] = nums;
+    if (y1 > y2) [y1, y2] = [y2, y1];
+    if (x1 > x2) [x1, x2] = [x2, x1];
+    if ((y2 - y1) < 8 || (x2 - x1) < 8) return null;
+    return [y1, x1, y2, x2];
+  }
+
   async function handlePilePhoto(file) {
     if (!file) return;
     setStatus('Loading pile photo...', true);
@@ -2125,8 +2118,15 @@ Write a dense, super-specific ~450-word Taste DNA dossier with these exact secti
       const apiUrl = await compressImageFile(file, 1536, 'image/jpeg', 0.86);
       const saveWebp = await compressImageFile(file, 1200, 'image/webp', 0.80);
       pilePhoto = { apiB64: apiUrl.split(',')[1], saveWebp };
+      pileResults = [];
+      activePileIdx = null;
       document.getElementById('pilePreviewImg').src = saveWebp;
+      document.getElementById('pileOverlay').innerHTML = '';
+      document.getElementById('pileOverlay').classList.remove('has-focus');
+      document.getElementById('pileHighlightBar').classList.add('hidden');
+      document.getElementById('pilePhotoHint').textContent = 'Ready — tap Analyze Pile below';
       document.getElementById('pilePreviewWrap').classList.remove('hidden');
+      document.getElementById('pileResultsCard').classList.add('hidden');
       document.getElementById('btnRunPileScan').disabled = false;
       document.getElementById('btnClearPile').classList.remove('hidden');
       setStatus('', false);
@@ -2141,6 +2141,10 @@ Write a dense, super-specific ~450-word Taste DNA dossier with these exact secti
   window.resetPileScan = () => {
     pilePhoto = null;
     pileResults = [];
+    activePileIdx = null;
+    document.getElementById('pileOverlay').innerHTML = '';
+    document.getElementById('pileOverlay').classList.remove('has-focus');
+    document.getElementById('pileHighlightBar').classList.add('hidden');
     document.getElementById('pilePreviewWrap').classList.add('hidden');
     document.getElementById('pileResultsCard').classList.add('hidden');
     document.getElementById('btnRunPileScan').disabled = true;
@@ -2149,26 +2153,117 @@ Write a dense, super-specific ~450-word Taste DNA dossier with these exact secti
     document.getElementById('pileCamInput').value = '';
   };
 
+  window.clearPileHighlight = () => {
+    activePileIdx = null;
+    renderPileUI();
+  };
+
+  window.selectPileItem = (idx, fromOverlay = false, ev = null) => {
+    if (ev) ev.stopPropagation();
+    if (idx < 0 || idx >= pileResults.length) return;
+    activePileIdx = (activePileIdx === idx && !fromOverlay) ? null : idx;
+    renderPileUI();
+
+    if (activePileIdx !== null) {
+      if (fromOverlay) {
+        const card = document.getElementById(`pileCard-${activePileIdx}`);
+        if (card) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      } else {
+        document.getElementById('pilePreviewWrap').scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
+  };
+
+  function renderPileUI() {
+    const overlay = document.getElementById('pileOverlay');
+    const bar = document.getElementById('pileHighlightBar');
+    const list = document.getElementById('pileResultsList');
+
+    const hasFocusedBox = activePileIdx !== null && Boolean(pileResults[activePileIdx]?.box_2d);
+    overlay.classList.toggle('has-focus', hasFocusedBox);
+
+    overlay.innerHTML = pileResults.map((r, i) => {
+      if (!r.box_2d) return '';
+      const [y1, x1, y2, x2] = r.box_2d;
+      const cls = [
+        'pile-box',
+        r.highVal ? 'hot' : (r.taste_score >= 7 ? 'good' : ''),
+        activePileIdx === i ? 'active' : ''
+      ].filter(Boolean).join(' ');
+      const top = (y1 / 10).toFixed(2);
+      const left = (x1 / 10).toFixed(2);
+      const height = ((y2 - y1) / 10).toFixed(2);
+      const width = ((x2 - x1) / 10).toFixed(2);
+      return `<div class="${cls}" style="top:${top}%; left:${left}%; height:${height}%; width:${width}%;" onclick="selectPileItem(${i}, true, event)"><span class="pile-box-tag">#${i + 1} · ${r.taste_score}/10</span></div>`;
+    }).join('');
+
+    if (activePileIdx !== null && pileResults[activePileIdx]) {
+      const r = pileResults[activePileIdx];
+      bar.classList.remove('hidden');
+      bar.innerHTML = `
+        <div>
+          <div style="font-weight:800; font-size:0.9rem; color:#f1f5f9;">#${activePileIdx + 1}: ${esc(r.artist || '?')} — ${esc(r.title || '?')}</div>
+          <div style="font-size:0.78rem; color:#cbd5e1; margin-top:2px;">
+            🎧 ${r.taste_score}/10${r.roughVal !== null ? ` · ~$${Number(r.roughVal).toFixed(2)}` : ''}${r.taste_reason ? ` · ${esc(r.taste_reason)}` : ''}${!r.box_2d ? ' · (position box not detected)' : ''}
+          </div>
+        </div>
+        <div class="inline-actions" style="gap:6px;">
+          <button type="button" class="btn btn-green btn-sm" style="flex:1;" onclick="jumpFromPileToSingle(${activePileIdx})">🔍 Verify This Tape</button>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="clearPileHighlight()">✕ Clear</button>
+        </div>
+      `;
+    } else {
+      bar.classList.add('hidden');
+      bar.innerHTML = '';
+    }
+
+    list.innerHTML = pileResults.map((r, i) => `
+      <div id="pileCard-${i}" class="pile-item ${activePileIdx === i ? 'active' : ''}" onclick="selectPileItem(${i}, false)">
+        <div style="flex:1; min-width:0;">
+          <div class="candidate-title"><span style="color:#93c5fd;">#${i + 1}</span> ${esc(r.artist || '?')} — ${esc(r.title || '?')}</div>
+          <div class="candidate-sub">${esc(r.format || 'Cassette')}${r.catno ? ` · ${esc(r.catno)}` : ''}${r.taste_reason ? ` · ${esc(r.taste_reason)}` : ''}</div>
+          <div>
+            <span class="badge ${r.taste_score >= 7 ? 'badge-green' : r.taste_score >= 5 ? 'badge-blue' : 'badge-red'}">🎧 ${r.taste_score}/10</span>
+            ${r.localArtistHit ? `<span class="badge badge-green">In Spotify</span>` : ''}
+            ${r.roughVal !== null ? `<span class="badge ${r.highVal ? 'badge-yellow' : 'badge-blue'}">~$${Number(r.roughVal).toFixed(2)}</span>` : ''}
+            ${(r.roughWant > r.roughHave && r.roughWant >= 15) ? `<span class="badge badge-purple">💎 High Want (${r.roughWant})</span>` : ''}
+            ${r.box_2d ? `<span class="badge" style="background:#0d1017; color:#93c5fd;">📍 Located</span>` : ''}
+          </div>
+        </div>
+        <button type="button" class="btn btn-secondary btn-sm" style="min-height:34px; padding:5px 9px; flex:0 0 auto;" onclick="jumpFromPileToSingle(${i}); event.stopPropagation();">Verify ›</button>
+      </div>
+    `).join('');
+  }
+
   window.runPileScan = async () => {
     if (!pilePhoto) return;
-    if (!cfg.geminiKey) { toast('Add Gemini API Key in Settings first'); switchView('settings'); return; }
+    if (!CC.isAiReady()) { toast('Configure your AI Engine in Settings first'); switchView('settings'); return; }
 
     document.getElementById('pileResultsCard').classList.add('hidden');
-    setStatus('📚 Step 1/3: Reading every legible spine/cover in the pile...', true, { cancellable: true });
+    activePileIdx = null;
+    setStatus(`📚 Step 1/3: Reading & locating spines on ${aiEngineLabel()}...`, true, { cancellable: true });
 
     try {
-      const ocrPrompt = `You are inspecting a photo of a crate, shelf, or pile of physical music media (cassettes, CDs, or vinyl).
+      const ocrPrompt = `You are inspecting a photo of a crate, shelf, or stack of physical music media (cassettes, CDs, or vinyl).
 RULES:
 - Extract EVERY item whose title or artist is clearly legible.
 - NEVER guess blurry, obscured, or cut-off spines — just count them in "unreadable_count".
+- For EACH legible item, return its tight 2D bounding box "box_2d" as [ymin, xmin, ymax, xmax] normalized on a 0 to 1000 scale (0 = top/left edge, 1000 = bottom/right edge) tightly surrounding that specific tape spine or case.
+
 Return ONLY valid JSON:
 {
   "unreadable_count": number,
   "items": [
-    { "artist": "artist name", "title": "album/release title", "format": "Cassette" | "CD" | "Vinyl", "catno": "catalog # if readable else empty string" }
+    {
+      "artist": "artist name",
+      "title": "album/release title",
+      "format": "Cassette" | "CD" | "Vinyl",
+      "catno": "catalog # if readable else empty string",
+      "box_2d": [ymin, xmin, ymax, xmax]
+    }
   ]
 }`;
-      const ocr = await CC.callGeminiJSON(
+      const ocr = await CC.callAI(
         [{ text: ocrPrompt }, { inline_data: { mime_type: 'image/jpeg', data: pilePhoto.apiB64 } }],
         'MEDIUM',
         { retryLabel: 'Pile OCR' }
@@ -2196,10 +2291,9 @@ Return ONLY valid JSON:
     { "idx": number, "score": 1 to 10 integer, "reason": "short 6-12 word reason" }
   ]
 }`;
-      const tasteBatch = await CC.callGeminiJSON([{ text: tastePrompt }], null, { retryLabel: 'Pile Taste' });
+      const tasteBatch = await CC.callAI([{ text: tastePrompt }], null, { retryLabel: 'Pile Taste' });
       const scoreMap = new Map((tasteBatch.scores || []).map(s => [s.idx, s]));
 
-      // Step 3: Quick rough Discogs lookup for each readable item
       pileResults = [];
       for (let i = 0; i < items.length; i++) {
         const it = items[i];
@@ -2225,6 +2319,7 @@ Return ONLY valid JSON:
         const localArtistHit = Boolean(spotifyProfile && it.artist && spotifyProfile.allArtists?.[norm(it.artist)]);
         pileResults.push({
           ...it,
+          box_2d: normalizeBox2D(it.box_2d),
           taste_score: sc.score,
           taste_reason: sc.reason,
           localArtistHit,
@@ -2236,31 +2331,16 @@ Return ONLY valid JSON:
         });
       }
 
-      // Rank pull list: High value first, then Taste score
       pileResults.sort((a, b) => (b.highVal - a.highVal) || ((b.taste_score || 0) - (a.taste_score || 0)) || ((b.roughVal || 0) - (a.roughVal || 0)));
 
       setStatus('', false);
       document.getElementById('pileCount').textContent = pileResults.length;
+      document.getElementById('pilePhotoHint').textContent = 'Tap any box on the photo or any tape below to spotlight it';
       document.getElementById('pileSkippedNote').textContent = ocr.unreadable_count
-        ? `Skipped ${ocr.unreadable_count} blurry/unreadable spine(s) (no guessing). Tap any item to jump into full 2-photo verification.`
-        : 'All spines read cleanly. Tap any item to jump into full 2-photo verification.';
+        ? `Skipped ${ocr.unreadable_count} blurry/unreadable spine(s). Tap any tape to highlight it on the photo, or tap Verify › for full 2-photo check.`
+        : 'Tap any tape to highlight it on the photo, or tap Verify › for a full 2-photo check.';
 
-      document.getElementById('pileResultsList').innerHTML = pileResults.map((r, i) => `
-        <div class="pile-item" onclick="jumpFromPileToSingle(${i})">
-          <div style="flex:1; min-width:0;">
-            <div class="candidate-title">${esc(r.artist || '?')} — ${esc(r.title || '?')}</div>
-            <div class="candidate-sub">${esc(r.format || 'Cassette')}${r.catno ? ` · ${esc(r.catno)}` : ''}${r.taste_reason ? ` · ${esc(r.taste_reason)}` : ''}</div>
-            <div>
-              <span class="badge ${r.taste_score >= 7 ? 'badge-green' : r.taste_score >= 5 ? 'badge-blue' : 'badge-red'}">🎧 ${r.taste_score}/10</span>
-              ${r.localArtistHit ? `<span class="badge badge-green">In Spotify</span>` : ''}
-              ${r.roughVal !== null ? `<span class="badge ${r.highVal ? 'badge-yellow' : 'badge-blue'}">~$${Number(r.roughVal).toFixed(2)}</span>` : ''}
-              ${(r.roughWant > r.roughHave && r.roughWant >= 15) ? `<span class="badge badge-purple">💎 High Want (${r.roughWant})</span>` : ''}
-            </div>
-          </div>
-          <span class="stash-chev">›</span>
-        </div>
-      `).join('');
-
+      renderPileUI();
       document.getElementById('pileResultsCard').classList.remove('hidden');
       document.getElementById('pileResultsCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (err) {
@@ -2314,7 +2394,6 @@ Return ONLY valid JSON:
         const swappedRelease = isEditing && oldItem.synced_to_discogs && oldItem.discogs_id && Number(oldItem.discogs_id) !== Number(currentInspected.discogs_id);
 
         if (sameRelease) {
-          // Update existing Discogs collection instance in place!
           setStatus('Updating grades & notes on your existing Discogs item...', true);
           if (!instanceId) {
             const insts = await CC.findDiscogsInstances(oldItem.discogs_id);
@@ -2325,7 +2404,6 @@ Return ONLY valid JSON:
           }
           synced = true;
         } else {
-          // If editing and the pressing CHANGED -> remove the old wrong release from Discogs first!
           if (swappedRelease) {
             setStatus(`Removing wrong pressing #${oldItem.discogs_id} from Discogs...`, true);
             let oldInst = oldItem.discogs_instance_id;
@@ -2334,12 +2412,9 @@ Return ONLY valid JSON:
               const insts = await CC.findDiscogsInstances(oldItem.discogs_id);
               if (insts.length) { oldInst = insts[0].instance_id; oldFolder = String(insts[0].folder_id || oldFolder); }
             }
-            if (oldInst) {
-              await CC.deleteDiscogsInstance(oldFolder, oldItem.discogs_id, oldInst).catch(() => {});
-            }
+            if (oldInst) await CC.deleteDiscogsInstance(oldFolder, oldItem.discogs_id, oldInst).catch(() => {});
           }
 
-          // Add the new verified pressing to Discogs
           folderId = cfg.discogsFolderId || '1';
           setStatus(`Adding verified pressing #${currentInspected.discogs_id} to Discogs...`, true);
           const addRes = await CC.discogsFetch(
@@ -2361,7 +2436,6 @@ Return ONLY valid JSON:
       }
     }
 
-    // Save ALL staged photos (up to 4) at 1200px WebP — or preserve old photos if user didn't take new ones in edit mode
     const newThumbs = stagedPhotos.map(p => p.saveWebp);
     const finalThumbs = newThumbs.length ? newThumbs : (isEditing ? (oldItem.thumbs || (oldItem.thumb_data_url ? [oldItem.thumb_data_url] : [])) : []);
 
@@ -2426,7 +2500,7 @@ Return ONLY valid JSON:
 
   window.resetScanner = () => {
     scanRunId++;
-    CC.cancelGemini();
+    CC.cancelAI();
     stopHighlightAudio();
     setStatus('', false);
     pendingVoiceRetry = null;
@@ -2654,12 +2728,8 @@ Return ONLY valid JSON:
       if (instId) {
         await CC.syncDiscogsInstanceFields(fId, it.discogs_id, instId, it.media_condition, it.sleeve_condition, it.condition_note);
         toast('✅ Updated Stash & Discogs grades!');
-      } else {
-        toast('💾 Saved locally (could not locate Discogs instance)');
-      }
-    } else {
-      toast('💾 Grade & notes saved!');
-    }
+      } else toast('💾 Saved locally (could not locate Discogs instance)');
+    } else toast('💾 Grade & notes saved!');
 
     await CC.idbPut('stash', it);
     await loadStashCache();
@@ -2716,7 +2786,7 @@ Return ONLY valid JSON:
   };
 
   window.exportJSON = () => {
-    dl(JSON.stringify({ version: 6, exportedAt: new Date().toISOString(), stash: stashCache, spotifyProfile }), `cratecheck-backup-${new Date().toISOString().slice(0, 10)}.json`, 'application/json');
+    dl(JSON.stringify({ version: 7, exportedAt: new Date().toISOString(), stash: stashCache, spotifyProfile }), `cratecheck-backup-${new Date().toISOString().slice(0, 10)}.json`, 'application/json');
     toast('JSON backup downloaded');
   };
 
@@ -2738,13 +2808,45 @@ Return ONLY valid JSON:
     } catch (e) { toast('Invalid JSON: ' + e.message); }
   };
 
-  // ==================== SETTINGS & SPOTIFY WIRING ====================
+  // ==================== SETTINGS, OLLAMA & SPOTIFY WIRING ====================
   function refreshNotice() {
-    document.getElementById('setupNotice').classList.toggle('hidden', Boolean(cfg.geminiKey && cfg.discogsToken));
+    document.getElementById('setupNotice').classList.toggle('hidden', Boolean(CC.isAiReady() && cfg.discogsToken));
     updateSettingsPills();
   }
 
+  window.toggleAiProviderUI = () => {
+    const prov = document.getElementById('cfgAiProvider').value;
+    const fb = document.getElementById('cfgOllamaFallback').checked;
+    document.getElementById('ollamaConfigWrap').classList.toggle('hidden', prov !== 'ollama');
+    document.getElementById('geminiConfigWrap').classList.toggle('hidden', prov === 'ollama' && !fb);
+  };
+
+  window.fetchOllamaModels = async () => {
+    const url = document.getElementById('cfgOllamaUrl').value.trim();
+    if (!url) { toast('Paste your Ollama HTTPS URL first'); return; }
+    setStatus('Fetching installed models from your PC...', true);
+    try {
+      const models = await CC.listOllamaModels(url);
+      setStatus('', false);
+      if (!models.length) { toast('Connected, but no models pulled yet (run ollama pull qwen3.8:27b)', 4500); return; }
+      const sel = document.getElementById('ollamaModelPicker');
+      sel.innerHTML = `<option value="">Installed on your PC (${models.length})...</option>` +
+        models.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
+      if (!document.getElementById('cfgOllamaModel').value.trim()) {
+        document.getElementById('cfgOllamaModel').value = models[0];
+      }
+      toast(`✅ Loaded ${models.length} model(s) from your PC!`);
+    } catch (err) {
+      setStatus('', false);
+      toast('Could not reach Ollama: ' + err.message, 5000);
+    }
+  };
+
   window.saveSettings = (silent = false) => {
+    cfg.aiProvider = document.getElementById('cfgAiProvider').value;
+    cfg.ollamaUrl = document.getElementById('cfgOllamaUrl').value.trim().replace(/\/+$/, '');
+    cfg.ollamaModel = document.getElementById('cfgOllamaModel').value.trim() || 'qwen3.8:27b';
+    cfg.ollamaFallback = document.getElementById('cfgOllamaFallback').checked;
     cfg.geminiKey = document.getElementById('cfgGeminiKey').value.trim();
     cfg.geminiModel = document.getElementById('cfgGeminiModel').value;
     cfg.autoPlayHighlight = document.getElementById('cfgAutoPlay').checked;
@@ -2765,20 +2867,28 @@ Return ONLY valid JSON:
     if (!silent) toast('Settings saved!');
   };
 
-  window.testGeminiKey = async () => {
+  window.testAiConnection = async () => {
     saveSettings(true);
-    const badge = document.getElementById('geminiStatusBadge');
-    if (!cfg.geminiKey) { badge.style.color = 'var(--red)'; badge.textContent = '❌ Paste key first'; return; }
-    badge.style.color = 'var(--muted)'; badge.textContent = 'Testing...';
+    const badge = document.getElementById('aiStatusBadge');
+    if (!CC.isAiReady()) {
+      badge.style.color = 'var(--red)';
+      badge.textContent = cfg.aiProvider === 'ollama' ? '❌ Enter URL & Model' : '❌ Paste API key';
+      return;
+    }
+    badge.style.color = 'var(--muted)';
+    badge.textContent = `Testing ${cfg.aiProvider === 'ollama' ? 'Local PC' : 'Gemini'}...`;
+    setStatus(`Testing ${aiEngineLabel()}...`, true, { cancellable: true });
     try {
-      await CC.callGeminiJSON([{ text: 'Return ONLY valid JSON: {"ok": true}' }], null, { retryLabel: 'Key Test' });
-      badge.style.color = 'var(--green)'; badge.textContent = `✅ Connected (${cfg.geminiModel})`;
+      await CC.callAI([{ text: 'Return ONLY valid JSON: {"ok": true}' }], null, { retryLabel: 'AI Test' });
+      badge.style.color = 'var(--green)';
+      badge.textContent = `✅ Connected (${cfg.aiProvider === 'ollama' ? cfg.ollamaModel : cfg.geminiModel})`;
       setStatus('', false);
-      toast('✅ Gemini key verified!');
+      toast(`✅ Connected to ${aiEngineLabel()}!`);
     } catch (err) {
       setStatus('', false);
-      badge.style.color = 'var(--red)'; badge.textContent = '❌ Error';
-      if (err.name !== 'AbortError') toast('Gemini test failed: ' + err.message, 5000);
+      badge.style.color = 'var(--red)';
+      badge.textContent = '❌ Error';
+      if (err.name !== 'AbortError') toast('AI test failed: ' + err.message, 5200);
     }
   };
 
@@ -2929,6 +3039,10 @@ Return ONLY valid JSON:
     const spRec = await CC.idbGet('meta', 'spotify_profile');
     if (spRec?.value) spotifyProfile = spRec.value;
 
+    document.getElementById('cfgAiProvider').value = cfg.aiProvider || 'gemini';
+    document.getElementById('cfgOllamaUrl').value = cfg.ollamaUrl || '';
+    document.getElementById('cfgOllamaModel').value = cfg.ollamaModel || 'qwen3.8:27b';
+    document.getElementById('cfgOllamaFallback').checked = Boolean(cfg.ollamaFallback);
     document.getElementById('cfgGeminiKey').value = cfg.geminiKey || '';
     document.getElementById('cfgGeminiModel').value = cfg.geminiModel || 'gemini-3.5-flash-lite';
     document.getElementById('cfgAutoPlay').checked = cfg.autoPlayHighlight !== false;
@@ -2949,10 +3063,16 @@ Return ONLY valid JSON:
     document.getElementById('gMediaCond').innerHTML = gradeOptionsHtml(MEDIA_GRADES, 'Very Good Plus (VG+)');
     document.getElementById('gSleeveCond').innerHTML = gradeOptionsHtml(SLEEVE_GRADES, 'Very Good Plus (VG+)');
 
+    toggleAiProviderUI();
     populateFolders();
     updateSpotifyUI();
     refreshNotice();
     updateStageUI();
+
+    document.getElementById('cfgOllamaFallback').addEventListener('change', toggleAiProviderUI);
+    document.getElementById('pileOverlay').addEventListener('click', (e) => {
+      if (e.target === e.currentTarget && activePileIdx !== null) clearPileHighlight();
+    });
 
     document.querySelectorAll('#scanModeSeg .mode-btn').forEach(btn => {
       btn.addEventListener('click', () => setScanMode(btn.dataset.mode));

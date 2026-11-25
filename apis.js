@@ -31,6 +31,10 @@
   ];
 
   CC.cfg = Object.assign({
+    aiProvider: 'gemini',
+    ollamaUrl: '',
+    ollamaModel: 'qwen3.8:27b',
+    ollamaFallback: false,
     geminiKey: '',
     geminiModel: 'gemini-3.5-flash-lite',
     autoPlayHighlight: true,
@@ -55,6 +59,12 @@
   }, JSON.parse(localStorage.getItem(CC.CFG_KEY) || '{}'));
 
   CC.persistCfg = () => localStorage.setItem(CC.CFG_KEY, JSON.stringify(CC.cfg));
+
+  CC.isAiReady = () => {
+    if (CC.cfg.aiProvider === 'ollama') return Boolean(CC.cfg.ollamaUrl?.trim() && CC.cfg.ollamaModel?.trim());
+    return Boolean(CC.cfg.geminiKey?.trim());
+  };
+
   CC.sleep = (ms, signal) => new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(new DOMException('Cancelled', 'AbortError')); return; }
     const t = setTimeout(() => {
@@ -150,7 +160,6 @@
         statusCb(`Discogs 60/min ceiling reached — resuming in ${Math.ceil(waitMs / 1000)}s...`, true);
         await CC.sleep(Math.max(1000, waitMs));
       }
-      // Smart burst: 160ms gap when plenty of headroom, 950ms when nearing cap
       const minGap = recentDCalls.length > 42 ? 950 : 160;
       const gap = Date.now() - lastDCall;
       if (gap < minGap) await CC.sleep(minGap - gap);
@@ -202,14 +211,12 @@
     return data;
   };
 
-  // Find existing instance(s) of a release in user's Discogs collection
   CC.findDiscogsInstances = async (releaseId) => {
     if (!CC.cfg.discogsUser || !releaseId) return [];
     const data = await CC.discogsFetch(`/users/${encodeURIComponent(CC.cfg.discogsUser)}/collection/releases/${releaseId}`).catch(() => null);
     return Array.isArray(data?.releases) ? data.releases : [];
   };
 
-  // Delete an instance from user's Discogs collection
   CC.deleteDiscogsInstance = async (folderId, releaseId, instanceId) => {
     if (!CC.cfg.discogsUser || !releaseId || !instanceId) return false;
     await CC.discogsFetch(
@@ -220,7 +227,6 @@
     return true;
   };
 
-  // Push Media Condition, Sleeve Condition, and Notes fields
   CC.syncDiscogsInstanceFields = async (folderId, releaseId, instanceId, mediaCond, sleeveCond, notes) => {
     if (!CC.cfg.discogsUser || !releaseId || !instanceId) return 0;
     const f = CC.cfg.discogsFields || { media: 1, sleeve: 2, notes: 3 };
@@ -244,23 +250,116 @@
     return okCount;
   };
 
-  // ==================== GEMINI API (INFINITE 5s AUTO-RETRY + CANCEL) ====================
-  let activeGeminiCtrl = null;
+  // ==================== UNIFIED AI ENGINE (LOCAL PC OLLAMA + GEMINI CLOUD) ====================
+  let activeAiCtrl = null;
 
-  CC.cancelGemini = () => {
-    if (activeGeminiCtrl) {
-      try { activeGeminiCtrl.abort(); } catch (_) {}
-      activeGeminiCtrl = null;
+  CC.cancelAI = () => {
+    if (activeAiCtrl) {
+      try { activeAiCtrl.abort(); } catch (_) {}
+      activeAiCtrl = null;
     }
   };
+  CC.cancelGemini = CC.cancelAI;
 
-  CC.callGeminiJSON = async (parts, thinkingLevel = null, opts = {}) => {
-    const { expectJSON = true, retryLabel = 'Gemini' } = opts;
-    const model = (CC.cfg.geminiModel || 'gemini-3.5-flash-lite').trim();
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(CC.cfg.geminiKey.trim())}`;
+  function cleanJsonText(raw) {
+    const noThink = String(raw || '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+    const cleaned = noThink.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+    try { return JSON.parse(cleaned); }
+    catch (_) {
+      const m = cleaned.match(/\{[\s\S]*\}/);
+      if (m) return JSON.parse(m[0]);
+      throw new Error('Could not parse AI JSON response');
+    }
+  }
+
+  CC.listOllamaModels = async (rawUrl) => {
+    const base = String(rawUrl || CC.cfg.ollamaUrl || '').trim().replace(/\/+$/, '');
+    if (!base) throw new Error('Enter your Ollama HTTPS URL first');
+    const res = await fetch(`${base}/api/tags`);
+    if (!res.ok) throw new Error(`Ollama HTTP ${res.status}`);
+    const data = await res.json();
+    return (data.models || []).map(m => m.name).filter(Boolean);
+  };
+
+  async function runOllamaRequest(parts, thinkingLevel, opts) {
+    const { expectJSON = true, retryLabel = 'Local PC' } = opts;
+    const base = String(CC.cfg.ollamaUrl || '').trim().replace(/\/+$/, '');
+    const model = String(CC.cfg.ollamaModel || 'qwen3.8:27b').trim();
+    if (!base || !model) throw new Error('Set your Ollama URL & Model in Settings');
+
+    const promptText = parts.filter(p => p.text).map(p => p.text).join('\n\n');
+    const images = parts.filter(p => p.inline_data?.data).map(p => p.inline_data.data);
+
+    // Dynamically size num_ctx so Ollama never silently truncates large Discogs/Spotify prompts
+    const estTokens = Math.ceil(promptText.length / 3) + images.length * 1600 + 4096;
+    let numCtx = 16384;
+    if (estTokens > 65536) numCtx = 131072;
+    else if (estTokens > 32768) numCtx = 65536;
+    else if (estTokens > 16384) numCtx = 32768;
 
     const ctrl = new AbortController();
-    activeGeminiCtrl = ctrl;
+    activeAiCtrl = ctrl;
+    const signal = ctrl.signal;
+
+    const sendChat = (useThink) => {
+      const body = {
+        model,
+        stream: false,
+        messages: [{ role: 'user', content: promptText, ...(images.length ? { images } : {}) }],
+        options: { temperature: 0.1, num_ctx: numCtx }
+      };
+      if (expectJSON) body.format = 'json';
+      if (useThink) body.think = true;
+      return fetch(`${base}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal
+      });
+    };
+
+    try {
+      let res = await sendChat(Boolean(thinkingLevel));
+      if (res.status === 400 && thinkingLevel) res = await sendChat(false);
+      if (!res.ok) {
+        const t = await res.text().catch(() => '');
+        const e = new Error(`Ollama HTTP ${res.status}: ${t.slice(0, 140)}`);
+        e.status = res.status;
+        throw e;
+      }
+
+      const data = await res.json();
+      let raw = data?.message?.content || '';
+
+      // Edge-case safeguard: if a thinking model filled message.thinking and left content empty under JSON mode, retry once with think:false
+      if (!raw.trim() && thinkingLevel) {
+        statusCb(`${retryLabel}: finalizing structured output on PC...`, true, { cancellable: true });
+        const retryRes = await sendChat(false);
+        if (retryRes.ok) {
+          const retryData = await retryRes.json();
+          raw = retryData?.message?.content || '';
+        }
+      }
+
+      if (!expectJSON) return String(raw).replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+      return cleanJsonText(raw);
+    } catch (err) {
+      if (err.name === 'AbortError' || signal.aborted) throw new DOMException('Cancelled by user', 'AbortError');
+      err.isOllamaNet = !err.status;
+      throw err;
+    } finally {
+      if (activeAiCtrl === ctrl) activeAiCtrl = null;
+    }
+  }
+
+  async function runGeminiRequest(parts, thinkingLevel, opts) {
+    const { expectJSON = true, retryLabel = 'Gemini' } = opts;
+    if (!CC.cfg.geminiKey?.trim()) throw new Error('Add your Gemini API Key in Settings');
+    const model = (CC.cfg.geminiModel || 'gemini-3.5-flash-lite').trim();
+    const url = `[https://generativelanguage.googleapis.com/v1beta/models/$](https://generativelanguage.googleapis.com/v1beta/models/$){encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(CC.cfg.geminiKey.trim())}`;
+
+    const ctrl = new AbortController();
+    activeAiCtrl = ctrl;
     const signal = ctrl.signal;
 
     const send = (useThinking) => {
@@ -291,7 +390,6 @@
           continue;
         }
 
-        // Transient server overload -> keep retrying every 5 seconds until user cancels
         if ([500, 502, 503, 504].includes(res.status)) {
           statusCb(`${retryLabel} busy (HTTP ${res.status}) — retrying in 5s (try #${attempt + 1})...`, true, { cancellable: true });
           await CC.sleep(5000, signal);
@@ -308,19 +406,29 @@
         const data = await res.json();
         const raw = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
         if (!expectJSON) return raw.trim();
-
-        const cleaned = raw.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
-        try { return JSON.parse(cleaned); }
-        catch (_) {
-          const m = cleaned.match(/\{[\s\S]*\}/);
-          if (m) return JSON.parse(m[0]);
-          throw new Error('Could not parse Gemini JSON');
-        }
+        return cleanJsonText(raw);
       }
     } finally {
-      if (activeGeminiCtrl === ctrl) activeGeminiCtrl = null;
+      if (activeAiCtrl === ctrl) activeAiCtrl = null;
     }
+  }
+
+  CC.callAI = async (parts, thinkingLevel = null, opts = {}) => {
+    if (CC.cfg.aiProvider === 'ollama') {
+      try {
+        return await runOllamaRequest(parts, thinkingLevel, opts);
+      } catch (err) {
+        if (err.name === 'AbortError') throw err;
+        if (CC.cfg.ollamaFallback && CC.cfg.geminiKey?.trim()) {
+          statusCb(`Local PC unreachable — falling back to Gemini Cloud...`, true, { cancellable: true });
+          return await runGeminiRequest(parts, thinkingLevel, opts);
+        }
+        throw new Error(`Local PC (${CC.cfg.ollamaModel}): ${err.message}`);
+      }
+    }
+    return await runGeminiRequest(parts, thinkingLevel, opts);
   };
+  CC.callGeminiJSON = CC.callAI;
 
   // ==================== REMIX-AWARE AUDIO PREVIEW + PLATFORM AVAILABILITY ====================
   function splitTrackVersion(raw) {
@@ -385,7 +493,7 @@
 
   async function queryApple(term, artist, rawTrack, album, strictTrack) {
     try {
-      const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(term)}&media=music&entity=song&limit=25`);
+      const res = await fetch(`[https://itunes.apple.com/search?term=$](https://itunes.apple.com/search?term=$){encodeURIComponent(term)}&media=music&entity=song&limit=25`);
       if (!res.ok) return null;
       const data = await res.json();
       const items = (data.results || []).filter(r => r.previewUrl || r.trackViewUrl);
@@ -440,7 +548,7 @@
       };
 
       script.onerror = () => { cleanup(); resolve(null); };
-      script.src = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=20&output=jsonp&callback=${cbName}`;
+      script.src = `[https://api.deezer.com/search?q=$](https://api.deezer.com/search?q=$){encodeURIComponent(query)}&limit=20&output=jsonp&callback=${cbName}`;
       document.body.appendChild(script);
     });
   }
@@ -448,7 +556,7 @@
   async function querySpotifyExact(query, artist, rawTrack, album, strictTrack) {
     if (!CC.cfg.spotifyAccessToken && !CC.cfg.spotifyRefreshToken) return null;
     try {
-      const d = await spFetch(`https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=track&limit=10`);
+      const d = await spFetch(`[https://api.spotify.com/v1/search?q=$](https://api.spotify.com/v1/search?q=$){encodeURIComponent(query)}&type=track&limit=10`);
       const list = d?.tracks?.items || [];
       if (!list.length) return null;
       const best = list
@@ -470,7 +578,6 @@
     } catch (_) { return null; }
   }
 
-  // Returns { clip, fallbackClip, platforms: { spotify, apple, deezer, youtube } }
   CC.fetchAudioAndPlatforms = async (artist, track, album, strictTrack = true) => {
     const isVarious = !artist || /^various(\s+artists)?$/i.test(artist.trim());
     const rawTrack = String(track || '').trim();
@@ -480,8 +587,7 @@
     const primaryQ = (base && version) ? `${prefix}${base} ${version}`.trim()
       : (base ? `${prefix}${base}`.trim() : `${prefix}${album}`.trim());
     const baseQ = base ? `${prefix}${base}`.trim() : primaryQ;
-
-    const ytUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(primaryQ)}`;
+    const ytUrl = `[https://www.youtube.com/results?search_query=$](https://www.youtube.com/results?search_query=$){encodeURIComponent(primaryQ)}`;
 
     const [ap1, dz1, sp1] = await Promise.all([
       queryApple(primaryQ, artist, rawTrack, album, strictTrack),
@@ -491,7 +597,6 @@
 
     let apBest = ap1, dzBest = dz1, spBest = sp1;
 
-    // If a specific remix/version wasn't matched on any platform, check base track as an EXPLICIT optional fallback
     if (version && !ap1?.exactVersion && !dz1?.exactVersion) {
       const [ap2, dz2] = await Promise.all([
         queryApple(baseQ, artist, rawTrack, album, strictTrack),
@@ -534,7 +639,7 @@
   CC.refreshSpotifyToken = async () => {
     if (!CC.cfg.spotifyRefreshToken || !CC.cfg.spotifyClientId) return false;
     try {
-      const res = await fetch('https://accounts.spotify.com/api/token', {
+      const res = await fetch('[https://accounts.spotify.com/api/token](https://accounts.spotify.com/api/token)', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
@@ -572,7 +677,7 @@
     const challenge = await sha256B64(verifier);
     localStorage.setItem('sp_pkce_verifier', verifier);
     localStorage.setItem('sp_pkce_state', state);
-    const authUrl = new URL('https://accounts.spotify.com/authorize');
+    const authUrl = new URL('[https://accounts.spotify.com/authorize](https://accounts.spotify.com/authorize)');
     authUrl.searchParams.set('client_id', CC.cfg.spotifyClientId.trim());
     authUrl.searchParams.set('response_type', 'code');
     authUrl.searchParams.set('redirect_uri', CC.REDIRECT_URI);
@@ -587,7 +692,7 @@
     const savedState = localStorage.getItem('sp_pkce_state');
     const verifier = localStorage.getItem('sp_pkce_verifier');
     if (!verifier || state !== savedState) throw new Error('Spotify state mismatch — try connecting again');
-    const res = await fetch('https://accounts.spotify.com/api/token', {
+    const res = await fetch('[https://accounts.spotify.com/api/token](https://accounts.spotify.com/api/token)', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -606,11 +711,10 @@
     CC.persistCfg();
   };
 
-  // Full uncapped sync: all 3 time ranges, all liked songs, all saved albums, all owned/collab playlists, exact (artist|track) pairs & decades
   CC.syncSpotifyAll = async (existingDna = '') => {
     statusCb('Starting complete Spotify library sync...', true);
-    const artistMap = {}; // normArtist -> { name, count, tracks: Set, playlists: Set }
-    const trackPairs = new Set(); // "normArtist|normTrack"
+    const artistMap = {};
+    const trackPairs = new Set();
     const trackTitles = new Set();
     const decades = {};
     const playlistSummaries = [];
@@ -645,21 +749,20 @@
       });
     };
 
-    const me = await spFetch('https://api.spotify.com/v1/me');
+    const me = await spFetch('[https://api.spotify.com/v1/me](https://api.spotify.com/v1/me)');
 
-    // All 3 Top Artist & Top Track time ranges
     for (const range of ['long_term', 'medium_term', 'short_term']) {
       statusCb(`Syncing Top Artists & Tracks (${range})...`, true);
-      const topA = await spFetch(`https://api.spotify.com/v1/me/top/artists?limit=50&time_range=${range}`).catch(() => ({ items: [] }));
+      const topA = await spFetch(`[https://api.spotify.com/v1/me/top/artists?limit=50&time_range=$](https://api.spotify.com/v1/me/top/artists?limit=50&time_range=$){range}`).catch(() => ({ items: [] }));
       (topA.items || []).forEach((a, i) => {
         const rec = ensureArtist(a.name);
         if (rec) rec.count += Math.max(4, 20 - Math.floor(i / 3));
       });
-      const topT = await spFetch(`https://api.spotify.com/v1/me/top/tracks?limit=50&time_range=${range}`).catch(() => ({ items: [] }));
+      const topT = await spFetch(`[https://api.spotify.com/v1/me/top/tracks?limit=50&time_range=$](https://api.spotify.com/v1/me/top/tracks?limit=50&time_range=$){range}`).catch(() => ({ items: [] }));
       (topT.items || []).forEach(t => addTrack(t, 3));
     }
 
-    let next = 'https://api.spotify.com/v1/me/tracks?limit=50';
+    let next = '[https://api.spotify.com/v1/me/tracks?limit=50](https://api.spotify.com/v1/me/tracks?limit=50)';
     let count = 0;
     while (next) {
       statusCb(`Syncing Liked Songs (${count} scanned)...`, true);
@@ -670,7 +773,7 @@
       if (next) await CC.sleep(70);
     }
 
-    next = 'https://api.spotify.com/v1/me/albums?limit=50';
+    next = '[https://api.spotify.com/v1/me/albums?limit=50](https://api.spotify.com/v1/me/albums?limit=50)';
     count = 0;
     while (next) {
       statusCb(`Syncing Saved Albums (${count} scanned)...`, true);
@@ -689,7 +792,7 @@
     }
 
     const owned = [];
-    let plUrl = 'https://api.spotify.com/v1/me/playlists?limit=50';
+    let plUrl = '[https://api.spotify.com/v1/me/playlists?limit=50](https://api.spotify.com/v1/me/playlists?limit=50)';
     while (plUrl) {
       statusCb(`Finding your playlists (${owned.length} owned)...`, true);
       const pls = await spFetch(plUrl).catch(() => ({ items: [], next: null }));
@@ -700,7 +803,7 @@
 
     for (let i = 0; i < owned.length; i++) {
       const pl = owned[i];
-      let pNext = `https://api.spotify.com/v1/playlists/${pl.id}/items?limit=50`;
+      let pNext = `[https://api.spotify.com/v1/playlists/$](https://api.spotify.com/v1/playlists/$){pl.id}/items?limit=50`;
       let pTracks = 0;
       while (pNext) {
         statusCb(`Playlist ${i + 1}/${owned.length}: ${pl.name} (${pTracks} songs)...`, true);
@@ -713,7 +816,6 @@
       playlistSummaries.push({ name: pl.name, count: pTracks });
     }
 
-    // Serialize sets cleanly for IndexedDB
     const allArtists = {};
     Object.entries(artistMap).forEach(([k, v]) => {
       allArtists[k] = {
