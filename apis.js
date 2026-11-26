@@ -174,6 +174,8 @@
     autoPlayHighlight: true,
     autoDetective: true,
     autoGradeOnScan: false,
+    autoCropPhotos: true,
+    photoQuality: 'medium',
     preferredCameraId: '',
     googleClientId: '',
     googleAutoSync: true,
@@ -3097,6 +3099,7 @@
 
   const PREF_KEYS = [
     'geminiModel', 'autoPlayHighlight', 'autoDetective', 'autoGradeOnScan',
+    'autoCropPhotos', 'photoQuality',
     'homeCountry', 'fetchVgSuggestions', 'threshold', 'voice',
     'showSpotify', 'showApple', 'showDeezer', 'showYoutube'
   ];
@@ -3104,6 +3107,8 @@
     'geminiKey', 'discogsToken', 'discogsUser', 'discogsFolderId',
     'discogsFolders', 'discogsFields', 'spotifyClientId'
   ];
+  CC.PREF_KEYS = PREF_KEYS;
+  CC.SECRET_KEYS = SECRET_KEYS;
   const STASH_MERGE_FIELDS = [
     'title', 'artist', 'catno', 'format', 'year', 'label', 'country', 'genres',
     'media_condition', 'sleeve_condition', 'condition_note',
@@ -4025,31 +4030,40 @@
       }
     }
 
-    // Step 2: Group verified physical Discogs copies by canonical copy key OR shared discogs_instance_id (when accounts don't conflict)
+    // Step 2: Group verified physical Discogs copies by canonical copy key.
+    // Pre-scan all records to collect distinct non-empty normalized accounts per (relId, instId)
+    // so an unowned legacy row ONLY merges when EXACTLY ONE unique account owns that (relId, instId).
+    const accountsByRelInst = new Map();
+    for (const rec of byCanonSync.values()) {
+      if (rec.discogs_removed) continue;
+      const ckOwned = CC.getDiscogsCopyKey(rec);
+      const relId = Number(rec.discogs_id || 0);
+      const instId = Number(rec.discogs_instance_id || 0);
+      const acct = String(rec.discogs_account || '').trim().toLowerCase();
+      if (ckOwned && relId > 0 && instId > 0 && acct) {
+        const pairKey = `${relId}|${instId}`;
+        if (!accountsByRelInst.has(pairKey)) accountsByRelInst.set(pairKey, new Map());
+        accountsByRelInst.get(pairKey).set(acct, ckOwned);
+      }
+    }
+
     const copyGroups = new Map();
     const ungrouped = [];
-    const instanceToGroupKey = new Map();
     for (const rec of byCanonSync.values()) {
       let ck = CC.getDiscogsCopyKey(rec);
       const instId = Number(rec.discogs_instance_id || 0);
       const relId = Number(rec.discogs_id || 0);
       if (!ck && !rec.discogs_removed && instId > 0 && relId > 0) {
-        const existingKey = instanceToGroupKey.get(`${relId}|${instId}`);
-        if (existingKey) {
-          ck = existingKey;
+        const acctMap = accountsByRelInst.get(`${relId}|${instId}`);
+        if (acctMap && acctMap.size === 1) {
+          ck = Array.from(acctMap.values())[0];
+        } else if (acctMap && acctMap.size >= 2) {
+          // Ambiguous multi-account ownership: NEVER guess — leave unmerged & flag for user review!
+          ungrouped.push({ ...rec, discogs_link_ambiguous: true });
+          continue;
         } else {
           ck = `_inst|${relId}|${instId}`;
         }
-      } else if (ck && instId > 0 && relId > 0) {
-        const fallbackKey = `_inst|${relId}|${instId}`;
-        if (copyGroups.has(fallbackKey)) {
-          // Promote fallback group into verified canonical key
-          const prevItems = copyGroups.get(fallbackKey);
-          copyGroups.delete(fallbackKey);
-          if (!copyGroups.has(ck)) copyGroups.set(ck, []);
-          copyGroups.get(ck).push(...prevItems);
-        }
-        instanceToGroupKey.set(`${relId}|${instId}`, ck);
       }
       if (!ck) {
         ungrouped.push(rec);
@@ -4217,8 +4231,12 @@
     const listing = _prefetchedListing || await listAppDataFiles();
     const { map: fileMap, v2Batches, v2Secrets, legacyDeltas } = listing;
 
-    const legacySnapshotFile = GDRIVE_LEGACY_STATE_NAMES.map(n => fileMap.get(n)).find(Boolean) || null;
-    const hasCloudData = Boolean(legacySnapshotFile || v2Batches.size > 0 || legacyDeltas.length > 0);
+    // Read ALL present snapshot files (both softspot_state.json AND cratecheck_state.json if both exist!)
+    const legacySnapshotFiles = GDRIVE_LEGACY_STATE_NAMES.map(n => fileMap.get(n)).filter(Boolean);
+    const hasCloudData = Boolean(legacySnapshotFiles.length > 0 || v2Batches.size > 0 || legacyDeltas.length > 0);
+    const preSyncMeta = await CC.getCloudSyncMeta();
+    const alreadyAppliedIds = preSyncMeta?.appliedBatchIds || {};
+    const hasExistingLocalState = Boolean(preLocalStash.length > 0 || Object.keys(alreadyAppliedIds).length > 0);
 
     if (!hasCloudData) {
       // Still repair any verified local duplicates safely with zero Drive writes
@@ -4295,23 +4313,40 @@
       cloudSpotify = base;
     };
 
-    // A. Primary compacted snapshot (softspot_state.json, or legacy cratecheck_state.json)
+    // A. Read ALL present snapshot files (softspot_state.json AND legacy cratecheck_state.json)
     const compactedBatchIdSet = new Set();
-    if (legacySnapshotFile?.id) {
-      report(`☁️ Reading cloud state (${legacySnapshotFile.name})...`);
-      const res = await gdriveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(legacySnapshotFile.id)}?alt=media`);
-      const snap = await res.json();
-      if (!snap || typeof snap !== 'object') throw new Error('Malformed cloud snapshot JSON');
-      (snap.stash || []).forEach(it => { if (it?.sync_id) cloudRawItems.push(it); });
-      Object.entries(snap.tombstones || snap.deleted_sync_ids || {}).forEach(([sid, ts]) => foldRemoteTombstone(sid, ts));
-      Object.entries(snap.sync_id_aliases || {}).forEach(([retiredSid, entry]) => {
-        if (entry?.targetSyncId) foldRemoteAlias(retiredSid, entry.targetSyncId, entry.copyKey || '', entry.retiredAt || 0, entry.rev || '');
-      });
-      if (snap.spotify_profile || snap.spotifyProfile) foldRemoteSpotify(snap.spotify_profile || snap.spotifyProfile);
-      if (snap.discogs_index || snap.discogsCollectionIndex) cloudDiscogsIdx = snap.discogs_index || snap.discogsCollectionIndex;
-      if (snap.prefs) cloudPrefs = snap.prefs;
-      if (CC.cfg.googleSyncSecrets && snap.secrets) cloudSecrets = snap.secrets;
-      if (Array.isArray(snap.compactedBatchIds)) snap.compactedBatchIds.forEach(bid => compactedBatchIdSet.add(bid));
+    for (const snapFile of legacySnapshotFiles) {
+      if (!snapFile?.id) continue;
+      try {
+        report(`☁️ Reading cloud state (${snapFile.name})...`);
+        const res = await gdriveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(snapFile.id)}?alt=media`);
+        const snap = await res.json();
+        if (!snap || typeof snap !== 'object') {
+          partialErrors.push(`Malformed cloud snapshot ${snapFile.name}`);
+          continue;
+        }
+        (snap.stash || []).forEach(it => { if (it?.sync_id) cloudRawItems.push(it); });
+        Object.entries(snap.tombstones || snap.deleted_sync_ids || {}).forEach(([sid, ts]) => foldRemoteTombstone(sid, ts));
+        Object.entries(snap.sync_id_aliases || {}).forEach(([retiredSid, entry]) => {
+          if (entry?.targetSyncId) foldRemoteAlias(retiredSid, entry.targetSyncId, entry.copyKey || '', entry.retiredAt || 0, entry.rev || '');
+        });
+        if (snap.spotify_profile || snap.spotifyProfile) foldRemoteSpotify(snap.spotify_profile || snap.spotifyProfile);
+        if (snap.discogs_index || snap.discogsCollectionIndex) {
+          const idx = snap.discogs_index || snap.discogsCollectionIndex;
+          if (!cloudDiscogsIdx || Number(idx.syncedAt || 0) >= Number(cloudDiscogsIdx.syncedAt || 0)) {
+            cloudDiscogsIdx = idx;
+          }
+        }
+        if (snap.prefs) {
+          if (!cloudPrefs || Number(snap.prefs.cfgUpdatedAt || 0) >= Number(cloudPrefs.cfgUpdatedAt || 0)) {
+            cloudPrefs = snap.prefs;
+          }
+        }
+        if (CC.cfg.googleSyncSecrets && snap.secrets) cloudSecrets = snap.secrets;
+        if (Array.isArray(snap.compactedBatchIds)) snap.compactedBatchIds.forEach(bid => compactedBatchIdSet.add(bid));
+      } catch (e) {
+        partialErrors.push(`Failed reading snapshot ${snapFile.name}: ${e.message}`);
+      }
     }
 
     // B. Legacy delta_*.json migration inputs
@@ -4326,9 +4361,10 @@
       }
     }
 
-    // C. Backwards-compatible uncompacted v2 batches (skip any already absorbed into softspot_state.json)
+    // C. Immutable v2 batches (fast incremental pull: skip batches already applied locally when device already has synced state)
     const sortedV2 = Array.from(v2Batches.values())
       .filter(bf => !compactedBatchIdSet.has(bf.batchId))
+      .filter(bf => !(hasExistingLocalState && Boolean(alreadyAppliedIds[bf.batchId])))
       .sort((a, b) =>
         String(a.modifiedTime || '').localeCompare(String(b.modifiedTime || '')) || a.batchId.localeCompare(b.batchId)
       );
@@ -4336,12 +4372,18 @@
     for (let i = 0; i < sortedV2.length; i++) {
       const bf = sortedV2[i];
       report(`☁️ Reading cloud batch ${i + 1}/${sortedV2.length}...`);
-      const res = await gdriveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(bf.id)}?alt=media`);
-      const bJson = await res.json();
-      if (!bJson || !Array.isArray(bJson.ops)) {
-        throw new Error(`Malformed cloud batch ${bf.name}`);
+      try {
+        const res = await gdriveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(bf.id)}?alt=media`);
+        const bJson = await res.json();
+        if (!bJson || !Array.isArray(bJson.ops)) {
+          partialErrors.push(`Malformed cloud batch ${bf.name}`);
+          continue;
+        }
+        loadedBatches.push({ batchId: bf.batchId, createdAt: Number(bJson.createdAt || 0), ops: bJson.ops });
+      } catch (e) {
+        // Do NOT mark this batchId as applied — keep it pending for retry on next pull!
+        partialErrors.push(`Failed reading batch ${bf.name}: ${e.message}`);
       }
-      loadedBatches.push({ batchId: bf.batchId, createdAt: Number(bJson.createdAt || 0), ops: bJson.ops });
     }
     loadedBatches.sort((a, b) => (a.createdAt - b.createdAt) || a.batchId.localeCompare(b.batchId));
 
@@ -4856,88 +4898,47 @@
     };
 
     const acknowledgedBatchIds = new Set();
-    const shouldCompact = Boolean(
-      batchesToUpload.length > 0 ||
-      allRemoteBatchFiles.length > 0 ||
-      legacyDeltaFiles.length > 0 ||
-      publishInitialLocal ||
-      !fileMap.has('softspot_state.json')
-    );
 
-    if (shouldCompact) {
-      // Dehydrate all merged stash photos into Drive .webp assets
-      const dehydratedStash = [];
-      for (const rec of (snapshotState.localStash || [])) {
-        dehydratedStash.push(await dehydrateRecord(rec));
+    // Upload each coalesced outbox batch as a NEW immutable ss_v2_batch_<batchId>.json file (POST).
+    // NEVER overwrite softspot_state.json and NEVER auto-delete remote Drive files during sync so
+    // concurrent phone + PC syncs can never clobber or drop an unmerged batch!
+    for (let i = 0; i < batchesToUpload.length; i++) {
+      const batch = batchesToUpload[i];
+      const fname = `ss_v2_batch_${batch.batchId}.json`;
+      if (existingV2Batches.has(batch.batchId) || fileMap.has(fname)) {
+        acknowledgedBatchIds.add(batch.batchId);
+        continue;
       }
 
-      const outPrefs = { cfgUpdatedAt: Number(CC.cfg.cfgUpdatedAt || Date.now()) };
-      PREF_KEYS.forEach(k => { outPrefs[k] = CC.cfg[k]; });
+      const cleanOps = [];
+      for (const op of (batch.ops || [])) {
+        if (!op || !op.type) continue;
+        if (op.type === 'upsert_stash' && op.record) {
+          cleanOps.push({ ...op, record: await dehydrateRecord(op.record) });
+        } else {
+          cleanOps.push(op);
+        }
+      }
 
-      const absorbedIds = new Set();
-      allRemoteBatchFiles.forEach(bf => { if (bf.batchId) absorbedIds.add(bf.batchId); });
-      batchesToUpload.forEach(b => { if (b.batchId) absorbedIds.add(b.batchId); });
-
-      const compactedPayload = {
-        formatVersion: 3,
-        compactedAt: Date.now(),
-        deviceId: CC.getDeviceId(),
-        stash: dehydratedStash,
-        tombstones: snapshotState.localDeleted || {},
-        deleted_sync_ids: snapshotState.localDeleted || {},
-        sync_id_aliases: snapshotState.localAliases || {},
-        spotify_profile: snapshotState.localSpotify || null,
-        spotifyProfile: snapshotState.localSpotify || null,
-        discogs_index: snapshotState.localDiscogsIdx || null,
-        discogsCollectionIndex: snapshotState.localDiscogsIdx || null,
-        prefs: outPrefs,
-        compactedBatchIds: Array.from(absorbedIds)
+      report(`☁️ Uploading sync batch ${i + 1}/${batchesToUpload.length}...`);
+      const payload = {
+        formatVersion: 2,
+        batchId: batch.batchId,
+        createdAt: Number(batch.createdAt || Date.now()),
+        deviceId: batch.deviceId || CC.getDeviceId(),
+        ops: cleanOps
       };
-
-      // Upload ONE compacted softspot_state.json FIRST!
-      report('☁️ Saving compacted softspot_state.json...');
-      const existingSnap = fileMap.get('softspot_state.json');
-      const uploadedSnap = await uploadAppDataMultipart(
-        'softspot_state.json',
-        new Blob([JSON.stringify(compactedPayload)], { type: 'application/json' }),
-        'application/json',
-        existingSnap?.id || null
+      const created = await uploadAppDataMultipart(
+        fname,
+        new Blob([JSON.stringify(payload)], { type: 'application/json' }),
+        'application/json'
       );
-      if (!uploadedSnap?.id) {
-        throw new Error('Failed to confirm softspot_state.json upload — keeping existing batch files safely');
+      if (!created?.id) {
+        throw new Error(`Failed to confirm upload of ${fname}`);
       }
-      fileMap.set('softspot_state.json', { id: uploadedSnap.id, name: 'softspot_state.json' });
-      batchesToUpload.forEach(b => acknowledgedBatchIds.add(b.batchId));
-      uploadedBatches = Math.max(1, batchesToUpload.length);
-
-      // ONLY AFTER softspot_state.json upload succeeds: delete all absorbed ss_v2_batch_*.json & legacy delta files!
-      const filesToDelete = [];
-      const seenDelIds = new Set();
-      for (const bf of allRemoteBatchFiles) {
-        if (bf?.id && bf.id !== uploadedSnap.id && !seenDelIds.has(bf.id)) {
-          seenDelIds.add(bf.id);
-          filesToDelete.push(bf);
-        }
-      }
-      for (const df of legacyDeltaFiles) {
-        if (df?.id && df.id !== uploadedSnap.id && !seenDelIds.has(df.id)) {
-          seenDelIds.add(df.id);
-          filesToDelete.push(df);
-        }
-      }
-      const legacyOldSnap = fileMap.get('cratecheck_state.json');
-      if (legacyOldSnap?.id && legacyOldSnap.id !== uploadedSnap.id && !seenDelIds.has(legacyOldSnap.id)) {
-        seenDelIds.add(legacyOldSnap.id);
-        filesToDelete.push(legacyOldSnap);
-      }
-
-      if (filesToDelete.length > 0) {
-        report(`☁️ Cleaning up ${filesToDelete.length} old sync batch file(s)...`);
-        for (const f of filesToDelete) {
-          const ok = await deleteAppDataFile(f.id);
-          if (ok) compactedBatches++;
-        }
-      }
+      fileMap.set(fname, { id: created.id, name: fname });
+      acknowledgedBatchIds.add(batch.batchId);
+      uploadedBatches++;
     }
 
     // Optional separate secrets batch ONLY when user explicitly opted in

@@ -7,13 +7,13 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>Soft Spot — Physical Media Scanner</title>
-  <link rel="stylesheet" href="style.css?v=2.1.5" />
+  <link rel="stylesheet" href="style.css?v=2.1.6" />
   <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
 <header>
-  <div class="brand">📼 Soft Spot <span class="ver-tag">v2.1.5</span></div>
+  <div class="brand">📼 Soft Spot <span class="ver-tag">v2.1.6</span></div>
   <div class="status-pills">
     <span id="cloudPill" class="pill" title="Google Drive Cloud Sync" onclick="handleCloudPillClick()">Cloud: Off</span>
     <span id="aiPill" class="pill" title="Gemini Cloud AI status" onclick="switchView('settings')">Gemini: Off</span>
@@ -106,7 +106,7 @@
         <div id="stagedSummary" class="staged-box hidden">
           <div id="stagedUpcRow" class="hidden" style="margin-bottom:8px;"></div>
           <div id="previewStrip" class="photo-gallery"></div>
-          <div style="font-size:0.72rem; color:var(--muted); margin-top:6px;">Tap any photo to inspect fullscreen · AI 2048px JPEG · Preview 1600×1600 WebP</div>
+          <div id="stagedPhotoHint" style="font-size:0.72rem; color:var(--muted); margin-top:6px;">Tap any photo to inspect fullscreen · Tap ✂️ to adjust crop</div>
         </div>
 
         <div id="singleActionRow" class="search-action-row hidden">
@@ -297,6 +297,9 @@
           <span id="tiebreakConfirmText">Confirm saving as most common pressing.</span>
         </label>
       </div>
+
+      <!-- Pre-Save Photo Crop Preview & Manual Override -->
+      <div id="inspPhotosToSaveWrap" class="insp-save-photos hidden"></div>
 
       <div style="margin-top:12px; display:flex; flex-direction:column; gap:8px;">
         <button id="btnSaveBoth" class="btn btn-green" onclick="saveCurrentItem(true)">
@@ -507,6 +510,23 @@
             <div style="font-size:0.76rem; color:var(--muted);">Off = faster OCR-only thrift scanning (defaults to Not Graded); grade on demand with ✨ AI Grade Photos</div>
           </div>
           <input id="cfgAutoGradeOnScan" type="checkbox" style="width:22px; height:22px;" onchange="toggleAutoGradeOnScan(this.checked)" />
+        </div>
+        <div class="toggle-row">
+          <div>
+            <div style="font-size:0.9rem; font-weight:600;">✂️ Auto-crop uploaded &amp; scanned photos</div>
+            <div style="font-size:0.76rem; color:var(--muted);">Uses Gemini Vision to tightly frame media &amp; upright spines immediately on upload/capture</div>
+          </div>
+          <input id="cfgAutoCropPhotos" type="checkbox" style="width:22px; height:22px;" onchange="saveSettings(false)" />
+        </div>
+        <div style="margin:8px 0 6px;">
+          <label class="field-label" for="cfgPhotoQuality">Photo Save Resolution</label>
+          <select id="cfgPhotoQuality" onchange="saveSettings(false)">
+            <option value="low">Low (800px — smallest storage)</option>
+            <option value="medium">Medium — 1200px (Recommended)</option>
+            <option value="high">High (1600px)</option>
+            <option value="very_high">Very High (2400px)</option>
+            <option value="raw">Raw (Original — untouched full size)</option>
+          </select>
         </div>
         <div class="inline-actions" style="margin-top:8px;">
           <button class="btn btn-sm" onclick="saveSettings()">Save Settings</button>
@@ -869,6 +889,8 @@
   <div class="crop-top">
     <span id="cropTitle" style="font-weight:800; font-size:0.9rem;">✂️ Crop &amp; Rotate</span>
     <div class="inline-actions" style="gap:6px;">
+      <button id="btnCropAuto" type="button" class="btn btn-purple btn-sm" onclick="autoCropModalNow()">✨ Auto-Crop</button>
+      <button type="button" class="btn btn-secondary btn-sm" onclick="setCropFullFrame()">Full Frame</button>
       <button type="button" class="btn btn-secondary btn-sm" onclick="rotateCropImage90()">↻ Rotate 90°</button>
       <button type="button" class="btn btn-secondary btn-sm" onclick="resetCropRect()">Reset</button>
       <button type="button" class="btn btn-secondary btn-sm" onclick="closeCropModal()">Cancel</button>
@@ -914,7 +936,7 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="apis.js?v=2.1.5"></script>
-<script src="app.js?v=2.1.5"></script>
+<script src="apis.js?v=2.1.6"></script>
+<script src="app.js?v=2.1.6"></script>
 </body>
 </html>

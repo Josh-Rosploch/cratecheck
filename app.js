@@ -53,6 +53,8 @@
   let stashPhotoManagerOpen = false;
   let stashAddPhotoMenuOpen = false;
   let stagedUpc = '';
+  let camIgnoredUpc = '';
+  let camIgnoredUpcMisses = 0;
   let activeFolderMoveConflict = null;
   let currentExtracted = null;
   let currentCandidates = [];
@@ -350,6 +352,8 @@
   function hideCameraUI() {
     if (camUpcRaf) cancelAnimationFrame(camUpcRaf);
     camUpcRaf = null;
+    camIgnoredUpc = '';
+    camIgnoredUpcMisses = 0;
     stopFocusPeaking(true);
     camTorchOn = false;
     camZoomWideOn = false;
@@ -895,7 +899,160 @@
     window.addEventListener('resize', () => { if (cropState.active) renderCropCanvas(); });
   }
 
-  function openCropModal({ dataUrl, title = '✂️ Crop & Rotate', mode = 'cover', onApply }) {
+  function getPhotoQualitySpec(mode = cfg.photoQuality) {
+    const key = String(mode || 'medium').toLowerCase();
+    if (key === 'low') return { key: 'low', label: 'Low (800px)', maxEdge: 800, spineMaxW: 800, quality: 0.78, raw: false };
+    if (key === 'high') return { key: 'high', label: 'High (1600px)', maxEdge: 1600, spineMaxW: 1200, quality: 0.86, raw: false };
+    if (key === 'very_high') return { key: 'very_high', label: 'Very High (2400px)', maxEdge: 2400, spineMaxW: 1600, quality: 0.90, raw: false };
+    if (key === 'raw') return { key: 'raw', label: 'Raw (Original)', maxEdge: null, spineMaxW: null, quality: 0.95, raw: true };
+    return { key: 'medium', label: 'Medium (1200px)', maxEdge: 1200, spineMaxW: 960, quality: 0.84, raw: false };
+  }
+
+  function readBlobAsDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      try {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(reader.error || new Error('Could not read file'));
+        reader.readAsDataURL(blob);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
+  function box2dToNormRect(box2d, padFrac = 0.025, minBoxSpan = 25) {
+    if (!Array.isArray(box2d) || box2d.length !== 4) return null;
+    const nums = box2d.map(Number);
+    if (!nums.every(Number.isFinite)) return null;
+    const isUnit = Math.max(...nums) > 0 && Math.max(...nums) <= 1.01;
+    let [y1, x1, y2, x2] = nums.map(v => Math.max(0, Math.min(1000, isUnit ? v * 1000 : v)));
+    if (y1 > y2) [y1, y2] = [y2, y1];
+    if (x1 > x2) [x1, x2] = [x2, x1];
+    const bw = x2 - x1;
+    const bh = y2 - y1;
+    if (bw < minBoxSpan || bh < minBoxSpan) return null;
+    if (padFrac > 0) {
+      const padX = Math.max(6, bw * padFrac);
+      const padY = Math.max(6, bh * padFrac);
+      x1 = Math.max(0, x1 - padX);
+      x2 = Math.min(1000, x2 + padX);
+      y1 = Math.max(0, y1 - padY);
+      y2 = Math.min(1000, y2 + padY);
+    }
+    return {
+      x: Math.max(0, Math.min(0.95, x1 / 1000)),
+      y: Math.max(0, Math.min(0.95, y1 / 1000)),
+      w: Math.max(0.05, Math.min(1, (x2 - x1) / 1000)),
+      h: Math.max(0.05, Math.min(1, (y2 - y1) / 1000))
+    };
+  }
+
+  function normRectToBox2d(rect) {
+    if (!rect || typeof rect !== 'object') return null;
+    const x1 = Math.max(0, Math.min(1000, Math.round((Number(rect.x) || 0) * 1000)));
+    const y1 = Math.max(0, Math.min(1000, Math.round((Number(rect.y) || 0) * 1000)));
+    const x2 = Math.max(x1 + 10, Math.min(1000, Math.round(((Number(rect.x) || 0) + (Number(rect.w) || 1)) * 1000)));
+    const y2 = Math.max(y1 + 10, Math.min(1000, Math.round(((Number(rect.y) || 0) + (Number(rect.h) || 1)) * 1000)));
+    return [y1, x1, y2, x2];
+  }
+
+  function rotateBox2dClockwise(box2d, rotDeg) {
+    const r = ((Number(rotDeg) % 360) + 360) % 360;
+    if (!Array.isArray(box2d) || box2d.length !== 4 || r === 0) return box2d;
+    let [y1, x1, y2, x2] = box2d.map(Number);
+    if (r === 90) return [x1, 1000 - y2, x2, 1000 - y1];
+    if (r === 180) return [1000 - y2, 1000 - x2, 1000 - y1, 1000 - x1];
+    if (r === 270) return [1000 - x2, y1, 1000 - x1, y2];
+    return box2d;
+  }
+
+  function renderDataUrlToCompactJpegB64(dataUrl, maxDim = 1280, quality = 0.82) {
+    return new Promise((resolve) => {
+      if (!dataUrl) { resolve(''); return; }
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const nw = img.naturalWidth || img.width;
+          const nh = img.naturalHeight || img.height;
+          if (!nw || !nh) { resolve(''); return; }
+          const out = renderSourceToDataUrl(img, nw, nh, maxDim, 'image/jpeg', quality);
+          resolve(out.split(',')[1] || '');
+        } catch (_) {
+          resolve('');
+        }
+      };
+      img.onerror = () => resolve('');
+      img.src = dataUrl;
+    });
+  }
+
+  // Shared fast Gemini Vision auto-crop helper (1 image <= 1280px JPEG -> box_2d + upright spine_rotation)
+  async function autoCropImageWithGemini(dataUrl, slot = 'cover') {
+    if (!dataUrl || !CC.isAiReady()) return { box_2d: null, spine_rotation: 0 };
+    const b64 = await renderDataUrlToCompactJpegB64(dataUrl, 1280, 0.82);
+    if (!b64) return { box_2d: null, spine_rotation: 0 };
+
+    const isSpine = slot === 'spine';
+    const prompt = isSpine
+      ? `Locate the physical music media SPINE (cassette, CD, vinyl, VHS, 8-track, etc.) in this photo and detect its exact upright rotation.
+Return ONLY valid JSON:
+{
+  "box_2d": [ymin, xmin, ymax, xmax] on 0-1000 scale tightly hugging the spine (remove background/table/hand), or null if no clear spine is visible,
+  "spine_rotation": 0 | 90 | 180 | 270
+}
+CRITICAL: "spine_rotation" is the exact CLOCKWISE rotation in degrees needed so the spine's printed text reads cleanly HORIZONTALLY left-to-right, right-side-up. Explicitly check if the text is upside-down and return 180 when inverted!`
+      : `Locate the physical music media item (cassette case/shell, CD jewel case/digipak, vinyl jacket/record, VHS, etc.) in this photo so we can crop out dead table, background, and hand whitespace.
+Return ONLY valid JSON:
+{
+  "box_2d": [ymin, xmin, ymax, xmax] on 0-1000 scale tightly framing the physical media/case/sleeve, or null if already tightly framed,
+  "spine_rotation": 0
+}`;
+
+    try {
+      const res = await CC.callAI(
+        [{ text: prompt }, { inline_data: { mime_type: 'image/jpeg', data: b64 } }],
+        'LOW',
+        { retryLabel: 'Auto-Crop' }
+      );
+      const rawBox = Array.isArray(res?.box_2d) && res.box_2d.length === 4 ? res.box_2d.map(Number) : null;
+      const validBox = (rawBox && rawBox.every(Number.isFinite)) ? rawBox : null;
+      const minSpan = isSpine ? 25 : 150;
+      let cleanBox = null;
+      if (validBox) {
+        const isUnit = Math.max(...validBox) > 0 && Math.max(...validBox) <= 1.01;
+        let [y1, x1, y2, x2] = validBox.map(v => Math.max(0, Math.min(1000, isUnit ? v * 1000 : v)));
+        if (y1 > y2) [y1, y2] = [y2, y1];
+        if (x1 > x2) [x1, x2] = [x2, x1];
+        if ((x2 - x1) >= minSpan && (y2 - y1) >= minSpan) {
+          cleanBox = [Math.round(y1), Math.round(x1), Math.round(y2), Math.round(x2)];
+        }
+      }
+      const rotRaw = Number(res?.spine_rotation);
+      const spineRotation = [0, 90, 180, 270].includes(rotRaw) ? rotRaw : 0;
+      return { box_2d: cleanBox, spine_rotation: isSpine ? spineRotation : 0 };
+    } catch (_) {
+      return { box_2d: null, spine_rotation: 0 };
+    }
+  }
+
+  function rotateCanvasByDeg(srcCanvas, deg) {
+    const normDeg = ((Number(deg) % 360) + 360) % 360;
+    if (!srcCanvas || normDeg === 0) return srcCanvas;
+    const swap = normDeg === 90 || normDeg === 270;
+    const next = document.createElement('canvas');
+    next.width = swap ? srcCanvas.height : srcCanvas.width;
+    next.height = swap ? srcCanvas.width : srcCanvas.height;
+    const ctx = next.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.translate(next.width / 2, next.height / 2);
+    ctx.rotate((normDeg * Math.PI) / 180);
+    ctx.drawImage(srcCanvas, -srcCanvas.width / 2, -srcCanvas.height / 2);
+    return next;
+  }
+
+  function openCropModal({ dataUrl, title = '✂️ Crop & Rotate', mode = 'cover', initialRect = null, initialRotation = 0, onApply }) {
     if (!dataUrl) return;
     initCropPointerEvents();
     const img = new Image();
@@ -903,8 +1060,11 @@
       const nw = img.naturalWidth || img.width;
       const nh = img.naturalHeight || img.height;
       if (!nw || !nh) { toast('Could not load photo for cropping'); return; }
-      const { width, height } = fitDims(nw, nh, 1800);
-      const c = document.createElement('canvas');
+      const spec = getPhotoQualitySpec();
+      const { width, height } = spec.raw
+        ? { width: nw, height: nh }
+        : fitDims(nw, nh, Math.max(1800, spec.maxEdge || 1800));
+      let c = document.createElement('canvas');
       c.width = width;
       c.height = height;
       const ctx = c.getContext('2d');
@@ -912,17 +1072,35 @@
       ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(img, 0, 0, width, height);
 
+      const initRot = ((Number(initialRotation) % 360) + 360) % 360;
+      if (initRot) c = rotateCanvasByDeg(c, initRot);
+
       cropState.active = true;
       cropState.mode = mode === 'spine' ? 'spine' : 'cover';
       cropState.srcCanvas = c;
-      cropState.rect = defaultCropRectForMode(cropState.mode);
+      cropState.rotatedInModal = Boolean(initRot);
+      if (initialRect && typeof initialRect === 'object' && Number(initialRect.w) >= 0.05 && Number(initialRect.h) >= 0.05) {
+        cropState.rect = {
+          x: Math.max(0, Math.min(0.95, Number(initialRect.x) || 0)),
+          y: Math.max(0, Math.min(0.95, Number(initialRect.y) || 0)),
+          w: Math.max(0.05, Math.min(1, Number(initialRect.w) || 1)),
+          h: Math.max(0.05, Math.min(1, Number(initialRect.h) || 1))
+        };
+      } else {
+        cropState.rect = defaultCropRectForMode(cropState.mode);
+      }
       cropState.dragMode = null;
       cropState.onApply = onApply || null;
 
       document.getElementById('cropTitle').textContent = title;
       document.getElementById('cropHint').textContent = cropState.mode === 'spine'
-        ? 'Frame the spine tightly · Tap ↻ Rotate 90° until upright'
-        : 'Drag inside to move · Drag corners to resize';
+        ? 'Frame the spine tightly · Tap ✨ Auto-Crop or ↻ Rotate 90°'
+        : 'Drag inside to move · Drag corners to resize · Tap Full Frame to uncrop';
+      const autoBtn = document.getElementById('btnCropAuto');
+      if (autoBtn) {
+        autoBtn.disabled = false;
+        autoBtn.textContent = '✨ Auto-Crop';
+      }
       document.getElementById('cropModal').classList.remove('hidden');
       try { history.pushState({ view: currentView, modal: 'crop', itemId: activeStashItem?.id || null }, ''); } catch (_) {}
       requestAnimationFrame(() => renderCropCanvas());
@@ -931,19 +1109,46 @@
     img.src = dataUrl;
   }
 
+  window.setCropFullFrame = () => {
+    if (!cropState.active) return;
+    cropState.rect = { x: 0, y: 0, w: 1, h: 1 };
+    renderCropCanvas();
+  };
+
+  window.autoCropModalNow = async () => {
+    if (!cropState.active || !cropState.srcCanvas) return;
+    if (!CC.isAiReady()) { toast('Add your Gemini API Key in Settings first'); return; }
+    const btn = document.getElementById('btnCropAuto');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Framing...'; }
+    try {
+      const snapUrl = canvasToDataUrl(cropState.srcCanvas, 'image/jpeg', 0.85);
+      const res = await autoCropImageWithGemini(snapUrl, cropState.mode);
+      if (!cropState.active) return;
+      let box = res.box_2d;
+      if (cropState.mode === 'spine' && res.spine_rotation) {
+        cropState.srcCanvas = rotateCanvasByDeg(cropState.srcCanvas, res.spine_rotation);
+        if (box) box = rotateBox2dClockwise(box, res.spine_rotation);
+      }
+      const nextRect = box ? box2dToNormRect(box, 0.025, cropState.mode === 'spine' ? 25 : 150) : null;
+      if (nextRect) {
+        cropState.rect = nextRect;
+        renderCropCanvas();
+        toast('✨ Auto-crop framed!', 1800);
+      } else {
+        renderCropCanvas();
+        toast(res.spine_rotation ? '↻ Spine upright — drag corners if needed' : 'Already tightly framed — drag corners to fine-tune', 2200);
+      }
+    } catch (err) {
+      if (err?.name !== 'AbortError') toast('Auto-crop failed: ' + (err?.message || 'Error'), 3200);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = '✨ Auto-Crop'; }
+    }
+  };
+
   window.rotateCropImage90 = () => {
     if (!cropState.active || !cropState.srcCanvas) return;
-    const prev = cropState.srcCanvas;
-    const next = document.createElement('canvas');
-    next.width = prev.height;
-    next.height = prev.width;
-    const ctx = next.getContext('2d');
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.translate(next.width / 2, next.height / 2);
-    ctx.rotate(Math.PI / 2);
-    ctx.drawImage(prev, -prev.width / 2, -prev.height / 2);
-    cropState.srcCanvas = next;
+    cropState.srcCanvas = rotateCanvasByDeg(cropState.srcCanvas, 90);
+    cropState.rotatedInModal = true;
     cropState.rect = defaultCropRectForMode(cropState.mode);
     renderCropCanvas();
   };
@@ -964,16 +1169,22 @@
   window.applyCropModal = async () => {
     if (!cropState.active || !cropState.srcCanvas) return;
     const src = cropState.srcCanvas;
-    const r = cropState.rect;
+    const r = { ...cropState.rect };
     const sx = Math.max(0, Math.round(r.x * src.width));
     const sy = Math.max(0, Math.round(r.y * src.height));
     const sw = Math.max(16, Math.min(src.width - sx, Math.round(r.w * src.width)));
     const sh = Math.max(16, Math.min(src.height - sy, Math.round(r.h * src.height)));
 
-    const maxEdge = cropState.mode === 'spine' ? 960 : 1200;
-    const { width: dstW, height: dstH } = cropState.mode === 'spine'
-      ? (sw > maxEdge ? { width: maxEdge, height: Math.max(1, Math.round(sh * (maxEdge / sw))) } : { width: sw, height: sh })
-      : fitDims(sw, sh, maxEdge);
+    const spec = getPhotoQualitySpec();
+    let dstW = sw, dstH = sh;
+    if (!spec.raw) {
+      const maxEdge = cropState.mode === 'spine' ? spec.spineMaxW : spec.maxEdge;
+      const fitted = cropState.mode === 'spine'
+        ? (sw > maxEdge ? { width: maxEdge, height: Math.max(1, Math.round(sh * (maxEdge / sw))) } : { width: sw, height: sh })
+        : fitDims(sw, sh, maxEdge);
+      dstW = fitted.width;
+      dstH = fitted.height;
+    }
 
     const outCanvas = document.createElement('canvas');
     outCanvas.width = dstW;
@@ -983,15 +1194,16 @@
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(src, sx, sy, sw, sh, 0, 0, dstW, dstH);
 
-    const croppedWebp = canvasToDataUrl(outCanvas, 'image/webp', 0.82);
-    const workingSourceWebp = canvasToDataUrl(src, 'image/webp', 0.82);
+    const croppedWebp = canvasToDataUrl(outCanvas, 'image/webp', spec.quality);
+    const workingSourceWebp = canvasToDataUrl(src, 'image/webp', spec.quality);
     const cb = cropState.onApply;
 
+    const wasRotated = Boolean(cropState.rotatedInModal);
     hideCropModalUI();
     if (history.state?.modal === 'crop') {
       try { history.replaceState({ view: currentView, modal: activeStashItem ? 'stashDetail' : null, itemId: activeStashItem?.id || null }, ''); } catch (_) {}
     }
-    if (typeof cb === 'function') await cb(croppedWebp, workingSourceWebp);
+    if (typeof cb === 'function') await cb(croppedWebp, workingSourceWebp, r, wasRotated);
   };
 
   // ==================== HIGH-RES MEMORY-SAFE IMAGE DECODING ====================
@@ -1059,7 +1271,9 @@
           const swap = normDeg === 90 || normDeg === 270;
           const rawW = swap ? nh : nw;
           const rawH = swap ? nw : nh;
-          const { width: dstW, height: dstH } = fitDims(rawW, rawH, maxLongEdge);
+          const { width: dstW, height: dstH } = (maxLongEdge === null || maxLongEdge === undefined)
+            ? { width: rawW, height: rawH }
+            : fitDims(rawW, rawH, maxLongEdge);
           const c = document.createElement('canvas');
           c.width = dstW;
           c.height = dstH;
@@ -1293,22 +1507,42 @@
       throw new Error(`Unsupported camera RAW file ${meta}. Please shoot or export as JPEG/PNG.`);
     }
 
+    const spec = getPhotoQualitySpec();
     const opts = Object.assign({
       aiMaxDim: 2048,
       aiQuality: 0.90,
-      saveMaxDim: 1600,
-      saveQuality: 0.84,
+      saveMaxDim: spec.maxEdge || 2400,
+      saveQuality: spec.quality,
+      rawSave: spec.raw,
+      keepOrigDataUrl: false,
       squarePreview: false
     }, customOpts);
 
+    let pair = null;
     if (typeof window.createImageBitmap === 'function') {
       try {
-        return await decodeViaImageBitmap(blob, opts);
+        pair = await decodeViaImageBitmap(blob, opts);
       } catch (_) {
-        // Graceful fallback to Image() element
+        pair = null;
       }
     }
-    return await decodeViaImgElement(blob, opts);
+    if (!pair) {
+      pair = await decodeViaImgElement(blob, opts);
+    }
+
+    if (opts.rawSave || opts.keepOrigDataUrl) {
+      try {
+        const rawUrl = await readBlobAsDataUrl(blob);
+        if (rawUrl && rawUrl.startsWith('data:image/')) {
+          pair.origDataUrl = rawUrl;
+          if (opts.rawSave) pair.saveWebp = rawUrl;
+        }
+      } catch (_) {}
+    }
+    if (!pair.origDataUrl) {
+      pair.origDataUrl = pair.apiB64 ? `data:image/jpeg;base64,${pair.apiB64}` : pair.saveWebp;
+    }
+    return pair;
   }
 
   // ==================== CONTINUOUS 2-SHOT & MULTI-SHOT PILE FULL-RES CAMERA VIEWFINDER ====================
@@ -1518,6 +1752,7 @@
 
     // Force main 1x rear camera if Android auto-picked an ultrawide/macro/tele lens and user hasn't picked a custom lens
     if (allowPrimaryLensSwitch && !cfg.preferredCameraId && track) {
+      let stoppedOld = false;
       try {
         const allDevs = await navigator.mediaDevices.enumerateDevices();
         const curLabel = track.label || '';
@@ -1525,10 +1760,24 @@
         const curDevId = track.getSettings?.()?.deviceId || '';
         if (primaryId && primaryId !== curDevId && isSecondaryRearLensLabel(curLabel)) {
           camStream.getTracks().forEach(t => t.stop());
+          stoppedOld = true;
           const mainStream = await openHighResCameraStream(primaryId);
-          return bindStreamToViewfinder(mainStream, false);
+          return await bindStreamToViewfinder(mainStream, false);
         }
-      } catch (_) {}
+      } catch (_) {
+        if (stoppedOld) {
+          // Immediately recover stream if switching to primaryId failed so viewfinder NEVER stays on a stopped stream!
+          try {
+            const recovered = await openHighResCameraStream('');
+            return await bindStreamToViewfinder(recovered, false);
+          } catch (recErr) {
+            hideCameraUI();
+            toast('Camera lens switch failed — opening phone camera', 3200);
+            document.getElementById(camMode === 'pile' ? 'pileCamInput' : 'nativeCamInput')?.click();
+            return;
+          }
+        }
+      }
     }
 
     camTorchOn = false;
@@ -1780,11 +2029,24 @@
               const codes = await detector.detect(video);
               const raw = codes?.[0]?.rawValue?.replace(/\D/g, '') || '';
               if (raw.length >= 8) {
-                stagedUpc = raw;
-                document.getElementById('fBarcode').value = raw;
-                playChime();
-                updateCameraOverlayUI();
-                updateStageUI();
+                if (camIgnoredUpc && raw === camIgnoredUpc) {
+                  // Still looking at the barcode the user just cleared — ignore until it leaves the frame!
+                  camIgnoredUpcMisses = 0;
+                } else {
+                  camIgnoredUpc = '';
+                  camIgnoredUpcMisses = 0;
+                  stagedUpc = raw;
+                  document.getElementById('fBarcode').value = raw;
+                  playChime();
+                  updateCameraOverlayUI();
+                  updateStageUI();
+                }
+              } else if (camIgnoredUpc) {
+                camIgnoredUpcMisses++;
+                if (camIgnoredUpcMisses >= 3) {
+                  camIgnoredUpc = '';
+                  camIgnoredUpcMisses = 0;
+                }
               }
             } catch (_) {}
           }
@@ -1824,9 +2086,10 @@
     flash.classList.add('flash');
     setTimeout(() => flash.classList.remove('flash'), 160);
 
+    const spec = getPhotoQualitySpec();
     const decodeOpts = camMode === 'pile'
-      ? { aiMaxDim: 3072, aiQuality: 0.92, saveMaxDim: 2048, saveQuality: 0.82, squarePreview: false }
-      : { aiMaxDim: 2048, aiQuality: 0.90, saveMaxDim: 1600, saveQuality: 0.85, squarePreview: false };
+      ? { aiMaxDim: 3072, aiQuality: 0.92, saveMaxDim: 2048, saveQuality: 0.82, rawSave: false, squarePreview: false }
+      : { aiMaxDim: 2048, aiQuality: 0.90, saveMaxDim: spec.maxEdge || 2400, saveQuality: spec.quality, rawSave: spec.raw, keepOrigDataUrl: true, squarePreview: false };
 
     try {
       let pair = null;
@@ -1843,10 +2106,15 @@
 
       if (!pair && video.videoWidth) {
         const apiDataUrl = renderSourceToDataUrl(video, video.videoWidth, video.videoHeight, decodeOpts.aiMaxDim, 'image/jpeg', decodeOpts.aiQuality);
-        const saveWebp = decodeOpts.squarePreview
-          ? renderSquareFittedPreview(video, video.videoWidth, video.videoHeight, decodeOpts.saveMaxDim, 'image/webp', decodeOpts.saveQuality)
-          : renderSourceToDataUrl(video, video.videoWidth, video.videoHeight, decodeOpts.saveMaxDim, 'image/webp', decodeOpts.saveQuality);
-        pair = { apiB64: apiDataUrl.split(',')[1], saveWebp };
+        const origFull = decodeOpts.rawSave
+          ? renderSourceToDataUrl(video, video.videoWidth, video.videoHeight, Math.max(video.videoWidth, video.videoHeight), 'image/webp', spec.quality)
+          : renderSourceToDataUrl(video, video.videoWidth, video.videoHeight, Math.max(video.videoWidth, video.videoHeight), 'image/jpeg', 0.92);
+        const saveWebp = decodeOpts.rawSave
+          ? origFull
+          : (decodeOpts.squarePreview
+            ? renderSquareFittedPreview(video, video.videoWidth, video.videoHeight, decodeOpts.saveMaxDim, 'image/webp', decodeOpts.saveQuality)
+            : renderSourceToDataUrl(video, video.videoWidth, video.videoHeight, decodeOpts.saveMaxDim, 'image/webp', decodeOpts.saveQuality));
+        pair = { apiB64: apiDataUrl.split(',')[1], saveWebp, origDataUrl: origFull };
       }
 
       if (pair) {
@@ -1856,7 +2124,9 @@
           toast(`Shot ${pilePhotos.length} captured — tap thumb to check sharpness, or Finish & Analyze`);
         } else {
           const slotIdx = stagedPhotos.length;
-          pair.origDataUrl = pair.apiB64 ? `data:image/jpeg;base64,${pair.apiB64}` : pair.saveWebp;
+          if (!pair.origDataUrl) pair.origDataUrl = pair.apiB64 ? `data:image/jpeg;base64,${pair.apiB64}` : pair.saveWebp;
+          pair.autoCropped = false;
+          pair.cropBox = null;
           stagedPhotos.push(pair);
           if (slotIdx === 2) {
             stagedSpineSourceUrl = pair.origDataUrl || pair.saveWebp;
@@ -1878,6 +2148,75 @@
     }
   };
 
+  async function autoCropStagedPhotosNow(indices = null) {
+    if (!cfg.autoCropPhotos || !CC.isAiReady() || !stagedPhotos.length) return 0;
+    const spec = getPhotoQualitySpec();
+    const targets = (Array.isArray(indices) ? indices : stagedPhotos.map((_, i) => i))
+      .filter(i => i >= 0 && i < stagedPhotos.length && stagedPhotos[i] && !stagedPhotos[i].autoCropped);
+    if (!targets.length) return 0;
+
+    let croppedCount = 0;
+    for (let t = 0; t < targets.length; t++) {
+      const idx = targets[t];
+      const p = stagedPhotos[idx];
+      if (!p || p.autoCropped) continue;
+      const isSpine = idx === 2;
+      const lbl = idx === 0 ? 'Front' : (idx === 1 ? 'Back' : (isSpine ? 'Spine' : 'Extra'));
+      setStatus(`✂️ Auto-cropping ${lbl} (${t + 1}/${targets.length})...`, true, { cancellable: true });
+      const srcUrl = p.origDataUrl || (p.apiB64 ? `data:image/jpeg;base64,${p.apiB64}` : p.saveWebp);
+      const res = await autoCropImageWithGemini(srcUrl, isSpine ? 'spine' : 'cover');
+      if (!stagedPhotos[idx] || stagedPhotos[idx] !== p) continue;
+
+      if (isSpine) {
+        const rot = [0, 90, 180, 270].includes(Number(res.spine_rotation)) ? Number(res.spine_rotation) : 0;
+        let thumbUrl = '';
+        if (res.box_2d) {
+          thumbUrl = await cropImageByBox(srcUrl, res.box_2d, {
+            minBoxSpan: 25,
+            padFrac: 0.025,
+            maxLongEdge: spec.raw ? null : spec.spineMaxW,
+            maxWidthOnly: !spec.raw,
+            rotationDeg: rot,
+            quality: spec.quality
+          }) || '';
+          p.cropBox = res.box_2d;
+          p.spineRotation = rot;
+        } else if (rot !== 0) {
+          thumbUrl = await rotateDataUrlByDeg(srcUrl, rot, 'image/webp', spec.quality, spec.raw ? null : spec.spineMaxW);
+          p.spineRotation = rot;
+        }
+        if (thumbUrl) {
+          p.saveWebp = thumbUrl;
+          stagedSpineSourceUrl = srcUrl;
+          stagedSpineThumbUrl = thumbUrl;
+          stagedSpineFlipped = rot === 180;
+          croppedCount++;
+        }
+        p.autoCropped = true;
+      } else {
+        if (res.box_2d) {
+          const cropped = await cropImageByBox(srcUrl, res.box_2d, {
+            minBoxSpan: 150,
+            padFrac: 0.025,
+            maxLongEdge: spec.raw ? null : spec.maxEdge,
+            maxWidthOnly: false,
+            rotationDeg: 0,
+            quality: spec.quality
+          });
+          if (cropped) {
+            p.saveWebp = cropped;
+            p.cropBox = res.box_2d;
+            croppedCount++;
+          }
+        }
+        p.autoCropped = true;
+      }
+      updateStageUI();
+    }
+    setStatus('', false);
+    return croppedCount;
+  }
+
   window.closeCameraViewfinder = () => {
     const modeNow = camMode;
     hideCameraUI();
@@ -1886,10 +2225,12 @@
     }
     if (modeNow === 'pile' && pilePhotos.length > 0) {
       applyLoadedPilePhotos(pilePhotos, false);
+    } else if (modeNow === 'single' && stagedPhotos.length > 0 && cfg.autoCropPhotos && CC.isAiReady()) {
+      autoCropStagedPhotosNow().catch(() => {});
     }
   };
 
-  window.finishCameraAndSearch = () => {
+  window.finishCameraAndSearch = async () => {
     const modeNow = camMode;
     const hasSingleShots = stagedPhotos.length > 0;
     const hasPileShots = pilePhotos.length > 0;
@@ -1898,6 +2239,9 @@
       try { history.replaceState({ view: currentView, modal: null }, ''); } catch (_) {}
     }
     if (modeNow === 'single' && hasSingleShots) {
+      if (cfg.autoCropPhotos && CC.isAiReady()) {
+        await autoCropStagedPhotosNow().catch(() => {});
+      }
       runFullScan();
     } else if (modeNow === 'pile' && hasPileShots) {
       applyLoadedPilePhotos(pilePhotos, true);
@@ -1913,7 +2257,9 @@
   async function stagePhotoFiles(fileList) {
     const files = Array.from(fileList || []);
     if (!files.length) return;
-    setStatus(`Processing ${files.length} photo(s) (2048px AI / 1600×1600 WebP)...`, true);
+    const spec = getPhotoQualitySpec();
+    setStatus(`Processing ${files.length} photo(s) (${spec.label})...`, true);
+    const addedIndices = [];
     try {
       for (const file of files) {
         if (stagedPhotos.length >= 4) { toast('Max 4 photos per scan'); break; }
@@ -1921,12 +2267,16 @@
         const pair = await decodeBlobToPhotoPair(file, {
           aiMaxDim: 2048,
           aiQuality: 0.90,
-          saveMaxDim: 1600,
-          saveQuality: 0.85,
+          saveMaxDim: spec.maxEdge || 2400,
+          saveQuality: spec.quality,
+          rawSave: spec.raw,
+          keepOrigDataUrl: true,
           squarePreview: false
         });
-        pair.origDataUrl = pair.apiB64 ? `data:image/jpeg;base64,${pair.apiB64}` : pair.saveWebp;
+        pair.autoCropped = false;
+        pair.cropBox = null;
         stagedPhotos.push(pair);
+        addedIndices.push(slotIdx);
         if (slotIdx === 2) {
           stagedSpineSourceUrl = pair.origDataUrl || pair.saveWebp;
           stagedSpineThumbUrl = pair.saveWebp;
@@ -1934,8 +2284,15 @@
         }
       }
       updateStageUI();
-      setStatus('', false);
-      toast(`${stagedPhotos.length} photo(s) ready — tap Search & Verify`);
+      if (cfg.autoCropPhotos && CC.isAiReady() && addedIndices.length) {
+        const cnt = await autoCropStagedPhotosNow(addedIndices);
+        toast(cnt > 0
+          ? `✂️ Auto-cropped ${cnt} photo(s) — tap ✂️ to adjust or Search & Verify`
+          : `${stagedPhotos.length} photo(s) ready — tap Search & Verify`);
+      } else {
+        setStatus('', false);
+        toast(`${stagedPhotos.length} photo(s) ready — tap Search & Verify`);
+      }
     } catch (err) {
       setStatus('', false);
       toast('Photo error: ' + (err?.message || 'Could not read image'), 5000);
@@ -1985,12 +2342,16 @@
 
   window.clearStagedUpc = (ev) => {
     if (ev) ev.stopPropagation();
+    if (stagedUpc) {
+      camIgnoredUpc = stagedUpc;
+      camIgnoredUpcMisses = 0;
+    }
     stagedUpc = '';
     const fBar = document.getElementById('fBarcode');
     if (fBar) fBar.value = '';
     updateStageUI();
     updateCameraOverlayUI();
-    toast('UPC cleared — ready to scan', 1600);
+    toast('UPC cleared — move away or aim at a new barcode', 1800);
   };
 
   window.updateStageUI = () => {
@@ -2060,26 +2421,82 @@
     }
 
     document.getElementById('previewStrip').innerHTML = galleryHtml;
+    const hintEl = document.getElementById('stagedPhotoHint');
+    if (hintEl) {
+      const spec = getPhotoQualitySpec();
+      hintEl.textContent = `Tap any photo to inspect · Tap ✂️ to adjust crop · Save quality: ${spec.label}`;
+    }
+    renderInspectorPhotosToSave();
   };
+
+  function renderInspectorPhotosToSave() {
+    const wrap = document.getElementById('inspPhotosToSaveWrap');
+    if (!wrap) return;
+    const activeSpineUrl = stagedSpineThumbUrl || currentInspected?.spine_thumb_url || currentExtracted?.spine_thumb_url || stagedPhotos[2]?.saveWebp || '';
+    const cards = [];
+    if (stagedPhotos[0]) cards.push({ idx: 0, label: 'FRONT', src: stagedPhotos[0].saveWebp, isSpine: false });
+    if (stagedPhotos[1]) cards.push({ idx: 1, label: 'BACK', src: stagedPhotos[1].saveWebp, isSpine: false });
+    if (activeSpineUrl) cards.push({ idx: 2, label: 'SPINE', src: activeSpineUrl, isSpine: true });
+    if (stagedPhotos[3]) cards.push({ idx: 3, label: 'EXTRA', src: stagedPhotos[3].saveWebp, isSpine: false });
+
+    if (!currentInspected || !cards.length) {
+      wrap.classList.add('hidden');
+      wrap.innerHTML = '';
+      return;
+    }
+    const spec = getPhotoQualitySpec();
+    wrap.classList.remove('hidden');
+    wrap.innerHTML = `
+      <div class="insp-save-photos-hdr">
+        <span>📷 Photos to Save (${cards.length})</span>
+        <span style="font-size:0.7rem; color:var(--muted); font-weight:600;">${esc(spec.label)}</span>
+      </div>
+      <div class="insp-save-photos-strip">
+        ${cards.map(c => `
+          <div class="insp-save-photo-card">
+            <div class="insp-save-photo-thumb" onclick="${c.isSpine ? 'openStagedSpineLightbox()' : `openStagedLightbox(${c.idx})`}" title="Tap to inspect">
+              <img src="${c.src}" alt="" />
+            </div>
+            <div class="insp-save-photo-meta">
+              <span class="insp-save-photo-lbl">${c.label}</span>
+              <button type="button" class="photo-tile-btn" onclick="openStagedPhotoCrop(${c.idx}, event)" title="Adjust crop on full original">✂️ Crop</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  }
 
   window.openStagedPhotoCrop = (idx, ev) => {
     if (ev) ev.stopPropagation();
     const isSpine = idx === 2;
     const photo = stagedPhotos[idx];
     const src = isSpine
-      ? (stagedSpineSourceUrl || photo?.origDataUrl || stagedSpineThumbUrl || photo?.saveWebp || '')
+      ? (photo?.origDataUrl || stagedSpineSourceUrl || stagedSpineThumbUrl || photo?.saveWebp || '')
       : (photo?.origDataUrl || (photo?.apiB64 ? `data:image/jpeg;base64,${photo.apiB64}` : photo?.saveWebp) || '');
     if (!src) return;
     const lbl = idx === 0 ? 'Front' : (idx === 1 ? 'Back' : (idx === 2 ? 'Spine' : 'Extra'));
+    const initRot = isSpine ? Number(photo?.spineRotation || 0) : 0;
+    const boxForModal = photo?.cropBox ? (initRot ? rotateBox2dClockwise(photo.cropBox, initRot) : photo.cropBox) : null;
+    const initialRect = boxForModal ? box2dToNormRect(boxForModal, 0, isSpine ? 25 : 150) : null;
+
     openCropModal({
       dataUrl: src,
       title: `✂️ Crop & Rotate ${lbl}`,
       mode: isSpine ? 'spine' : 'cover',
-      onApply: async (croppedWebp, workingSourceWebp) => {
+      initialRect,
+      initialRotation: initRot,
+      onApply: async (croppedWebp, workingSourceWebp, appliedRect) => {
         if (isSpine) {
           stagedSpineThumbUrl = croppedWebp;
           stagedSpineSourceUrl = workingSourceWebp || src;
           stagedSpineFlipped = false;
+          if (stagedPhotos[2]) {
+            stagedPhotos[2].saveWebp = croppedWebp;
+            stagedPhotos[2].autoCropped = true;
+            stagedPhotos[2].cropBox = normRectToBox2d(appliedRect);
+            stagedPhotos[2].spineRotation = 0;
+          }
           if (currentExtracted) {
             currentExtracted.spine_thumb_url = croppedWebp;
             currentExtracted.spine_source_url = stagedSpineSourceUrl;
@@ -2092,6 +2509,8 @@
           }
         } else if (stagedPhotos[idx]) {
           stagedPhotos[idx].saveWebp = croppedWebp;
+          stagedPhotos[idx].autoCropped = true;
+          stagedPhotos[idx].cropBox = normRectToBox2d(appliedRect);
         }
         updateStageUI();
         toast(`✂️ ${lbl} crop applied`);
@@ -2741,13 +3160,14 @@ Return ONLY valid JSON:
   };
 
   async function cropImageByBox(sourceDataUrl, box2d, opts = {}) {
+    const spec = getPhotoQualitySpec();
     const {
       minBoxSpan = 150,
       padFrac = 0.025,
-      maxLongEdge = 1600,
+      maxLongEdge = spec.raw ? null : spec.maxEdge,
       maxWidthOnly = false,
       rotationDeg = 0,
-      quality = 0.85
+      quality = spec.quality
     } = opts || {};
     if (!sourceDataUrl || !Array.isArray(box2d) || box2d.length !== 4) return null;
     const nums = box2d.map(Number);
@@ -2785,16 +3205,18 @@ Return ONLY valid JSON:
           const rawW = swap ? sh : sw;
           const rawH = swap ? sw : sh;
           let dstW = rawW, dstH = rawH;
-          if (maxWidthOnly) {
-            if (rawW > maxLongEdge) {
-              const s = maxLongEdge / rawW;
-              dstW = maxLongEdge;
-              dstH = Math.max(1, Math.round(rawH * s));
+          if (maxLongEdge !== null && maxLongEdge !== undefined) {
+            if (maxWidthOnly) {
+              if (rawW > maxLongEdge) {
+                const s = maxLongEdge / rawW;
+                dstW = maxLongEdge;
+                dstH = Math.max(1, Math.round(rawH * s));
+              }
+            } else {
+              const fitted = fitDims(rawW, rawH, maxLongEdge);
+              dstW = fitted.width;
+              dstH = fitted.height;
             }
-          } else {
-            const fitted = fitDims(rawW, rawH, maxLongEdge);
-            dstW = fitted.width;
-            dstH = fitted.height;
           }
 
           const c = document.createElement('canvas');
@@ -2828,6 +3250,7 @@ Return ONLY valid JSON:
     const photo = stagedPhotos[pIdx];
     if (!photo) return { sourceUrl: '', thumbUrl: '', flipped: false };
 
+    const spec = getPhotoQualitySpec();
     const srcImgUrl = photo.origDataUrl || (photo.apiB64 ? `data:image/jpeg;base64,${photo.apiB64}` : photo.saveWebp);
     const hasExactRot = explicitSpineRotation !== null && explicitSpineRotation !== undefined && [0, 90, 180, 270].includes(Number(explicitSpineRotation));
     const exactDeg = hasExactRot ? Number(explicitSpineRotation) : null;
@@ -2835,10 +3258,10 @@ Return ONLY valid JSON:
     const unrotatedCrop = await cropImageByBox(srcImgUrl, spineCrop.box_2d, {
       minBoxSpan: 25,
       padFrac: 0.025,
-      maxLongEdge: 1200,
+      maxLongEdge: spec.raw ? null : spec.spineMaxW,
       maxWidthOnly: false,
       rotationDeg: 0,
-      quality: 0.85
+      quality: spec.quality
     });
     if (!unrotatedCrop) return { sourceUrl: '', thumbUrl: '', flipped: false };
 
@@ -2852,15 +3275,16 @@ Return ONLY valid JSON:
     const rotatedThumb = await cropImageByBox(srcImgUrl, spineCrop.box_2d, {
       minBoxSpan: 25,
       padFrac: 0.025,
-      maxLongEdge: 1200,
-      maxWidthOnly: true,
+      maxLongEdge: spec.raw ? null : spec.spineMaxW,
+      maxWidthOnly: !spec.raw,
       rotationDeg: finalAngle,
-      quality: 0.85
+      quality: spec.quality
     });
     return {
-      sourceUrl: unrotatedCrop,
+      sourceUrl: srcImgUrl,
       thumbUrl: rotatedThumb || unrotatedCrop,
-      flipped: finalAngle === 180
+      flipped: finalAngle === 180,
+      angle: finalAngle
     };
   }
 
@@ -3023,28 +3447,34 @@ Return ONLY valid JSON:
         ext.graded_by_ai = true;
       }
 
-      // Auto-crop ALL scan photos (Front, Back, Extras to 1600px WebP q0.85; Spine to 1200px wide + exact upright spine_rotation!)
+      // Auto-crop any not-yet-cropped scan photos when autoCropPhotos is enabled (respects cfg.photoQuality & skips already autoCropped shots!)
+      const spec = getPhotoQualitySpec();
       const rawPhotoCrops = Array.isArray(ext.photo_crops) ? ext.photo_crops : [];
       const exactSpineRot = [0, 90, 180, 270].includes(Number(ext.spine_rotation)) ? Number(ext.spine_rotation) : null;
       let anyPhotoCropped = false;
 
-      for (let i = 0; i < stagedPhotos.length; i++) {
-        if (i === 2) continue; // Spine handled below with spine_rotation
-        const box = rawPhotoCrops[i];
-        if (!Array.isArray(box) || box.length !== 4) continue;
-        const p = stagedPhotos[i];
-        const origUrl = p.origDataUrl || (p.apiB64 ? `data:image/jpeg;base64,${p.apiB64}` : p.saveWebp);
-        const cropped = await cropImageByBox(origUrl, box, {
-          minBoxSpan: 150,
-          padFrac: 0.025,
-          maxLongEdge: 1600,
-          maxWidthOnly: false,
-          rotationDeg: 0,
-          quality: 0.85
-        });
-        if (cropped) {
-          p.saveWebp = cropped;
-          anyPhotoCropped = true;
+      if (cfg.autoCropPhotos) {
+        for (let i = 0; i < stagedPhotos.length; i++) {
+          if (i === 2) continue; // Spine handled below with spine_rotation
+          const p = stagedPhotos[i];
+          if (!p || p.autoCropped) continue;
+          const box = rawPhotoCrops[i];
+          if (!Array.isArray(box) || box.length !== 4) continue;
+          const origUrl = p.origDataUrl || (p.apiB64 ? `data:image/jpeg;base64,${p.apiB64}` : p.saveWebp);
+          const cropped = await cropImageByBox(origUrl, box, {
+            minBoxSpan: 150,
+            padFrac: 0.025,
+            maxLongEdge: spec.raw ? null : spec.maxEdge,
+            maxWidthOnly: false,
+            rotationDeg: 0,
+            quality: spec.quality
+          });
+          if (cropped) {
+            p.saveWebp = cropped;
+            p.cropBox = box;
+            p.autoCropped = true;
+            anyPhotoCropped = true;
+          }
         }
       }
 
@@ -3052,34 +3482,45 @@ Return ONLY valid JSON:
       ext.spine_source_url = stagedSpineSourceUrl || '';
       ext.spine_flipped = Boolean(stagedSpineFlipped);
 
-      // Prefer explicit spine_crop, falling back to photo_crops[2] if a dedicated Spine shot (index 2) was provided
-      const effectiveSpineCrop = (ext.spine_crop && Array.isArray(ext.spine_crop.box_2d))
-        ? ext.spine_crop
-        : (stagedPhotos[2] && Array.isArray(rawPhotoCrops[2]) ? { photo_index: 2, box_2d: rawPhotoCrops[2] } : null);
+      const spineAlreadyCropped = Boolean(stagedPhotos[2]?.autoCropped && stagedSpineThumbUrl);
+      if (cfg.autoCropPhotos && !spineAlreadyCropped) {
+        // Prefer explicit spine_crop, falling back to photo_crops[2] if a dedicated Spine shot (index 2) was provided
+        const effectiveSpineCrop = (ext.spine_crop && Array.isArray(ext.spine_crop.box_2d))
+          ? ext.spine_crop
+          : (stagedPhotos[2] && Array.isArray(rawPhotoCrops[2]) ? { photo_index: 2, box_2d: rawPhotoCrops[2] } : null);
 
-      if (effectiveSpineCrop) {
-        const cropRes = await cropSpineFromStagedPhoto(effectiveSpineCrop, exactSpineRot);
-        if (cropRes.thumbUrl) {
-          ext.spine_thumb_url = cropRes.thumbUrl;
-          ext.spine_source_url = cropRes.sourceUrl;
-          ext.spine_flipped = Boolean(cropRes.flipped);
-          stagedSpineThumbUrl = cropRes.thumbUrl;
-          stagedSpineSourceUrl = cropRes.sourceUrl;
-          stagedSpineFlipped = Boolean(cropRes.flipped);
-          anyPhotoCropped = true;
-        }
-      } else if (stagedPhotos[2] && exactSpineRot !== null) {
-        // Apply exact upright spine_rotation even if full spine shot was already tightly framed
-        const spOrig = stagedPhotos[2].origDataUrl || stagedPhotos[2].saveWebp;
-        const rotThumb = exactSpineRot === 0 ? stagedPhotos[2].saveWebp : await rotateDataUrlByDeg(spOrig, exactSpineRot, 'image/webp', 0.85, 1200);
-        if (rotThumb) {
-          ext.spine_thumb_url = rotThumb;
-          ext.spine_source_url = spOrig;
-          ext.spine_flipped = exactSpineRot === 180;
-          stagedSpineThumbUrl = rotThumb;
-          stagedSpineSourceUrl = spOrig;
-          stagedSpineFlipped = exactSpineRot === 180;
-          anyPhotoCropped = true;
+        if (effectiveSpineCrop) {
+          const cropRes = await cropSpineFromStagedPhoto(effectiveSpineCrop, exactSpineRot);
+          if (cropRes.thumbUrl) {
+            ext.spine_thumb_url = cropRes.thumbUrl;
+            ext.spine_source_url = cropRes.sourceUrl;
+            ext.spine_flipped = Boolean(cropRes.flipped);
+            stagedSpineThumbUrl = cropRes.thumbUrl;
+            stagedSpineSourceUrl = cropRes.sourceUrl;
+            stagedSpineFlipped = Boolean(cropRes.flipped);
+            if (stagedPhotos[2]) {
+              stagedPhotos[2].saveWebp = cropRes.thumbUrl;
+              stagedPhotos[2].cropBox = effectiveSpineCrop.box_2d;
+              stagedPhotos[2].spineRotation = cropRes.angle || 0;
+              stagedPhotos[2].autoCropped = true;
+            }
+            anyPhotoCropped = true;
+          }
+        } else if (stagedPhotos[2] && exactSpineRot !== null) {
+          const spOrig = stagedPhotos[2].origDataUrl || stagedPhotos[2].saveWebp;
+          const rotThumb = exactSpineRot === 0 ? stagedPhotos[2].saveWebp : await rotateDataUrlByDeg(spOrig, exactSpineRot, 'image/webp', spec.quality, spec.raw ? null : spec.spineMaxW);
+          if (rotThumb) {
+            ext.spine_thumb_url = rotThumb;
+            ext.spine_source_url = spOrig;
+            ext.spine_flipped = exactSpineRot === 180;
+            stagedSpineThumbUrl = rotThumb;
+            stagedSpineSourceUrl = spOrig;
+            stagedSpineFlipped = exactSpineRot === 180;
+            stagedPhotos[2].saveWebp = rotThumb;
+            stagedPhotos[2].spineRotation = exactSpineRot;
+            stagedPhotos[2].autoCropped = true;
+            anyPhotoCropped = true;
+          }
         }
       }
       if (anyPhotoCropped) updateStageUI();
@@ -4207,6 +4648,7 @@ Return ONLY valid JSON:
     syncTrackPlayButtons();
 
     document.getElementById('tasteLocalBadges').innerHTML = buildSpotifyHowYouKnowHtml(item, localMatch, true);
+    renderInspectorPhotosToSave();
 
     document.getElementById('tasteScore').textContent = '...';
     document.getElementById('tasteBody').textContent = `Analyzing against your Taste Profile & Soft Spots on ${aiEngineLabel()}...`;
@@ -4286,16 +4728,29 @@ Return ONLY valid JSON:
     if (primary) {
       const nameHtml = `<strong>${esc(primary.name)}</strong>`;
       const liked = primary.likedSongs || [];
+      const topTrs = (primary.topTracks || []).filter(t => !liked.some(l => norm(l) === norm(t)));
+      const albTrs = (primary.albumTracks || []).filter(t => !liked.some(l => norm(l) === norm(t)) && !topTrs.some(x => norm(x) === norm(t)));
       const pls = primary.playlists || [];
       const plMap = primary.playlistTrackMap || {};
       const followParts = [];
       if (primary.isFollowed) followParts.push('you follow them');
       if (primary.isTopArtist) followParts.push('one of your Top Artists');
 
+      const extraSources = [];
+      if (topTrs.length) {
+        const sample = joinHumanList(topTrs.slice(0, 3).map(q));
+        extraSources.push(`${topTrs.length} top track${topTrs.length === 1 ? '' : 's'} (${sample}${topTrs.length > 3 ? ` +${topTrs.length - 3} more` : ''})`);
+      }
+      if (albTrs.length) {
+        const sample = joinHumanList(albTrs.slice(0, 3).map(q));
+        extraSources.push(`${albTrs.length} saved-album track${albTrs.length === 1 ? '' : 's'} (${sample}${albTrs.length > 3 ? ` +${albTrs.length - 3} more` : ''})`);
+      }
+
       if (liked.length >= 1 && liked.length <= 3) {
-        // 1–3 liked songs: explicitly name EVERY song title + playlists (never claim user likes the whole artist from 1 song)
+        // 1–3 liked songs: explicitly name EVERY liked song title + separate top/saved-album tracks & playlists
         const songList = joinHumanList(liked.map(q));
         let s = `You have <strong>${liked.length}</strong> liked song${liked.length === 1 ? '' : 's'} by ${nameHtml}: ${songList}`;
+        if (extraSources.length) s += `, plus ${joinHumanList(extraSources)}`;
         if (pls.length) {
           s += `, and they appear on ${joinHumanList(pls.slice(0, 3).map(p => `<em>${esc(p)}</em>`))}`;
         }
@@ -4304,14 +4759,15 @@ Return ONLY valid JSON:
         }
         sentences.push(s + '.');
       } else if (liked.length >= 4) {
-        // 4+ liked songs: exact count, 2–3 examples, followed status / playlists
+        // 4+ liked songs: exact count, 2–3 examples, separate top/saved-album tracks, followed status / playlists
         const examples = joinHumanList(liked.slice(0, 3).map(q));
         let s = `You have <strong>${liked.length}</strong> liked songs by ${nameHtml} (including ${examples})`;
+        if (extraSources.length) s += `, plus ${joinHumanList(extraSources)}`;
         if (followParts.length) s += ` and ${followParts.join(' — ')}`;
         if (pls.length) s += `, across ${joinHumanList(pls.slice(0, 3).map(p => `<em>${esc(p)}</em>`))}`;
         sentences.push(s + '.');
       } else {
-        // Playlist-only (0 liked songs): explicitly state 0 liked songs + playlist names (and song titles when available)
+        // 0 liked songs: explicitly state 0 liked songs + separate top tracks, saved-album tracks, and/or playlists!
         const plEntries = [];
         Object.entries(plMap).slice(0, 3).forEach(([plName, trs]) => {
           const uniqTrs = dedupeStringsCI(trs).slice(0, 3);
@@ -4319,15 +4775,20 @@ Return ONLY valid JSON:
           else plEntries.push(`<em>${esc(plName)}</em>`);
         });
         let s = `You have <strong>0 liked songs</strong> by ${nameHtml}`;
+        const qualifiers = [...extraSources];
         if (plEntries.length) {
-          s += `, though you have ${joinHumanList(plEntries)}`;
+          qualifiers.push(joinHumanList(plEntries));
         } else if (pls.length) {
           const sampleTrs = dedupeStringsCI(primary.tracks).slice(0, 3);
-          s += sampleTrs.length
-            ? `, though ${joinHumanList(sampleTrs.map(q))} appear${sampleTrs.length === 1 ? 's' : ''} on ${joinHumanList(pls.slice(0, 3).map(p => `<em>${esc(p)}</em>`))}`
-            : `, though they appear on ${joinHumanList(pls.slice(0, 3).map(p => `<em>${esc(p)}</em>`))}`;
-        } else if (primary.isFollowed) {
-          s += `, though you follow them on Spotify`;
+          qualifiers.push(sampleTrs.length
+            ? `${joinHumanList(sampleTrs.map(q))} on ${joinHumanList(pls.slice(0, 3).map(p => `<em>${esc(p)}</em>`))}`
+            : `appearances on ${joinHumanList(pls.slice(0, 3).map(p => `<em>${esc(p)}</em>`))}`);
+        }
+        if (qualifiers.length) {
+          s += `, though you have ${joinHumanList(qualifiers)}`;
+          if (followParts.length) s += ` (${followParts.join(', ')})`;
+        } else if (followParts.length) {
+          s += `, though ${joinHumanList(followParts)}`;
         } else {
           s += ` (playlist-only familiarity)`;
         }
@@ -4451,18 +4912,21 @@ Return ONLY valid JSON:
           const likedArr = Array.isArray(rec.likedTracks) ? rec.likedTracks : [];
           const topArr = Array.isArray(rec.topTracks) ? rec.topTracks : [];
           const albArr = Array.isArray(rec.albumTracks) ? rec.albumTracks : [];
+          // Keep likedSongs strictly from likedArr when provenance is present — NEVER merge topTracks or albumTracks into likedSongs!
           const likedSongs = hasProvenance
-            ? dedupeStringsCI([...likedArr, ...topArr, ...albArr])
+            ? dedupeStringsCI(likedArr)
             : dedupeStringsCI(rec.tracks || []);
+          const topTracksClean = dedupeStringsCI(topArr);
+          const albumTracksClean = dedupeStringsCI(albArr);
 
           artistMatches.push({
             name: displayName,
             isFollowed: Boolean(rec.isFollowed),
             isTopArtist: Boolean(rec.isTopArtist),
             likedSongs,
-            likedTracks: likedArr,
-            topTracks: topArr,
-            albumTracks: albArr,
+            likedTracks: likedSongs,
+            topTracks: topTracksClean,
+            albumTracks: albumTracksClean,
             playlists: pls,
             playlistTrackMap: (rec.playlistTrackMap && typeof rec.playlistTrackMap === 'object') ? rec.playlistTrackMap : {},
             tracks: Array.isArray(rec.tracks) ? rec.tracks : [],
@@ -4761,7 +5225,7 @@ Return ONLY valid JSON:
       return;
     }
 
-    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v215`;
+    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v216`;
     if (tasteCache.has(cacheKey)) { applyTasteUI(item, tasteCache.get(cacheKey), myRunId); return; }
 
     const tracksStr = (item.tracklist || []).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title).join('; ');
@@ -6383,6 +6847,8 @@ Return ONLY valid JSON:
     stagedSpineSourceUrl = '';
     stagedSpineFlipped = false;
     stagedUpc = '';
+    camIgnoredUpc = '';
+    camIgnoredUpcMisses = 0;
     currentExtracted = null;
     currentCandidates = [];
     visibleCandidateIds = null;
@@ -6741,7 +7207,7 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
         'notable_songs', 'litmus_track', 'litmus_artist', 'taste_scored_at'
       ]);
 
-      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v215`);
+      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v216`);
       await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
       await loadStashCache();
       renderStash();
@@ -6961,47 +7427,114 @@ Return ONLY valid JSON:
     else document.getElementById('sdPhotoReplaceExtra')?.click();
   };
 
-  // Direct Stash Detail photo add/replace/remove — works offline, zero Gemini/Discogs calls, zero grade changes!
-  // Manual Spine uploads open the interactive Crop & 90° Rotate modal directly (no blind 90° auto-rotation!).
+  // Direct Stash Detail photo add/replace/remove — supports immediate Gemini Auto-Crop + pre-save #cropModal preview,
+  // saving strictly at cfg.photoQuality (zero Discogs writes, zero grade changes).
   window.handleStashPhotoFiles = async (id, slot, fileList) => {
     const files = Array.from(fileList || []);
     if (!files.length) return;
     const it = stashCache.find(x => x.id === id);
     if (!it) return;
 
-    if (slot === 'spine') {
-      setStatus('Loading spine photo for cropping...', true);
+    const spec = getPhotoQualitySpec();
+    const replaceIdx = stashReplaceThumbIdx;
+    stashReplaceThumbIdx = -1;
+
+    const commitCoverWebp = async (webpDataUrl) => {
+      const latest = stashCache.find(x => x.id === id);
+      if (!latest) return;
+      const prev = { ...latest };
+      const nextThumbs = getStashCoverPhotos(latest).slice();
+      if (slot === 'replace_idx' && replaceIdx >= 0 && replaceIdx < nextThumbs.length) {
+        nextThumbs[replaceIdx] = webpDataUrl;
+      } else if (slot === 'front') {
+        if (nextThumbs.length === 0) nextThumbs.push(webpDataUrl);
+        else nextThumbs[0] = webpDataUrl;
+      } else if (slot === 'back') {
+        if (nextThumbs.length === 0) nextThumbs.push(webpDataUrl);
+        else if (nextThumbs.length === 1) nextThumbs.push(webpDataUrl);
+        else nextThumbs[1] = webpDataUrl;
+      } else {
+        nextThumbs.push(webpDataUrl);
+      }
+      const updated = {
+        ...latest,
+        thumbs: nextThumbs,
+        thumb_data_url: nextThumbs[0] || latest.discogs_thumb || ''
+      };
+      const stamped = CC.stampStashRevision(updated, prev, ['thumbs', 'thumb_data_url']);
+      await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+      await loadStashCache();
+      renderStash();
+      updateCloudUI();
+      scheduleGoogleAutoSync();
+      if (activeStashItem?.id === id) openStashDetail(id, true);
+      toast('📷 Photo saved to Stash!');
+    };
+
+    // Single-file Front / Back / Spine / single Extra / Replace -> immediate auto-crop (if enabled) + interactive #cropModal preview!
+    if (slot === 'spine' || files.length === 1) {
+      const isSpine = slot === 'spine';
+      const slotTitle = isSpine ? 'Spine' : (slot === 'front' ? 'Front' : (slot === 'back' ? 'Back' : (slot === 'replace_idx' ? (replaceIdx === 0 ? 'Front' : (replaceIdx === 1 ? 'Back' : `Extra ${replaceIdx - 1}`)) : 'Extra')));
+      setStatus(`Loading ${slotTitle.toLowerCase()} photo...`, true);
       try {
         const pair = await decodeBlobToPhotoPair(files[0], {
-          aiMaxDim: 1600,
-          aiQuality: 0.88,
-          saveMaxDim: 1600,
-          saveQuality: 0.85,
+          aiMaxDim: 2048,
+          aiQuality: 0.90,
+          saveMaxDim: spec.maxEdge || 2400,
+          saveQuality: spec.quality,
+          rawSave: spec.raw,
+          keepOrigDataUrl: true,
           squarePreview: false
         });
+        const fullSrc = pair.origDataUrl || pair.saveWebp;
+        let initialRect = isSpine ? defaultCropRectForMode('spine') : { x: 0, y: 0, w: 1, h: 1 };
+        let initialRotation = 0;
+
+        if (cfg.autoCropPhotos && CC.isAiReady()) {
+          setStatus(`✂️ Auto-cropping ${slotTitle}...`, true, { cancellable: true });
+          const ac = await autoCropImageWithGemini(fullSrc, isSpine ? 'spine' : 'cover');
+          let box = ac.box_2d;
+          if (isSpine && ac.spine_rotation) {
+            initialRotation = ac.spine_rotation;
+            if (box) box = rotateBox2dClockwise(box, initialRotation);
+          }
+          const detRect = box ? box2dToNormRect(box, 0.025, isSpine ? 25 : 150) : null;
+          if (detRect) initialRect = detRect;
+        }
+
         setStatus('', false);
         openCropModal({
-          dataUrl: pair.saveWebp,
-          title: '✂️ Crop & Rotate Spine',
-          mode: 'spine',
-          onApply: async (croppedWebp, workingSourceWebp) => {
-            const latest = stashCache.find(x => x.id === id);
-            if (!latest) return;
-            const prev = { ...latest };
-            const updated = {
-              ...latest,
-              spine_source_url: workingSourceWebp || pair.saveWebp,
-              spine_thumb_url: croppedWebp,
-              spine_flipped: false
-            };
-            const stamped = CC.stampStashRevision(updated, prev, ['spine_source_url', 'spine_thumb_url', 'spine_flipped']);
-            await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
-            await loadStashCache();
-            renderStash();
-            updateCloudUI();
-            scheduleGoogleAutoSync();
-            if (activeStashItem?.id === id) openStashDetail(id, true);
-            toast('✂️ Spine cropped & saved to Stash!');
+          dataUrl: fullSrc,
+          title: `✂️ Crop & Rotate ${slotTitle}`,
+          mode: isSpine ? 'spine' : 'cover',
+          initialRect,
+          initialRotation,
+          onApply: async (croppedWebp, workingSourceWebp, appliedRect, wasRotated) => {
+            if (isSpine) {
+              const latest = stashCache.find(x => x.id === id);
+              if (!latest) return;
+              const prev = { ...latest };
+              const updated = {
+                ...latest,
+                spine_source_url: workingSourceWebp || fullSrc,
+                spine_thumb_url: croppedWebp,
+                spine_flipped: false
+              };
+              const stamped = CC.stampStashRevision(updated, prev, ['spine_source_url', 'spine_thumb_url', 'spine_flipped']);
+              await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+              await loadStashCache();
+              renderStash();
+              updateCloudUI();
+              scheduleGoogleAutoSync();
+              if (activeStashItem?.id === id) openStashDetail(id, true);
+              toast('✂️ Spine cropped & saved to Stash!');
+            } else {
+              // In raw mode when user kept Full Frame with zero rotation, store untouched original data URL!
+              const r = appliedRect || {};
+              const isUntouchedFullFrame = spec.raw && !wasRotated &&
+                Number(r.x) === 0 && Number(r.y) === 0 && Number(r.w) >= 0.999 && Number(r.h) >= 0.999;
+              await commitCoverWebp(isUntouchedFullFrame ? fullSrc : croppedWebp);
+            }
           }
         });
       } catch (err) {
@@ -7011,38 +7544,39 @@ Return ONLY valid JSON:
       return;
     }
 
+    // Multi-file Extra upload (2+ files at once): decode at cfg.photoQuality, batch auto-crop if enabled, and save directly
     const prev = { ...it };
     const nextThumbs = getStashCoverPhotos(it).slice();
-    const changed = [];
-    const replaceIdx = stashReplaceThumbIdx;
-    stashReplaceThumbIdx = -1;
-
-    setStatus(`Processing ${files.length} photo(s) locally...`, true);
+    setStatus(`Processing ${files.length} photo(s) (${spec.label})...`, true, { cancellable: true });
     try {
-      for (const file of files) {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
         const pair = await decodeBlobToPhotoPair(file, {
-          aiMaxDim: 1600,
-          aiQuality: 0.88,
-          saveMaxDim: 1600,
-          saveQuality: 0.85,
+          aiMaxDim: 2048,
+          aiQuality: 0.90,
+          saveMaxDim: spec.maxEdge || 2400,
+          saveQuality: spec.quality,
+          rawSave: spec.raw,
+          keepOrigDataUrl: true,
           squarePreview: false
         });
-        if (slot === 'replace_idx' && replaceIdx >= 0 && replaceIdx < nextThumbs.length) {
-          nextThumbs[replaceIdx] = pair.saveWebp;
-          changed.push('thumbs', 'thumb_data_url');
-        } else if (slot === 'front') {
-          if (nextThumbs.length === 0) nextThumbs.push(pair.saveWebp);
-          else nextThumbs[0] = pair.saveWebp;
-          changed.push('thumbs', 'thumb_data_url');
-        } else if (slot === 'back') {
-          if (nextThumbs.length === 0) nextThumbs.push(pair.saveWebp);
-          else if (nextThumbs.length === 1) nextThumbs.push(pair.saveWebp);
-          else nextThumbs[1] = pair.saveWebp;
-          changed.push('thumbs', 'thumb_data_url');
-        } else {
-          nextThumbs.push(pair.saveWebp);
-          changed.push('thumbs', 'thumb_data_url');
+        let finalWebp = pair.saveWebp;
+        if (cfg.autoCropPhotos && CC.isAiReady()) {
+          setStatus(`✂️ Auto-cropping Extra ${i + 1}/${files.length}...`, true, { cancellable: true });
+          const ac = await autoCropImageWithGemini(pair.origDataUrl || pair.saveWebp, 'cover');
+          if (ac.box_2d) {
+            const cropped = await cropImageByBox(pair.origDataUrl || pair.saveWebp, ac.box_2d, {
+              minBoxSpan: 150,
+              padFrac: 0.025,
+              maxLongEdge: spec.raw ? null : spec.maxEdge,
+              maxWidthOnly: false,
+              rotationDeg: 0,
+              quality: spec.quality
+            });
+            if (cropped) finalWebp = cropped;
+          }
         }
+        nextThumbs.push(finalWebp);
       }
 
       const updated = {
@@ -7050,7 +7584,7 @@ Return ONLY valid JSON:
         thumbs: nextThumbs,
         thumb_data_url: nextThumbs[0] || it.discogs_thumb || ''
       };
-      const stamped = CC.stampStashRevision(updated, prev, Array.from(new Set(changed)));
+      const stamped = CC.stampStashRevision(updated, prev, ['thumbs', 'thumb_data_url']);
       await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
       await loadStashCache();
       renderStash();
@@ -7058,7 +7592,7 @@ Return ONLY valid JSON:
       scheduleGoogleAutoSync();
       setStatus('', false);
       if (activeStashItem?.id === id) openStashDetail(id, true);
-      toast(`📷 Photo${files.length > 1 ? 's' : ''} saved to Stash!`);
+      toast(`📷 ${files.length} photos saved to Stash!`);
     } catch (err) {
       setStatus('', false);
       toast('Photo error: ' + (err?.message || 'Failed'), 4200);
@@ -8174,6 +8708,10 @@ Return ONLY valid JSON:
     document.getElementById('cfgAutoDetective').checked = cfg.autoDetective !== false;
     document.getElementById('cfgAutoGradeOnScan').checked = Boolean(cfg.autoGradeOnScan);
     document.getElementById('scanAutoGradeChk').checked = Boolean(cfg.autoGradeOnScan);
+    const acEl = document.getElementById('cfgAutoCropPhotos');
+    if (acEl) acEl.checked = cfg.autoCropPhotos !== false;
+    const pqEl = document.getElementById('cfgPhotoQuality');
+    if (pqEl) pqEl.value = cfg.photoQuality || 'medium';
     document.getElementById('cfgDiscogsToken').value = cfg.discogsToken || '';
     document.getElementById('cfgHomeCountry').value = cfg.homeCountry ?? 'US';
     document.getElementById('cfgFetchVg').checked = cfg.fetchVgSuggestions !== false;
@@ -8215,6 +8753,10 @@ Return ONLY valid JSON:
     const driveConfigured = Boolean(cfg.googleBoundEmail || cfg.googleEmail || cfg.googleLastSyncAt || cfg.googleLastLoadAt);
     if (driveConfigured && !cloudAccountMismatch) {
       await googleConnectAndLoad();
+      // If reconnect succeeded cleanly and local pending changes are waiting, automatically finish pushing them in one tap!
+      if (CC.isGoogleSignedIn() && !cloudAccountMismatch && !cloudEmptyAwaitingPublish && CC.getPendingCloudChanges() > 0) {
+        await syncGoogleDriveNow();
+      }
       return;
     }
     switchView('settings');
@@ -8385,11 +8927,11 @@ Return ONLY valid JSON:
             const photoNote = (res.uploadedPhotos || res.downloadedPhotos)
               ? ` · ↑${res.uploadedPhotos} ↓${res.downloadedPhotos} photos`
               : '';
-            const compactNote = res.compactedBatches > 0
-              ? ` · compacted ${res.compactedBatches} file${res.compactedBatches === 1 ? '' : 's'}`
+            const warnNote = res.partialErrors?.length
+              ? ` · ⚠️ ${res.partialErrors.length} warning(s)`
               : '';
             const confNote = res.conflicts?.length ? ` · ⚠️ ${res.conflicts.length} conflict(s)` : '';
-            toast(`☁️ Synced ${res.stashCount} Stash item(s) to softspot_state.json${compactNote}${photoNote}${confNote}`, 4200);
+            toast(`☁️ Synced ${res.stashCount} Stash item(s) (↑${res.uploadedBatches} batch${res.uploadedBatches === 1 ? '' : 'es'})${photoNote}${confNote}${warnNote}`, 4200);
           }
         }
         return res;
@@ -8493,10 +9035,20 @@ Return ONLY valid JSON:
     if (CC.isGoogleSignedIn() && !cloudAccountMismatch) {
       if (!quiet) setStatus('☁️ Syncing Google Drive before Discogs...', true);
       const driveRes = await runGoogleSyncFlow({ interactive: false, quiet: true, publishInitialLocal: false });
-      if (!driveRes || driveRes.status === 'account_mismatch' || driveRes.awaitingExplicitPublish) {
+      const driveIncomplete = Boolean(
+        !driveRes ||
+        !driveRes.ok ||
+        driveRes.status === 'account_mismatch' ||
+        driveRes.status === 'partial' ||
+        (Array.isArray(driveRes.partialErrors) && driveRes.partialErrors.length > 0) ||
+        driveRes.awaitingExplicitPublish
+      );
+      if (driveIncomplete) {
         if (!quiet) {
           setStatus('', false);
-          toast('⚠️ Google Drive sync failed or needs attention — Discogs sync cancelled so photos and grades stay protected.', 5200);
+          toast(driveRes?.status === 'partial' || driveRes?.partialErrors?.length
+            ? '⚠️ Google Drive pull was incomplete (some cloud files failed to load) — Discogs sync cancelled to protect photos and grades.'
+            : '⚠️ Google Drive sync failed or needs attention — Discogs sync cancelled so photos and grades stay protected.', 5400);
         }
         return null;
       }
@@ -8589,6 +9141,21 @@ Return ONLY valid JSON:
   window.syncDiscogsCollectionUI = () => syncWithDiscogsUI(true, false);
 
   window.saveSettings = (silent = false) => {
+    // Snapshot prior values of all synced preferences & secrets BEFORE mutating cfg so
+    // clicking Sync or saving unchanged settings NEVER advances cfgUpdatedAt and overwrites newer cloud prefs!
+    const prefKeys = CC.PREF_KEYS || [
+      'geminiModel', 'autoPlayHighlight', 'autoDetective', 'autoGradeOnScan',
+      'autoCropPhotos', 'photoQuality', 'homeCountry', 'fetchVgSuggestions',
+      'threshold', 'voice', 'showSpotify', 'showApple', 'showDeezer', 'showYoutube'
+    ];
+    const secretKeys = CC.SECRET_KEYS || [
+      'geminiKey', 'discogsToken', 'discogsUser', 'discogsFolderId',
+      'discogsFolders', 'discogsFields', 'spotifyClientId'
+    ];
+    const prevVals = {};
+    prefKeys.forEach(k => { prevVals[k] = JSON.stringify(cfg[k]); });
+    secretKeys.forEach(k => { prevVals[k] = JSON.stringify(cfg[k]); });
+
     cfg.googleClientId = (document.getElementById('cfgGoogleClientId')?.value || '').trim();
     cfg.googleAutoSync = document.getElementById('cfgGoogleAutoSync')?.checked !== false;
     cfg.googleSyncSecrets = Boolean(document.getElementById('cfgGoogleSyncSecrets')?.checked);
@@ -8599,6 +9166,10 @@ Return ONLY valid JSON:
     cfg.autoGradeOnScan = Boolean(document.getElementById('cfgAutoGradeOnScan')?.checked);
     const scanChk = document.getElementById('scanAutoGradeChk');
     if (scanChk) scanChk.checked = cfg.autoGradeOnScan;
+    const acEl = document.getElementById('cfgAutoCropPhotos');
+    if (acEl) cfg.autoCropPhotos = Boolean(acEl.checked);
+    const pqEl = document.getElementById('cfgPhotoQuality');
+    if (pqEl) cfg.photoQuality = pqEl.value || 'medium';
     cfg.discogsToken = document.getElementById('cfgDiscogsToken').value.trim();
     cfg.discogsFolderId = document.getElementById('cfgDiscogsFolder').value || '1';
     cfg.homeCountry = document.getElementById('cfgHomeCountry').value;
@@ -8610,28 +9181,24 @@ Return ONLY valid JSON:
     cfg.showApple = document.getElementById('cfgShowApple').checked;
     cfg.showDeezer = document.getElementById('cfgShowDeezer').checked;
     cfg.showYoutube = document.getElementById('cfgShowYoutube').checked;
-    CC.persistCfg(true);
+
+    const prefsChanged = prefKeys.some(k => JSON.stringify(cfg[k]) !== prevVals[k]);
+    const secretsChanged = Boolean(cfg.googleSyncSecrets) && secretKeys.some(k => JSON.stringify(cfg[k]) !== prevVals[k]);
+    const syncedSettingChanged = prefsChanged || secretsChanged;
+
+    CC.persistCfg(syncedSettingChanged);
     refreshNotice();
-    if (!silent) {
-      const outPrefs = {
-        cfgUpdatedAt: Number(cfg.cfgUpdatedAt || Date.now()),
-        geminiModel: cfg.geminiModel,
-        autoPlayHighlight: cfg.autoPlayHighlight,
-        autoDetective: cfg.autoDetective,
-        autoGradeOnScan: cfg.autoGradeOnScan,
-        homeCountry: cfg.homeCountry,
-        fetchVgSuggestions: cfg.fetchVgSuggestions,
-        threshold: cfg.threshold,
-        voice: cfg.voice,
-        showSpotify: cfg.showSpotify,
-        showApple: cfg.showApple,
-        showDeezer: cfg.showDeezer,
-        showYoutube: cfg.showYoutube
-      };
+    updateStageUI();
+
+    if (prefsChanged) {
+      const outPrefs = { cfgUpdatedAt: Number(cfg.cfgUpdatedAt || Date.now()) };
+      prefKeys.forEach(k => { outPrefs[k] = cfg[k]; });
       CC.commitLocalMutation({ extraOps: [{ type: 'prefs', prefs: outPrefs }], queueOutbox: true }).then(() => {
         updateCloudUI();
         scheduleGoogleAutoSync();
       }).catch(() => {});
+    }
+    if (!silent) {
       toast('Settings saved!');
     }
   };
@@ -9059,6 +9626,10 @@ Return ONLY valid JSON:
     document.getElementById('cfgAutoDetective').checked = cfg.autoDetective !== false;
     document.getElementById('cfgAutoGradeOnScan').checked = Boolean(cfg.autoGradeOnScan);
     document.getElementById('scanAutoGradeChk').checked = Boolean(cfg.autoGradeOnScan);
+    const acEl = document.getElementById('cfgAutoCropPhotos');
+    if (acEl) acEl.checked = cfg.autoCropPhotos !== false;
+    const pqEl = document.getElementById('cfgPhotoQuality');
+    if (pqEl) pqEl.value = cfg.photoQuality || 'medium';
     document.getElementById('cfgDiscogsToken').value = cfg.discogsToken || '';
     document.getElementById('cfgHomeCountry').value = cfg.homeCountry ?? 'US';
     document.getElementById('cfgFetchVg').checked = cfg.fetchVgSuggestions !== false;

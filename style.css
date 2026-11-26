@@ -885,6 +885,32 @@ body.has-audio .global-status-banner { bottom: calc(144px + var(--safe-bottom));
   padding: 10px 14px calc(12px + var(--safe-bottom)); background: var(--card);
 }
 
+/* Pre-save Photos Preview Strip inside Inspector */
+.insp-save-photos {
+  margin-top: 12px; padding: 10px 12px; background: var(--well); border-radius: 0px;
+}
+.insp-save-photos-hdr {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin-bottom: 8px; font-size: 0.78rem; font-weight: 800; color: var(--text);
+}
+.insp-save-photos-strip {
+  display: flex; gap: 8px; overflow-x: auto; padding-bottom: 2px;
+}
+.insp-save-photo-card {
+  flex: 0 0 108px; background: var(--card); border-radius: 0px; overflow: hidden;
+  display: flex; flex-direction: column;
+}
+.insp-save-photo-thumb {
+  width: 108px; height: 84px; background: #000000;
+  display: flex; align-items: center; justify-content: center; cursor: pointer; overflow: hidden;
+}
+.insp-save-photo-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.insp-save-photo-meta {
+  display: flex; align-items: center; justify-content: space-between; gap: 4px;
+  padding: 4px 6px; background: var(--card-2);
+}
+.insp-save-photo-lbl { font-size: 0.66rem; font-weight: 800; color: var(--muted); letter-spacing: 0.04em; }
+
 .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 0px; background: var(--well); margin-bottom: 6px; }
 .toggle-row:last-of-type { margin-bottom: 0; }
 .code-copy { display: flex; gap: 8px; align-items: center; background: var(--card); border: none; border-radius: 0px; padding: 9px 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.76rem; word-break: break-all; margin: 6px 0; }
