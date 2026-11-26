@@ -924,6 +924,9 @@ body.has-audio .global-status-banner { bottom: calc(144px + var(--safe-bottom));
   padding: 14px;
   margin-bottom: 12px;
 }
+.franken-banner.is-warn {
+  box-shadow: inset 3px 0 0 var(--yellow);
+}
 .franken-banner-title {
   font-size: 0.9rem;
   font-weight: 900;
@@ -931,6 +934,9 @@ body.has-audio .global-status-banner { bottom: calc(144px + var(--safe-bottom));
   color: #f87171;
   text-transform: uppercase;
   margin-bottom: 6px;
+}
+.franken-banner-title.is-warn {
+  color: #fbbf24;
 }
 .franken-banner-reason {
   font-size: 0.84rem;

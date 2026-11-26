@@ -1,43 +1,35 @@
-# Changelog — Soft Spot v2.3.1
+# Changelog — Soft Spot v2.3.2
 
-## Highlights
+## Bug Fixes
 
-1. **Bulletproof Gemini JSON Parsing, Auto-Retry & Resilient Recalibration**
-   - Upgraded `cleanJsonText()` (`apis.js`) to strip `<think>` blocks and code fences, extract outermost `{...}` / `[...]` spans, strip raw ASCII control characters, remove trailing commas before `}` / `]`, and throw `err.code = 'AI_JSON_PARSE'` on persistent malformed JSON.
-   - Added automatic 2-retry recovery (1.5s delay with live status banner) in `runGeminiRequest()` whenever `finishReason === 'MAX_TOKENS'` or `cleanJsonText()` throws `AI_JSON_PARSE`.
-   - Lowered `recalibrateStashBatch` chunk size from `10` to `5` (keeping `maxOutputTokens: 8192`) and added an automatic 1-item-at-a-time fallback whenever a 5-item chunk fails with `AI_JSON_PARSE`, continuing past any single bad item and reporting exact succeeded/failed counts.
+1. **Atomic Live-Row Taste Recalibration (Single + Batch) & Accurate Saved Counts**
+   - Added `CC.mutateBatchStashItemsIfAlive(updatesList, changedFields, queueOutbox)` in `apis.js` running inside a single `readwrite` IndexedDB transaction under `withLocalCommitLock`, skipping deleted/tombstoned rows, patching only Taste fields onto live rows (preserving concurrent edits to notes, grades, or photos), and updating the dirty counter only after commit.
+   - Updated `recalibrateSingleStashItem` and `recalibrateStashBatch` (`app.js`) to commit via atomic live-row mutations (`TASTE_FIELDS`), handle mid-run deletions cleanly, and increment `updatedTotal` only after IndexedDB commit succeeds.
 
-2. **Contextual Stash Recalibrate Button & One-Tap Per-Item `🔄 TASTE`**
-   - Added a contextual **`🔄 Recalibrate All (N)`** button inside `#view-stash` (hidden whenever `staleCount === 0`, shown automatically whenever stale items exist).
-   - Converted every Stash card's stale **`🔄 TASTE`** badge into a clickable one-tap button calling `recalibrateSingleStashItem(id)` directly without opening the detail view.
+2. **Discogs 429 Cooldown Account Recheck & Strict Legacy Removal Guard**
+   - Extracted `assertUserBinding()` in `runDQueue` (`apis.js`) and enforced it before waiting, before the initial `fetch`, and again immediately after the 60s HTTP `429` cooldown before sending the retry `fetch` (while also recording `lastDCall`/`recentDCalls` and preserving `err.status` on retry failure).
+   - Hardened `attemptDeleteOldCopy` (`app.js`) and `deleteDiscogsAndStashCopy` (`apis.js`) to refuse automatic remote deletion whenever a legacy synced record lacks both `discogs_account` and `discogs_instance_id`.
 
-3. **Rebuild Workflow: No Mid-Run Drive Pushes, UI Lockdown & Honest Step Reporting**
-   - Suppressed `scheduleGoogleAutoSync()` during active Rebuild runs, cleared pending auto-sync timers on start, and passed `{ suppressAutoSync: true }` to Steps 2–5 (`syncWithDiscogsUI` also `{ skipDriveGate: true }`, `recalibrateStashBatch` also `{ skipConfirm: true }`) so Google Drive only executes in Step 1 and Step 6.
-   - Added full Settings + Rebuild control lockdown and bottom-nav tab-switch protection while Rebuild runs (keeping **`✕ Cancel`** enabled and always unlocking in `finally`).
-   - Replaced optimistic `100%` completion with honest per-step tracking (`completed` / `skipped` / `failed`), showing exact counts and yellow/red semantic bars whenever any step was skipped or failed.
-   - Made the Rebuild action bar flex full-width so **`▶ Run Selected Steps`** spans 100% width when **`✕ Cancel`** is hidden.
+3. **Rebuild Workflow Prerequisite Gating & Honest Spotify Auth Reporting**
+   - Added prerequisite gating in `runMaintenanceWorkflow` (`app.js`): if Step 1 (Drive pre-sync) is skipped/failed, Steps 4 (Discogs) and 6 (Drive push) are automatically skipped; if Step 2 (Spotify) does not complete, Steps 3 (Auto-Draft Taste) and 5 (Recalibrate) are skipped; if Step 3 fails/skips, Step 5 is skipped.
+   - Inspected `spRes.reason` explicitly so `'auth_expired'` reports `"Spotify login expired — reconnect in Settings"` instead of a 90s cooldown, `'rate_limit'` reports the real cooldown duration, and `'cancelled'` aborts cleanly.
 
-4. **Franken-Copy Evidence Isolation & `⚠️ Media unverified` Warning**
-   - Strictly isolated `fTitle`, `fArtist`, `fCatno`, `fLabel`, `fYear`, `fBarcode`, and `currentExtracted.cleaned_catalog_variants` in `'media'` mode (`runVisionOCR` and `switchFrankenVerifyMode`) so packaging clues never leak into physical media searches.
-   - Added a prominent **`⚠️ Media unverified`** warning inside `#frankenBanner` when physical media text is unreadable while packaging is readable, preventing silent Discogs searches using mismatched packaging clues.
+4. **Media Unverified Warning Whenever Physical Media Isn't Identified**
+   - Added `media_visible` and `packaging_visible` to `runVisionOCR` and instructed Gemini never to copy packaging text into `media_identity` when the physical tape/disc is hidden or unreadable.
+   - Evaluated `mediaReadable` vs. `pkgReadable` unconditionally so packaging-only scans trigger an amber **`⚠️ MEDIA UNVERIFIED (PACKAGING ONLY)`** warning banner pausing before Discogs search, with one-tap **`📷 Take Media Close-Up`** and **`📦 Search by Packaging Anyway`** actions (without marking packaging-only saves as Franken-Copies).
 
-5. **Upgraded v2.2.0 Photo-Slot Revision Initialization**
-   - Updated `CC.stampStashRevision` to initialize missing `photo_slots.front` / `back` / `extras` entries from `prevRecord`'s baseline timestamp/rev before stamping newly changed slot(s), ensuring concurrent Phone/PC photo edits on upgraded v2.2.0 records merge cleanly.
+5. **String-Aware Gemini JSON Repair & Strict Root-Shape Validation**
+   - Replaced global regex trailing-comma removal in `cleanJsonText(raw, opts)` (`apis.js`) with a character-by-character string-literal-aware repair pass (`inString`/`escaped`) that never mutates text inside double-quoted strings.
+   - Added `expectedRootType` (`'object'` default — never falling back to an inner `[...]` array) and `validate` predicate checks (`Array.isArray(r?.scores)` / `Array.isArray(r?.items)`) wired through `runGeminiRequest` so shape mismatches trigger automatic retry.
 
-6. **Queue-Time Discogs Credential Binding**
-   - Bound `boundToken` and `boundUser` at queue push time in `CC.discogsFetch()` and enforced live account/token verification inside `runDQueue()` before issuing `/users/...` requests so queued requests never fire against a switched Discogs account.
+6. **Hardened Scope-Isolated Offline Service Worker (`sw.js`)**
+   - Scoped cache prefix & name by `self.registration.scope` (`softspot-shell-<scopeId>-v2.3.2`) so multiple installs/versions on the same origin never delete or collide with each other.
+   - Opened `CACHE_NAME` explicitly for all cache reads/writes, fell back to cached shell on HTTP `5xx` server outages, removed `{ ignoreSearch: true }` for versioned `.js`/`.css` assets, and served version-locked `./index.html` for navigation fallbacks.
 
-7. **Legacy JSON Restore: Preserve Distinct Copies + Stay Idempotent**
-   - Expanded `computeLegacyFingerprintSyncId()` to include `condition_note`, `media_condition`, and `sleeve_condition`, and appended deterministic occurrence indices (`#2`, `#3`, ...) in array order in `CC.importJsonBackupAtomic()` so real duplicate legacy copies survive restore while re-importing the same file remains 100% idempotent.
+7. **Concurrent Extra-Photo 3-Way Union Merge & Stable Legacy Backup Identity**
+   - Recorded `parentRev` on `photo_slots.extras` revisions in `CC.stampStashRevision` and updated `mergeStashRecordsDeterministic` so direct descendants honor intentional extra removals while concurrent different-device additions union cleanly via `mergePhotoListsUnique`.
+   - Restricted `computeLegacyFingerprintSyncId` to immutable identity fields (`artist`, `title`, `format`, `catno`, `year`, `created_at`, `discogs_id`, `discogs_instance_id`) while preserving `#2`, `#3`, ... occurrence suffixes so edited re-exports merge cleanly without duplicating.
 
-8. **Scoped Settings Saves, Uniform Left-Side Order & Preserve `'auto'` Folder**
-   - Placed **`Save Settings`** on the **LEFT** and **`🔗 Verify & Load Folders`** on the **RIGHT** in Settings #3 to match Settings #2 and #4.
-   - Added `scope` support to `saveSettings(silent, scope)` so Gemini saves only commit Gemini/playback/photo fields and Discogs saves only commit Discogs fields.
-   - Preserved `cfg.discogsFolderId === 'auto'` across Discogs collection sync (`reconcileDiscogsCollectionIntoStash`) and folder dropdown rendering (`populateFolders`).
-
-9. **True Offline App-Shell Caching (Service Worker)**
-   - Added `./sw.js` (`softspot-shell-v2.3.1`) with pre-cached app shell, network-first + offline cache fallback for same-origin shell assets, old cache cleanup, and third-party API exclusion, safely registered on load in `app.js`.
-
-10. **Spine Re-Slot Crop Guard & Scanner Polish**
-    - Added a dedicated `photo.spineCropped` flag set only after spine cropping/rotation so re-slotted spines in `runVisionOCR` always get cropped and rotated upright.
-    - Updated `renderInspector` format-mismatch alerts to use `getEffectiveScanFormat()` + `CC.matchesMediaFormat()`, and delegated single-mode `removeCameraShot` deletions to `removeStagedPhoto`.
+8. **Transaction-Safe Dirty Counter, Client ID Auto-Save & Doc Cleanup**
+   - Moved `CC.setPendingCloudChanges(nextQueueLen)` in `reconcileDiscogsCollectionIntoStash` (`apis.js`) after `await CC.idbAtomicWrite(...)` resolves.
+   - Added `onchange` scoped auto-save handlers to `#cfgGoogleClientId` (`cloud`) and `#cfgSpotifyClientId` (`music`) in `index.html`, bumped taste cache keys to `|v232`, and cleaned up stale Quick Start button names in `README.md`.

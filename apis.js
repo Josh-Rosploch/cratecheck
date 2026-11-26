@@ -513,12 +513,17 @@
     dBusy = true;
     const job = dQueue.shift();
     try {
-      const currentUser = (CC.cfg.discogsUser || '').trim().toLowerCase();
-      const currentToken = (CC.cfg.discogsToken || '').trim();
       const isUserScopedPath = /^\/users\/[^/]+(\/|$)/i.test(String(job.path || ''));
-      if (isUserScopedPath && (currentUser !== job.boundUser || currentToken !== job.boundToken)) {
-        throw new Error('Discogs account changed while request was queued — aborted safely');
-      }
+      const assertUserBinding = () => {
+        if (isUserScopedPath && (
+          (CC.cfg.discogsUser || '').trim().toLowerCase() !== job.boundUser ||
+          (CC.cfg.discogsToken || '').trim() !== job.boundToken
+        )) {
+          throw new Error('Discogs account changed while request was queued — aborted safely');
+        }
+      };
+
+      assertUserBinding();
 
       const now = Date.now();
       recentDCalls = recentDCalls.filter(t => now - t < 60000);
@@ -531,14 +536,8 @@
       const gap = Date.now() - lastDCall;
       if (gap < minGap) await CC.sleep(minGap - gap);
 
-      // Re-verify account binding immediately before sending fetch (in case account switched during rate-limit sleep)
-      if (isUserScopedPath) {
-        const curUserNow = (CC.cfg.discogsUser || '').trim().toLowerCase();
-        const curTokenNow = (CC.cfg.discogsToken || '').trim();
-        if (curUserNow !== job.boundUser || curTokenNow !== job.boundToken) {
-          throw new Error('Discogs account changed while request was queued — aborted safely');
-        }
-      }
+      // Re-verify account binding immediately before initial fetch
+      assertUserBinding();
 
       const url = new URL('https://api.discogs.com' + job.path);
       Object.entries(job.params || {}).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v); });
@@ -546,7 +545,7 @@
 
       lastDCall = Date.now();
       recentDCalls.push(lastDCall);
-      rateCb(recentDCalls.length);
+      rateCb(CC.getRateCount());
 
       const fetchOpts = { method: job.method };
       if (job.body !== null && job.body !== undefined) {
@@ -558,9 +557,22 @@
       if (res.status === 429) {
         statusCb('Discogs rate limit hit — cooling down 60s...', true);
         await CC.sleep(60000);
+        // Re-verify account binding immediately after 60s cooldown before sending retry fetch!
+        assertUserBinding();
+        lastDCall = Date.now();
+        recentDCalls.push(lastDCall);
+        rateCb(CC.getRateCount());
         const retry = await fetch(url.toString(), fetchOpts);
-        if (!retry.ok) throw new Error(`Discogs HTTP ${retry.status}`);
-        job.resolve(await retry.json().catch(() => ({})));
+        if (retry.status === 204) {
+          job.resolve({});
+        } else if (!retry.ok) {
+          const retryErrTxt = await retry.text().catch(() => '');
+          const retryErr = new Error(`Discogs HTTP ${retry.status}: ${retryErrTxt.slice(0, 120)}`);
+          retryErr.status = retry.status;
+          throw retryErr;
+        } else {
+          job.resolve(await retry.json().catch(() => ({})));
+        }
       } else if (res.status === 204) {
         job.resolve({});
       } else if (!res.ok) {
@@ -1244,7 +1256,8 @@
         ops.push({ type: 'discogs_index', index: syncResult.collectionIndex });
       }
 
-      const finalQueueLen = await CC.idbAtomicWrite(({ stashStore, metaStore }) => {
+      let nextQueueLen = null;
+      await CC.idbAtomicWrite(({ stashStore, metaStore }) => {
         for (const delId of localIdsToDelete) stashStore.delete(delId);
         for (const rec of toPut) stashStore.put(rec);
         if (Object.keys(repair.newAliases).length > 0) {
@@ -1266,11 +1279,11 @@
               ops
             });
             metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: liveQ } });
-            CC.setPendingCloudChanges(liveQ.length);
+            nextQueueLen = liveQ.length;
           };
         }
       });
-      void finalQueueLen;
+      if (nextQueueLen !== null) CC.setPendingCloudChanges(nextQueueLen);
 
       CC.cfg.discogsFolders = syncResult.folders;
       CC.cfg.discogsLastSyncAt = syncedAt;
@@ -1667,6 +1680,9 @@
         throw new Error('Connect and verify your Discogs account in Settings to delete this synced copy from Discogs');
       }
       const itemAcct = String(stashItem.discogs_account || '').trim();
+      if (!itemAcct && !stashItem.discogs_instance_id) {
+        throw new Error('This legacy synced entry lacks both a Discogs account and instance ID — run Sync with Discogs first to link the exact copy safely before deleting from Discogs.');
+      }
       if (itemAcct && itemAcct.toLowerCase() !== account.toLowerCase()) {
         throw new Error(`This copy belongs to Discogs account @${itemAcct}, not @${account} — switch accounts or delete locally only.`);
       }
@@ -1755,21 +1771,116 @@
   };
   CC.cancelGemini = CC.cancelAI;
 
-  function cleanJsonText(raw) {
+  function repairJsonStringAware(str) {
+    const src = String(str || '');
+    const out = [];
+    let inString = false;
+    let escaped = false;
+    const len = src.length;
+
+    for (let i = 0; i < len; i++) {
+      const ch = src[i];
+      const code = src.charCodeAt(i);
+
+      if (inString) {
+        if (escaped) {
+          out.push(ch);
+          escaped = false;
+          continue;
+        }
+        if (ch === '\\') {
+          out.push(ch);
+          escaped = true;
+          continue;
+        }
+        if (ch === '"') {
+          out.push(ch);
+          inString = false;
+          continue;
+        }
+        // Escape raw newlines/tabs inside strings; strip other unescaped ASCII control chars
+        if (code < 0x20) {
+          if (ch === '\n') out.push('\\n');
+          else if (ch === '\r') out.push('\\r');
+          else if (ch === '\t') out.push('\\t');
+          continue;
+        }
+        out.push(ch);
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = true;
+        out.push(ch);
+        continue;
+      }
+
+      // Outside strings: drop raw non-whitespace ASCII control chars
+      if (code < 0x20 && ch !== '\t' && ch !== '\n' && ch !== '\r') {
+        continue;
+      }
+
+      // Outside strings: remove trailing commas immediately before '}' or ']'
+      if (ch === ',') {
+        let j = i + 1;
+        while (j < len) {
+          const nc = src[j];
+          const ncode = src.charCodeAt(j);
+          if (nc === ' ' || nc === '\t' || nc === '\n' || nc === '\r' || ncode < 0x20) {
+            j++;
+            continue;
+          }
+          break;
+        }
+        if (j < len && (src[j] === '}' || src[j] === ']')) {
+          continue;
+        }
+      }
+
+      out.push(ch);
+    }
+
+    return out.join('').trim();
+  }
+
+  function cleanJsonText(raw, opts = {}) {
+    const { expectedRootType = 'object', validate = null } = (opts && typeof opts === 'object') ? opts : {};
     const noThink = String(raw || '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
     const cleaned = noThink
       .replace(/^```(?:json)?\s*/i, '')
       .replace(/\s*```\s*$/i, '')
       .trim();
 
-    try { return JSON.parse(cleaned); } catch (_) {}
+    const matchesExpected = (val) => {
+      if (expectedRootType === 'object') {
+        if (!val || typeof val !== 'object' || Array.isArray(val)) return false;
+      } else if (expectedRootType === 'array') {
+        if (!Array.isArray(val)) return false;
+      }
+      if (typeof validate === 'function') {
+        try {
+          if (!validate(val)) return false;
+        } catch (_) {
+          return false;
+        }
+      }
+      return true;
+    };
 
-    const repairJsonStr = (str) => String(str || '')
-      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
-      .replace(/,\s*([}\]])/g, '$1')
-      .trim();
+    const tryParseAndValidate = (text) => {
+      if (!text) return { ok: false, val: null };
+      try {
+        const parsed = JSON.parse(text);
+        if (matchesExpected(parsed)) return { ok: true, val: parsed };
+      } catch (_) {}
+      return { ok: false, val: null };
+    };
 
-    // Extract outermost {...} and [...] spans and attempt repaired JSON.parse
+    const direct = tryParseAndValidate(cleaned);
+    if (direct.ok) return direct.val;
+
+    // Extract outermost span strictly matching expectedRootType
+    // (When expectedRootType === 'object', NEVER fall back to an inner [...] array!)
     const candidates = [];
     const firstObj = cleaned.indexOf('{');
     const lastObj = cleaned.lastIndexOf('}');
@@ -1777,34 +1888,42 @@
     const lastArr = cleaned.lastIndexOf(']');
     const objSpan = (firstObj !== -1 && lastObj > firstObj) ? cleaned.slice(firstObj, lastObj + 1) : '';
     const arrSpan = (firstArr !== -1 && lastArr > firstArr) ? cleaned.slice(firstArr, lastArr + 1) : '';
-    if (firstArr !== -1 && (firstObj === -1 || firstArr < firstObj)) {
-      if (arrSpan) candidates.push(arrSpan);
+
+    if (expectedRootType === 'object') {
       if (objSpan) candidates.push(objSpan);
+    } else if (expectedRootType === 'array') {
+      if (arrSpan) candidates.push(arrSpan);
     } else {
-      if (objSpan) candidates.push(objSpan);
-      if (arrSpan) candidates.push(arrSpan);
+      if (firstArr !== -1 && (firstObj === -1 || firstArr < firstObj)) {
+        if (arrSpan) candidates.push(arrSpan);
+        if (objSpan) candidates.push(objSpan);
+      } else {
+        if (objSpan) candidates.push(objSpan);
+        if (arrSpan) candidates.push(arrSpan);
+      }
     }
     candidates.push(cleaned);
 
     for (const cand of candidates) {
-      const repaired = repairJsonStr(cand);
-      if (!repaired) continue;
-      try {
-        return JSON.parse(repaired);
-      } catch (_) {}
+      const repaired = repairJsonStringAware(cand);
+      const res = tryParseAndValidate(repaired);
+      if (res.ok) return res.val;
     }
 
     const err = new Error('Could not parse AI JSON response');
     err.code = 'AI_JSON_PARSE';
     throw err;
   }
+  CC.cleanJsonText = cleanJsonText;
 
   async function runGeminiRequest(parts, thinkingLevel, opts = {}) {
     const {
       expectJSON = true,
       retryLabel = 'Gemini',
       maxOutputTokens = null,
-      mediaResolution = null
+      mediaResolution = null,
+      expectedRootType = 'object',
+      validate = null
     } = opts;
     if (!CC.cfg.geminiKey?.trim()) throw new Error('Add your Gemini API Key in Settings');
     const model = (CC.cfg.geminiModel || 'gemini-3.5-flash-lite').trim();
@@ -1900,7 +2019,7 @@
           parseErr.code = 'AI_JSON_PARSE';
         } else {
           try {
-            return cleanJsonText(raw);
+            return cleanJsonText(raw, { expectedRootType, validate });
           } catch (e) {
             parseErr = e;
           }
@@ -3378,6 +3497,7 @@
         }
       }
 
+      const prevExtrasRev = prevRecord?.field_revs?.['photo_slots.extras']?.rev || null;
       const slotChecks = [
         ['photo_slots.front', prevSlots.front, nextSlots.front, Boolean(nextSlots.front)],
         ['photo_slots.back', prevSlots.back, nextSlots.back, Boolean(nextSlots.back)],
@@ -3386,7 +3506,9 @@
       slotChecks.forEach(([k, pv, nv, nonEmpty]) => {
         const changed = prevRecord ? (JSON.stringify(pv) !== JSON.stringify(nv)) : nonEmpty;
         if (changed) {
-          const entry = { ts: now, rev, deviceId };
+          const entry = k === 'photo_slots.extras'
+            ? { ts: now, rev, deviceId, parentRev: prevExtrasRev }
+            : { ts: now, rev, deviceId };
           fRevs[k] = entry;
           fMeta[k] = entry;
         }
@@ -3568,6 +3690,94 @@
 
     if (!outcome.aborted) CC.setPendingCloudChanges(outcome.pendingCount);
     return outcome;
+  });
+
+  // Atomic live-row BATCH Stash mutation inside ONE readwrite transaction:
+  // Re-reads live stash rows, tombstones, aliases & outbox; skips deleted/tombstoned rows (never resurrects!),
+  // applies ONLY patchFn(liveRow) so concurrent edits to notes/grades/photos survive, and queues ONE outbox batch.
+  CC.mutateBatchStashItemsIfAlive = async (updatesList = [], changedFields = null, queueOutbox = true) => withLocalCommitLock(async () => {
+    let updatedCount = 0;
+    let skippedDeletedCount = 0;
+    let pendingCount = 0;
+    const list = Array.isArray(updatesList) ? updatesList : [];
+    if (!list.length) return { updatedCount: 0, skippedDeletedCount: 0, pendingCount: 0 };
+
+    await CC.idbAtomicWrite(({ stashStore, metaStore }) => {
+      const allReq = stashStore.getAll();
+      allReq.onsuccess = () => {
+        const liveRows = Array.isArray(allReq.result) ? allReq.result : [];
+        readMetaInTx(metaStore, ['deleted_sync_ids', SYNC_ID_ALIASES_KEY, CLOUD_OUTBOX_KEY], (m) => {
+          const deletedMap = Object.assign({}, m.deleted_sync_ids || {});
+          const aliases = Object.assign({}, m[SYNC_ID_ALIASES_KEY] || {});
+          const liveQueue = Array.isArray(m[CLOUD_OUTBOX_KEY]?.queue) ? m[CLOUD_OUTBOX_KEY].queue.slice() : [];
+          pendingCount = liveQueue.length;
+
+          const liveById = new Map();
+          const liveByCanonSid = new Map();
+          liveRows.forEach(r => {
+            if (r.id !== undefined && r.id !== null) liveById.set(r.id, r);
+            if (r.sync_id) {
+              const cSid = resolveCanonicalSyncId(r.sync_id, aliases);
+              if (cSid) liveByCanonSid.set(cSid, r);
+            }
+          });
+
+          const ops = [];
+          for (const entry of list) {
+            if (!entry || typeof entry.patchFn !== 'function') continue;
+            let liveRow = (entry.id !== undefined && entry.id !== null) ? liveById.get(entry.id) : null;
+            if (!liveRow && entry.sync_id) {
+              const targetCanon = resolveCanonicalSyncId(entry.sync_id, aliases);
+              if (targetCanon) liveRow = liveByCanonSid.get(targetCanon) || null;
+            }
+            if (!liveRow) {
+              skippedDeletedCount++;
+              continue;
+            }
+            const canonSid = resolveCanonicalSyncId(liveRow.sync_id || entry.sync_id || '', aliases);
+            const delTs = normTombstoneTs(deletedMap[canonSid]);
+            const recTs = Number(liveRow.updated_at || liveRow.created_at || 0);
+            if (delTs > 0 && delTs >= recTs) {
+              skippedDeletedCount++;
+              continue;
+            }
+            const nextRaw = entry.patchFn({ ...liveRow });
+            if (!nextRaw) continue;
+
+            const stamped = CC.stampStashRevision(nextRaw, liveRow, changedFields);
+            stamped.sync_id = canonSid || stamped.sync_id || CC.generateSyncId();
+            if (liveRow.id !== undefined) stamped.id = liveRow.id;
+            stashStore.put(stamped);
+
+            if (stamped.id !== undefined && stamped.id !== null) liveById.set(stamped.id, stamped);
+            if (stamped.sync_id) liveByCanonSid.set(resolveCanonicalSyncId(stamped.sync_id, aliases), stamped);
+
+            const opCopy = { ...stamped };
+            delete opCopy.id;
+            ops.push({ type: 'upsert_stash', sync_id: stamped.sync_id, record: opCopy });
+            updatedCount++;
+          }
+
+          if (queueOutbox && ops.length > 0) {
+            liveQueue.push({
+              batchId: CC.newBatchId(),
+              accountEmail: CC.cfg.googleBoundEmail || CC.cfg.googleEmail || '',
+              createdAt: Date.now(),
+              deviceId: CC.getDeviceId(),
+              status: 'queued',
+              ops
+            });
+            metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: liveQueue } });
+            pendingCount = liveQueue.length;
+          }
+        });
+      };
+    });
+
+    if (queueOutbox && updatedCount > 0) {
+      CC.setPendingCloudChanges(pendingCount);
+    }
+    return { updatedCount, skippedDeletedCount, pendingCount };
   });
 
   // Serialized atomic local mutation: reads & updates outbox/tombstones/aliases inside ONE readwrite transaction (safe across tabs!)
@@ -4062,6 +4272,32 @@
             else if (lm) mergedFieldRevs[subKey] = lm;
             return lSubVal;
           }
+
+          // 3-way ancestry & concurrent union merge for photo_slots.extras:
+          // Direct descendant honors intentional removals; concurrent edits on different devices union both extras!
+          if (subKey === 'photo_slots.extras' && isArr) {
+            if (rm?.parentRev && lm?.rev && rm.parentRev === lm.rev) {
+              mergedFieldRevs[subKey] = rm;
+              return rSubVal;
+            }
+            if (lm?.parentRev && rm?.rev && lm.parentRev === rm.rev) {
+              mergedFieldRevs[subKey] = lm;
+              return lSubVal;
+            }
+            const lDev = String(lm?.deviceId || '');
+            const rDev = String(rm?.deviceId || '');
+            const sameDevice = Boolean(lDev && rDev && lDev === rDev);
+            if (!sameDevice && Array.isArray(lSubVal) && lSubVal.length > 0 && Array.isArray(rSubVal) && rSubVal.length > 0) {
+              const lSubTsU = Number(lm?.ts || locTs);
+              const rSubTsU = Number(rm?.ts || remTs);
+              const lSubRevU = String(lm?.rev || locRev);
+              const rSubRevU = String(rm?.rev || remRev);
+              const rWinsU = compareRevMeta(rSubTsU, rSubRevU, lSubTsU, lSubRevU) > 0;
+              mergedFieldRevs[subKey] = rWinsU ? (rm || { ts: rSubTsU, rev: rSubRevU }) : (lm || { ts: lSubTsU, rev: lSubRevU });
+              return mergePhotoListsUnique(rWinsU ? rSubVal : lSubVal, rWinsU ? lSubVal : rSubVal);
+            }
+          }
+
           if (lEmptySub && !rEmptySub && !lHasSubTs) {
             if (rm) mergedFieldRevs[subKey] = rm;
             return rSubVal;
@@ -5574,7 +5810,7 @@
   // Alias for backward compatibility
   CC.syncWithGoogleDrive = CC.syncNowWithGoogleDrive;
 
-  // Deterministic legacy fallback ID for pre-sync_id backups (includes condition & notes so distinct copies survive)
+  // Deterministic legacy fallback ID for pre-sync_id backups (immutable identity fields only so editing notes/grades never creates duplicates)
   function computeLegacyFingerprintSyncId(rec) {
     const raw = [
       CC.norm(rec?.artist || ''),
@@ -5583,9 +5819,8 @@
       CC.norm(rec?.catno || ''),
       String(rec?.year || '').trim(),
       String(Number(rec?.created_at || 0)),
-      CC.norm(rec?.condition_note || ''),
-      CC.norm(rec?.media_condition || ''),
-      CC.norm(rec?.sleeve_condition || '')
+      String(Number(rec?.discogs_id || 0)),
+      String(Number(rec?.discogs_instance_id || 0))
     ].join('|');
     let h1 = 0x811c9dc5;
     let h2 = 0x01000193;

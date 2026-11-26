@@ -3726,20 +3726,49 @@ Return ONLY valid JSON:
     if (!el) return;
     if (!frankenState || !frankenState.active) {
       el.classList.add('hidden');
+      el.classList.remove('is-warn');
       el.innerHTML = '';
       return;
     }
     const f = frankenState;
+    const isMismatch = Boolean(f.mismatchType && f.mismatchType !== 'none');
+    const packLabel = [cleanFrankenField(f.packaging?.artist), cleanFrankenField(f.packaging?.title)].filter(Boolean).join(' — ') || 'Unknown packaging';
+    const packMeta = [cleanFrankenField(f.packaging?.format), cleanFrankenField(f.packaging?.catno), cleanFrankenField(f.packaging?.label), cleanFrankenField(f.packaging?.year)].filter(Boolean).join(' · ');
+
+    el.classList.remove('hidden');
+
+    if (!isMismatch && f.mediaUnverified) {
+      el.classList.add('is-warn');
+      el.innerHTML = `
+        <div class="franken-banner-title is-warn">⚠️ MEDIA UNVERIFIED (PACKAGING ONLY)</div>
+        <div class="franken-banner-reason">${esc(f.reason || 'Only the packaging/case text was readable — the physical tape/disc label was unreadable or not shown. Take a close-up of the physical media to avoid a Franken-Copy mismatch, or search by packaging anyway.')}</div>
+        <div class="franken-banner-compare">
+          <div class="franken-id-box">
+            <strong>📼 Physical Media</strong>
+            <div>Unreadable / Not shown</div>
+          </div>
+          <div class="franken-id-box">
+            <strong>📦 Packaging / Case ${f.mode === 'packaging' ? '(Active)' : '(Detected)'}</strong>
+            <div>${esc(packLabel)}</div>
+            ${packMeta ? `<div style="margin-top:2px;">${esc(packMeta)}</div>` : ''}
+          </div>
+        </div>
+        <div class="inline-actions" style="gap:6px;">
+          <button type="button" class="btn btn-green btn-sm" onclick="openCameraViewfinder('single')">📷 Take Media Close-Up</button>
+          <button type="button" class="btn ${f.mode === 'packaging' ? 'btn-green' : 'btn-secondary'} btn-sm" onclick="switchFrankenVerifyMode('packaging')">📦 Search by Packaging Anyway</button>
+        </div>
+      `;
+      return;
+    }
+
+    el.classList.remove('is-warn');
     const isDiffAlbumOrFmt = f.mismatchType === 'different_album' || f.mismatchType === 'different_format';
     const mediaLabel = [cleanFrankenField(f.media?.artist), cleanFrankenField(f.media?.title)].filter(Boolean).join(' — ') || 'Unreadable / Unknown media';
-    const packLabel = [cleanFrankenField(f.packaging?.artist), cleanFrankenField(f.packaging?.title)].filter(Boolean).join(' — ') || 'Unknown packaging';
     const mediaMeta = [cleanFrankenField(f.media?.format), cleanFrankenField(f.media?.catno), cleanFrankenField(f.media?.label), cleanFrankenField(f.media?.year)].filter(Boolean).join(' · ');
-    const packMeta = [cleanFrankenField(f.packaging?.format), cleanFrankenField(f.packaging?.catno), cleanFrankenField(f.packaging?.label), cleanFrankenField(f.packaging?.year)].filter(Boolean).join(' · ');
     const unverifiedWarnHtml = f.mediaUnverified
       ? `<div class="alert-box alert-dup" style="margin-bottom:10px;">⚠️ <strong>Media unverified</strong> — Physical tape/disc label text was unreadable, so Discogs was NOT searched using the mismatched packaging clues. Retake a sharp close-up of the media label or explicitly tap <strong>📦 Verify Packaging Instead</strong>.</div>`
       : '';
 
-    el.classList.remove('hidden');
     el.innerHTML = `
       <div class="franken-banner-title">🧟 FRANKEN-COPY DETECTED (${esc(f.mismatchType.replace(/_/g, ' '))})</div>
       <div class="franken-banner-reason">${esc(f.reason || 'Physical media and packaging do not match.')}</div>
@@ -3757,7 +3786,8 @@ Return ONLY valid JSON:
         </div>
       </div>
       <div class="inline-actions" style="gap:6px;">
-        <button type="button" class="btn ${f.mode === 'media' ? 'btn-green' : 'btn-secondary'} btn-sm" onclick="switchFrankenVerifyMode('media')">📼 Verify Media (Default)</button>
+        ${f.mediaUnverified ? `<button type="button" class="btn btn-green btn-sm" onclick="openCameraViewfinder('single')">📷 Take Media Close-Up</button>` : ''}
+        <button type="button" class="btn ${f.mode === 'media' && !f.mediaUnverified ? 'btn-green' : 'btn-secondary'} btn-sm" onclick="switchFrankenVerifyMode('media')">📼 Verify Media (Default)</button>
         <button type="button" class="btn ${f.mode === 'packaging' ? 'btn-green' : 'btn-secondary'} btn-sm" onclick="switchFrankenVerifyMode('packaging')">📦 Verify Packaging Instead</button>
         ${isDiffAlbumOrFmt ? `<button type="button" class="btn btn-secondary btn-sm" onclick="saveOrphanPackagingLocally()">💾 Also Save Orphan Packaging Locally</button>` : ''}
       </div>
@@ -3887,11 +3917,12 @@ PHOTO ROLE IDENTIFICATION (DO NOT ASSUME SLOT ORDER):
 - If ONLY the bare cassette shell or bare disc is shown (no case, no J-card, no cover insert), set "has_case_or_insert": false and note loose media in "physical_details".
 
 FRANKEN-COPY DETECTOR (PACKAGING VS. PHYSICAL MEDIA MISMATCH — CRITICAL):
-- Independently read BOTH:
+- Independently inspect BOTH and set "media_visible": true | false and "packaging_visible": true | false:
   1) PACKAGING (J-card / outer jacket / jewel case insert / box) -> return "packaging_identity": { "artist", "title", "catno", "format", "label", "year" }
   2) PHYSICAL MEDIA (cassette shell / CD disc face / vinyl center label) -> return "media_identity": { "artist", "title", "catno", "format", "label", "year" }
+- STRICT MEDIA EVIDENCE RULE: "media_identity" MUST contain ONLY text actually read directly from the physical tape shell, CD disc face, or vinyl center label. NEVER copy J-card, jacket, or case text into "media_identity" when the physical media is hidden, turned away, inside a closed case, or unreadable (leave those fields as "" when unreadable!).
 - Compare Packaging vs. Physical Media carefully!
-  * If they match (or only one is visible), set "mismatch_type": "none" and "mismatch_reason": "".
+  * Set "mismatch_type": "none" and "mismatch_reason": "" when visible media and packaging match OR when only one is visible — do NOT conflate unreadable/hidden media with a verified match.
   * If the tape/disc is a DIFFERENT ALBUM or ARTIST than the case/J-card/jacket, set "mismatch_type": "different_album".
   * If they are the same album but clearly a DIFFERENT PRESSING/REISSUE/LABEL/CAT# (e.g. 1st-press jacket with later reissue vinyl label, or club J-card with retail shell), set "mismatch_type": "different_pressing".
   * If the format/packaging doesn't match the media inside, set "mismatch_type": "different_format".
@@ -3922,6 +3953,8 @@ Return ONLY valid JSON:
 {
   "detected_format": "Cassette" | "CD" | "Vinyl" | "8-Track Cartridge" | "Reel-To-Reel" | "MiniDisc" | "DAT" | "DVD" | "VHS" | "LaserDisc" | "Blu-ray" | "Betamax" | "UMD" | "Shellac" | "SACD" | "File" | "Box Set" | "Unknown",
   "has_case_or_insert": true | false,
+  "media_visible": true | false,
+  "packaging_visible": true | false,
   "mismatch_type": "none" | "different_album" | "different_pressing" | "different_format",
   "mismatch_reason": "concise 1-sentence factual mismatch explanation, or empty string if none",
   "media_identity": { "artist": "", "title": "", "catno": "", "format": "", "label": "", "year": "" },
@@ -3955,6 +3988,8 @@ Return ONLY valid JSON:
 {
   "detected_format": "Cassette" | "CD" | "Vinyl" | "8-Track Cartridge" | "Reel-To-Reel" | "MiniDisc" | "DAT" | "DVD" | "VHS" | "LaserDisc" | "Blu-ray" | "Betamax" | "UMD" | "Shellac" | "SACD" | "File" | "Box Set" | "Unknown",
   "has_case_or_insert": true | false,
+  "media_visible": true | false,
+  "packaging_visible": true | false,
   "mismatch_type": "none" | "different_album" | "different_pressing" | "different_format",
   "mismatch_reason": "concise 1-sentence factual mismatch explanation, or empty string if none",
   "media_identity": { "artist": "", "title": "", "catno": "", "format": "", "label": "", "year": "" },
@@ -4133,16 +4168,16 @@ Return ONLY valid JSON:
         }
       }
 
-      let frankenMediaUnverified = false;
+      const medId = ext.media_identity && typeof ext.media_identity === 'object' ? ext.media_identity : {};
+      const pkgId = ext.packaging_identity && typeof ext.packaging_identity === 'object' ? ext.packaging_identity : {};
+      const mediaReadable = isIdentityReadable(medId);
+      const pkgReadable = isIdentityReadable(pkgId);
+      const frankenMediaUnverified = Boolean(pkgReadable && !mediaReadable);
+
       if (mismatchType !== 'none') {
         ext.is_franken_copy = true;
         ext.franken_type = mismatchType;
         ext.franken_note = mismatchReason;
-        const medId = ext.media_identity && typeof ext.media_identity === 'object' ? ext.media_identity : {};
-        const pkgId = ext.packaging_identity && typeof ext.packaging_identity === 'object' ? ext.packaging_identity : {};
-        const mediaReadable = isIdentityReadable(medId);
-        const pkgReadable = isIdentityReadable(pkgId);
-        frankenMediaUnverified = Boolean(!mediaReadable && pkgReadable);
 
         frankenState = {
           active: true,
@@ -4184,6 +4219,27 @@ Return ONLY valid JSON:
         } else {
           toast(`🧟 Franken-Copy detected (${mismatchType.replace(/_/g, ' ')}) — defaulting to physical media!`, 4600);
         }
+      } else if (frankenMediaUnverified) {
+        ext.is_franken_copy = false;
+        ext.franken_type = '';
+        ext.franken_note = '';
+        const unverifiedReason = ext.media_visible === false
+          ? 'Only the packaging/case is shown — the physical tape/disc was not visible in your photos. Snap a close-up of the media label to confirm it matches, or search by packaging anyway.'
+          : 'Only the packaging/case text was readable — the physical tape/disc label was unreadable. Take a sharp close-up of the media label, or search by packaging anyway.';
+        frankenState = {
+          active: true,
+          mode: 'media',
+          mismatchType: 'none',
+          reason: unverifiedReason,
+          media: medId,
+          packaging: pkgId,
+          mediaUnverified: true,
+          origBarcode: (ext.barcode || '').replace(/\D/g, ''),
+          origCatalogVariants: Array.isArray(ext.cleaned_catalog_variants) ? ext.cleaned_catalog_variants.slice() : [],
+          origDetectedFormat: ext.detected_format || 'Unknown'
+        };
+        renderFrankenBanner();
+        toast('⚠️ Media unverified (packaging only) — take a media close-up or search by packaging anyway', 5000);
       } else {
         ext.is_franken_copy = false;
         ext.franken_type = '';
@@ -6171,7 +6227,7 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
       return;
     }
 
-    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v230`;
+    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v232`;
     if (tasteCache.has(cacheKey)) {
       if (myRunId !== scanRunId || myInspectSeq !== inspectSeq || currentInspected !== item) return;
       applyTasteUI(item, tasteCache.get(cacheKey), myRunId);
@@ -7052,7 +7108,11 @@ Return ONLY valid JSON:
 }`;
 
     try {
-      const tasteBatch = await CC.callAI([{ text: tastePrompt }], null, { retryLabel: 'Pile Taste', maxOutputTokens: 8192 });
+      const tasteBatch = await CC.callAI([{ text: tastePrompt }], null, {
+        retryLabel: 'Pile Taste',
+        maxOutputTokens: 8192,
+        validate: (r) => Array.isArray(r?.scores)
+      });
       if (myPileRunId !== pileRunId) return;
 
       const selectedObj = activePileIdx !== null ? pileResults[activePileIdx] : null;
@@ -7169,7 +7229,8 @@ Return ONLY valid JSON:
           {
             retryLabel: shotCount > 1 ? `Pile OCR (${pIdx + 1}/${shotCount})` : 'Pile OCR',
             maxOutputTokens: 16384,
-            mediaResolution: 'MEDIA_RESOLUTION_ULTRA_HIGH'
+            mediaResolution: 'MEDIA_RESOLUTION_ULTRA_HIGH',
+            validate: (r) => Array.isArray(r?.items)
           }
         );
         if (myPileRunId !== pileRunId) return;
@@ -7432,6 +7493,15 @@ Return ONLY valid JSON:
     if (!oldInfo || !oldInfo.releaseId || !cfg.discogsUser) return { ok: true, warning: '' };
 
     const expectedAccount = String(cfg.discogsUser || '').trim().toLowerCase();
+    if (!String(oldInfo.account || '').trim() && !oldInfo.instanceId) {
+      const amb = { ...oldInfo, ambiguous: true };
+      record.pending_delete_old = amb;
+      await CC.mutateStashItemIfAlive(record.id, record.sync_id, (live) => ({ ...live, pending_delete_old: amb }), ['pending_delete_old']);
+      return {
+        ok: false,
+        warning: 'Legacy pending removal lacks both Discogs account and instance ID — kept untouched on Discogs so the wrong copy isn\'t removed.'
+      };
+    }
     if (!isOwnedByActiveDiscogsAccount(oldInfo)) {
       return {
         ok: false,
@@ -7522,7 +7592,7 @@ Return ONLY valid JSON:
       tiebreakChecked,
       scanRunIdAtTap: scanRunId,
       defaultFolderId: CC.resolveTargetDiscogsFolderId(currentInspected?.format || ''),
-      frankenSnap: frankenState?.active
+      frankenSnap: (frankenState?.active && frankenState.mismatchType && frankenState.mismatchType !== 'none')
         ? { is_franken_copy: true, franken_type: frankenState.mismatchType || '', franken_note: frankenState.reason || '' }
         : { is_franken_copy: Boolean(currentInspected?.is_franken_copy || currentExtracted?.is_franken_copy), franken_type: currentInspected?.franken_type || currentExtracted?.franken_type || '', franken_note: currentInspected?.franken_note || currentExtracted?.franken_note || '' }
     };
@@ -8436,6 +8506,11 @@ Return ONLY valid JSON:
     list.innerHTML = filtered.map(renderStashCard).join('');
   };
 
+  const TASTE_FIELDS = [
+    'taste_score', 'taste_verdict', 'taste_summary', 'context_note',
+    'notable_songs', 'litmus_track', 'litmus_artist', 'taste_scored_at'
+  ];
+
   window.recalibrateSingleStashItem = async (id) => {
     const it = stashCache.find(x => x.id === id);
     if (!it) return;
@@ -8443,6 +8518,10 @@ Return ONLY valid JSON:
     if (rescoringStashItemId === id) return;
 
     rescoringStashItemId = id;
+    const targetSyncId = it.sync_id || null;
+    const origArtist = it.artist || '';
+    const origTitle = it.title || '';
+    const fallbackTrack = it.tracklist?.[0]?.title || it.litmus_track || '';
     const rescoreBtn = document.getElementById('sdBtnRescore');
     if (rescoreBtn) {
       rescoreBtn.disabled = true;
@@ -8453,33 +8532,42 @@ Return ONLY valid JSON:
     it.spotify_matches = localMatch;
     const prompt = buildTasteEvaluationPrompt(it, { localMatch });
 
-    setStatus(`🔄 Re-scoring "${it.artist} — ${it.title}"...`, true, { cancellable: true });
+    setStatus(`🔄 Re-scoring "${origArtist} — ${origTitle}"...`, true, { cancellable: true });
     try {
       const res = await CC.callAI([{ text: prompt }], null, { retryLabel: 'Stash Re-Score' });
-      const prev = { ...it };
-      it.taste_score = res.score;
-      it.taste_verdict = res.verdict;
-      it.taste_summary = res.summary || '';
-      it.context_note = res.context_note || '';
-      it.notable_songs = normalizeNotableList(res.notable_songs, it.artist);
-      it.litmus_track = res.litmus_track || it.tracklist?.[0]?.title || it.litmus_track || '';
-      it.litmus_artist = res.litmus_artist || '';
-      it.taste_scored_at = Date.now();
-      const stamped = CC.stampStashRevision(it, prev, [
-        'taste_score', 'taste_verdict', 'taste_summary', 'context_note',
-        'notable_songs', 'litmus_track', 'litmus_artist', 'taste_scored_at'
-      ]);
+      const tastePatch = {
+        taste_score: res.score,
+        taste_verdict: res.verdict,
+        taste_summary: res.summary || '',
+        context_note: res.context_note || '',
+        notable_songs: normalizeNotableList(res.notable_songs, origArtist),
+        litmus_track: res.litmus_track || fallbackTrack,
+        litmus_artist: res.litmus_artist || '',
+        taste_scored_at: Date.now()
+      };
 
-      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v230`);
-      await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+      const mutRes = await CC.mutateStashItemIfAlive(
+        id,
+        targetSyncId,
+        (live) => ({ ...live, ...tastePatch }),
+        TASTE_FIELDS
+      );
+
+      tasteCache.delete(`${norm(origArtist)}|${norm(origTitle)}|v232`);
       await loadStashCache();
       renderStash();
       setStatus('', false);
       rescoringStashItemId = null;
+
+      if (mutRes.aborted) {
+        toast('Item was deleted while re-scoring — taste update discarded', 3800);
+        return;
+      }
+
       updateCloudUI();
       scheduleGoogleAutoSync();
       if (activeStashItem?.id === id) openStashDetail(id, true);
-      toast(`✅ Re-scored: ${it.taste_score}/10 (${it.taste_verdict})`, 3200);
+      toast(`✅ Re-scored: ${tastePatch.taste_score}/10 (${tastePatch.taste_verdict})`, 3200);
     } catch (err) {
       setStatus('', false);
       if (err.name !== 'AbortError') toast('Re-score failed: ' + err.message, 4500);
@@ -8521,28 +8609,28 @@ Return ONLY valid JSON:
 
     let updatedTotal = 0;
     let failedTotal = 0;
+    let skippedDeletedTotal = 0;
 
-    const applyScoreToItem = (it, sc, nowTs) => {
+    const buildTastePatchForLive = (liveRow, sc, nowTs) => {
       const score = Math.max(1, Math.min(10, Math.round(Number(sc.score) || 5)));
       const verdict = ['KEEP', 'LISTEN', 'SELL / SKIP'].includes(sc.verdict)
         ? sc.verdict
         : (score >= 7 ? 'KEEP' : score >= 5 ? 'LISTEN' : 'SELL / SKIP');
-      const prev = { ...it };
-      it.taste_score = score;
-      it.taste_verdict = verdict;
-      if (sc.summary) it.taste_summary = String(sc.summary).trim();
-      if (sc.context_note !== undefined) it.context_note = String(sc.context_note || '').trim();
+      const next = {
+        ...liveRow,
+        taste_score: score,
+        taste_verdict: verdict,
+        taste_scored_at: nowTs
+      };
+      if (sc.summary) next.taste_summary = String(sc.summary).trim();
+      if (sc.context_note !== undefined) next.context_note = String(sc.context_note || '').trim();
       if (Array.isArray(sc.notable_songs)) {
-        it.notable_songs = normalizeNotableList(sc.notable_songs, it.artist).slice(0, 4);
+        next.notable_songs = normalizeNotableList(sc.notable_songs, liveRow.artist).slice(0, 4);
       }
-      if (sc.litmus_track) it.litmus_track = String(sc.litmus_track).trim();
-      else if (!it.litmus_track && it.tracklist?.[0]?.title) it.litmus_track = it.tracklist[0].title;
-      if (sc.litmus_artist !== undefined) it.litmus_artist = String(sc.litmus_artist || '').trim();
-      it.taste_scored_at = nowTs;
-      return CC.stampStashRevision(it, prev, [
-        'taste_score', 'taste_verdict', 'taste_summary', 'context_note',
-        'notable_songs', 'litmus_track', 'litmus_artist', 'taste_scored_at'
-      ]);
+      if (sc.litmus_track) next.litmus_track = String(sc.litmus_track).trim();
+      else if (!liveRow.litmus_track && liveRow.tracklist?.[0]?.title) next.litmus_track = liveRow.tracklist[0].title;
+      if (sc.litmus_artist !== undefined) next.litmus_artist = String(sc.litmus_artist || '').trim();
+      return next;
     };
 
     try {
@@ -8556,15 +8644,18 @@ Return ONLY valid JSON:
 
         const chunkWithMatches = chunk.map(it => {
           const lm = checkLocalSpotify(it);
-          it.spotify_matches = lm;
           return { it, lm };
         });
 
-        const stampedChunk = [];
+        const chunkUpdates = [];
         let batchParseFailed = false;
         try {
           const prompt = buildTasteEvaluationPrompt(chunkWithMatches);
-          const batchRes = await CC.callAI([{ text: prompt }], null, { retryLabel: `Recalibrate ${start + 1}-${endNum}`, maxOutputTokens: 8192 });
+          const batchRes = await CC.callAI([{ text: prompt }], null, {
+            retryLabel: `Recalibrate ${start + 1}-${endNum}`,
+            maxOutputTokens: 8192,
+            validate: (r) => Array.isArray(r?.scores)
+          });
           if (!recalibratingStash) break;
 
           const scoreMap = new Map((batchRes?.scores || []).map(s => [s.idx, s]));
@@ -8572,8 +8663,12 @@ Return ONLY valid JSON:
           for (let i = 0; i < chunk.length; i++) {
             const sc = scoreMap.get(i);
             if (!sc) { failedTotal++; continue; }
-            stampedChunk.push(applyScoreToItem(chunk[i], sc, now));
-            updatedTotal++;
+            const targetItem = chunk[i];
+            chunkUpdates.push({
+              id: targetItem.id,
+              sync_id: targetItem.sync_id || null,
+              patchFn: (liveRow) => buildTastePatchForLive(liveRow, sc, now)
+            });
           }
         } catch (chunkErr) {
           if (chunkErr?.name === 'AbortError' || !recalibratingStash) throw chunkErr;
@@ -8594,8 +8689,12 @@ Return ONLY valid JSON:
               const singlePrompt = buildTasteEvaluationPrompt(it, { localMatch: lm });
               const singleRes = await CC.callAI([{ text: singlePrompt }], null, { retryLabel: `Recalibrate ${itemNum}/${targets.length}`, maxOutputTokens: 2048 });
               if (!recalibratingStash) break;
-              stampedChunk.push(applyScoreToItem(it, singleRes, Date.now()));
-              updatedTotal++;
+              const nowSingle = Date.now();
+              chunkUpdates.push({
+                id: it.id,
+                sync_id: it.sync_id || null,
+                patchFn: (liveRow) => buildTastePatchForLive(liveRow, singleRes, nowSingle)
+              });
             } catch (singleErr) {
               if (singleErr?.name === 'AbortError' || !recalibratingStash) throw singleErr;
               failedTotal++;
@@ -8603,8 +8702,10 @@ Return ONLY valid JSON:
           }
         }
 
-        if (stampedChunk.length > 0) {
-          await CC.commitBatchStashUpserts(stampedChunk, true);
+        if (chunkUpdates.length > 0) {
+          const commitRes = await CC.mutateBatchStashItemsIfAlive(chunkUpdates, TASTE_FIELDS, true);
+          updatedTotal += Number(commitRes?.updatedCount || 0);
+          skippedDeletedTotal += Number(commitRes?.skippedDeletedCount || 0);
         }
 
         await loadStashCache();
@@ -8620,13 +8721,14 @@ Return ONLY valid JSON:
       if (failedTotal > 0) {
         toast(`⚠️ Recalibrated ${updatedTotal} item(s), ${failedTotal} failed`, 4600);
       } else if (updatedTotal > 0) {
-        toast(`✅ Recalibrated ${updatedTotal} Stash item(s)!`, 3600);
+        const delNote = skippedDeletedTotal > 0 ? ` (${skippedDeletedTotal} deleted skipped)` : '';
+        toast(`✅ Recalibrated ${updatedTotal} Stash item(s)!${delNote}`, 3600);
       }
-      return { updated: updatedTotal, failed: failedTotal, total: targets.length, cancelled: !recalibratingStash };
+      return { updated: updatedTotal, failed: failedTotal, skippedDeleted: skippedDeletedTotal, total: targets.length, cancelled: !recalibratingStash };
     } catch (err) {
       setStatus('', false);
       if (err.name !== 'AbortError') toast(`Recalibration stopped after ${updatedTotal} item(s): ${err.message}`, 4800);
-      return { updated: updatedTotal, failed: failedTotal + Math.max(0, targets.length - updatedTotal - failedTotal), total: targets.length, error: err?.message || 'Failed', cancelled: err?.name === 'AbortError' };
+      return { updated: updatedTotal, failed: failedTotal + Math.max(0, targets.length - updatedTotal - failedTotal - skippedDeletedTotal), skippedDeleted: skippedDeletedTotal, total: targets.length, error: err?.message || 'Failed', cancelled: err?.name === 'AbortError' };
     } finally {
       recalibratingStash = false;
       recalibrateProgressText = '';
@@ -10766,6 +10868,12 @@ Return ONLY valid JSON:
     };
 
     const stepResults = [];
+    const stepOutcomes = {};
+    const hasDrivePre = steps.some(s => s.key === 'drive_pre');
+    const hasSpotify = steps.some(s => s.key === 'spotify');
+    const hasDraftTaste = steps.some(s => s.key === 'draft_taste');
+    const notes = [];
+
     const summarizeCounts = () => {
       const completed = stepResults.filter(r => r.status === 'completed').length;
       const skipped = stepResults.filter(r => r.status === 'skipped').length;
@@ -10792,98 +10900,119 @@ Return ONLY valid JSON:
         setProg(`Step ${i + 1}/${steps.length}: ${st.label}`, (i / steps.length) * 100, 'running');
 
         let status = 'completed';
+        let stepNote = '';
 
         if (st.key === 'drive_pre') {
           if (!CC.isGoogleSignedIn() || cloudAccountMismatch) {
             status = 'skipped';
+            stepNote = 'Google Drive not connected';
           } else {
             const dRes = await runGoogleSyncFlow({ interactive: false, quiet: false, publishInitialLocal: false });
             if (!dRes || !dRes.ok || dRes.status === 'account_mismatch' || dRes.status === 'partial') {
               status = 'failed';
-              stepResults.push({ key: st.key, status });
-              stoppedEarly = true;
-              const cnt = summarizeCounts();
-              setProg(`Stopped at Step ${i + 1}/${steps.length}: Google Drive sync failed (${cnt.text})`, (cnt.completed / steps.length) * 100, 'err', `${cnt.completed}/${steps.length}`);
-              toast('Workflow stopped — resolve Google Drive sync first', 4500);
-              return;
+              stepNote = 'Google Drive pre-sync failed';
             }
           }
         } else if (st.key === 'spotify') {
           if (!cfg.spotifyClientId) {
             status = 'skipped';
+            stepNote = 'No Spotify Client ID configured';
           } else {
             const remCd = CC.getSpotifyCooldownRemainingSec();
             if (remCd > 0) {
               status = 'skipped';
-              stepResults.push({ key: st.key, status });
-              stoppedEarly = true;
-              const cnt = summarizeCounts();
-              setProg(`Paused at Step ${i + 1}/${steps.length}: Spotify cooling down (${remCd}s) · ${cnt.text}`, (cnt.completed / steps.length) * 100, 'warn', `${cnt.completed}/${steps.length}`);
+              stepNote = `Spotify rate limit cooldown (${remCd}s)`;
               ensureSpotifyCooldownTicker();
-              toast(`⏸️ Workflow paused — Spotify cooldown (${remCd}s remaining). Resume once timer hits 0.`, 5200);
-              return;
-            }
-            const canRunDirect = Boolean(
-              (cfg.spotifyRefreshToken && await CC.refreshSpotifyToken()) ||
-              (cfg.spotifyAccessToken && Date.now() < Number(cfg.spotifyExpiresAt || 0))
-            );
-            if (!canRunDirect) {
-              status = 'skipped';
-              stepResults.push({ key: st.key, status });
-              stoppedEarly = true;
-              const cnt = summarizeCounts();
-              setProg(`Paused at Step ${i + 1}/${steps.length}: Reconnect Spotify in Section 4 · ${cnt.text}`, (cnt.completed / steps.length) * 100, 'warn', `${cnt.completed}/${steps.length}`);
-              toast('Spotify login expired — reconnect in Section 4 and re-run workflow', 4800);
-              return;
-            }
-            const prevDna = spotifyProfile?.tasteDna || document.getElementById('cfgTasteDna')?.value.trim() || '';
-            const prevSoft = spotifyProfile?.softSpots || document.getElementById('cfgSoftSpots')?.value.trim() || '';
-            const useResume = Boolean(hasActiveSpotifyCheckpoint() && spotifyCheckpoint.mode === spMode);
-            const spRes = await CC.syncSpotifyResumable({
-              mode: useResume ? 'resume' : spMode,
-              resume: useResume,
-              existingDna: prevDna,
-              existingSoftSpots: prevSoft,
-              autoCommitProfile: true
-            });
-            if (spRes?.completed && spRes.profile) {
-              spotifyProfile = spRes.profile;
-              spotifyCheckpoint = null;
-              tasteCache.clear();
-              updateSpotifyUI();
-              status = 'completed';
-            } else if (spRes?.paused) {
-              spotifyCheckpoint = spRes.checkpoint ? CC.normalizeSpotifyCheckpoint(spRes.checkpoint) : await CC.getSpotifyCheckpoint();
-              updateSpotifyUI();
-              const waitSec = spRes.retryAfterSec || CC.getSpotifyCooldownRemainingSec() || 90;
-              status = 'failed';
-              stepResults.push({ key: st.key, status });
-              stoppedEarly = true;
-              const cnt = summarizeCounts();
-              setProg(`Paused at Step ${i + 1}/${steps.length}: Spotify cooldown (${waitSec}s) · ${cnt.text}`, (cnt.completed / steps.length) * 100, 'warn', `${cnt.completed}/${steps.length}`);
-              if (spRes.reason === 'rate_limit') ensureSpotifyCooldownTicker();
-              toast(`⏸️ Workflow paused on Spotify rate limit (${waitSec}s). Progress saved — resume safely once timer completes.`, 5600);
-              return;
+              toast(`⏸️ ${stepNote}`, 4800);
             } else {
-              status = 'failed';
+              const canRunDirect = Boolean(
+                (cfg.spotifyRefreshToken && await CC.refreshSpotifyToken()) ||
+                (cfg.spotifyAccessToken && Date.now() < Number(cfg.spotifyExpiresAt || 0))
+              );
+              if (!canRunDirect) {
+                status = 'failed';
+                stepNote = 'Spotify login expired — reconnect in Settings';
+                toast(`🔑 ${stepNote}`, 4800);
+              } else {
+                const prevDna = spotifyProfile?.tasteDna || document.getElementById('cfgTasteDna')?.value.trim() || '';
+                const prevSoft = spotifyProfile?.softSpots || document.getElementById('cfgSoftSpots')?.value.trim() || '';
+                const useResume = Boolean(hasActiveSpotifyCheckpoint() && spotifyCheckpoint.mode === spMode);
+                const spRes = await CC.syncSpotifyResumable({
+                  mode: useResume ? 'resume' : spMode,
+                  resume: useResume,
+                  existingDna: prevDna,
+                  existingSoftSpots: prevSoft,
+                  autoCommitProfile: true
+                });
+                if (spRes?.completed && spRes.profile) {
+                  spotifyProfile = spRes.profile;
+                  spotifyCheckpoint = null;
+                  tasteCache.clear();
+                  updateSpotifyUI();
+                  status = 'completed';
+                } else if (spRes?.paused) {
+                  if (spRes.reason === 'cancelled' || rebuildWorkflowCancelled) {
+                    rebuildWorkflowCancelled = true;
+                    stoppedEarly = true;
+                    const cnt = summarizeCounts();
+                    setProg(`Cancelled (${cnt.text})`, (cnt.completed / steps.length) * 100, 'warn', `${cnt.completed}/${steps.length}`);
+                    toast('Maintenance workflow cancelled');
+                    return;
+                  }
+                  spotifyCheckpoint = spRes.checkpoint ? CC.normalizeSpotifyCheckpoint(spRes.checkpoint) : await CC.getSpotifyCheckpoint();
+                  updateSpotifyUI();
+                  status = 'failed';
+                  if (spRes.reason === 'auth_expired') {
+                    stepNote = 'Spotify login expired — reconnect in Settings';
+                    toast(`🔑 ${stepNote}`, 5200);
+                  } else if (spRes.reason === 'rate_limit') {
+                    const waitSec = spRes.retryAfterSec || CC.getSpotifyCooldownRemainingSec() || 90;
+                    stepNote = `Spotify rate limit cooldown (${waitSec}s)`;
+                    ensureSpotifyCooldownTicker();
+                    toast(`⏸️ ${stepNote}`, 5200);
+                  } else {
+                    stepNote = `Spotify sync paused (${spRes.reason || 'interrupted'})`;
+                    toast(`⏸️ ${stepNote}`, 4800);
+                  }
+                } else {
+                  status = 'failed';
+                  stepNote = 'Spotify sync failed';
+                }
+              }
             }
           }
         } else if (st.key === 'draft_taste') {
-          if (!CC.isAiReady() || !(spotifyProfile?.totalArtists > 0)) {
+          if (hasSpotify && stepOutcomes.spotify !== 'completed') {
             status = 'skipped';
+            stepNote = 'Skipped Taste Profile draft: Spotify sync did not complete';
+          } else if (!CC.isAiReady() || !(spotifyProfile?.totalArtists > 0)) {
+            status = 'skipped';
+            stepNote = 'Skipped Taste Profile draft: Gemini or Spotify library missing';
           } else {
             const draftedOk = await analyzeFullSpotifyDNA({ suppressAutoSync: true });
             status = draftedOk ? 'completed' : 'failed';
+            if (!draftedOk) stepNote = 'Taste Profile draft failed';
           }
         } else if (st.key === 'discogs') {
-          if (!cfg.discogsToken || !cfg.discogsUser) {
+          if (hasDrivePre && (stepOutcomes.drive_pre === 'skipped' || stepOutcomes.drive_pre === 'failed')) {
             status = 'skipped';
+            stepNote = 'Skipped Discogs: Drive sync required first';
+          } else if (!cfg.discogsToken || !cfg.discogsUser) {
+            status = 'skipped';
+            stepNote = 'Skipped Discogs: account not verified';
           } else {
             const dRec = await syncWithDiscogsUI(true, false, { skipDriveGate: true, suppressAutoSync: true });
             status = dRec ? 'completed' : 'failed';
+            if (!dRec) stepNote = 'Discogs sync failed';
           }
         } else if (st.key === 'recalibrate') {
-          if (!CC.isAiReady() || !stashCache.length) {
+          if (hasSpotify && stepOutcomes.spotify !== 'completed') {
+            status = 'skipped';
+            stepNote = 'Skipped recalibration: Spotify sync did not complete';
+          } else if (hasDraftTaste && (stepOutcomes.draft_taste === 'failed' || stepOutcomes.draft_taste === 'skipped')) {
+            status = 'skipped';
+            stepNote = 'Skipped recalibration: Taste Profile draft did not complete';
+          } else if (!CC.isAiReady() || !stashCache.length) {
             status = 'skipped';
           } else {
             const rRes = await recalibrateStashBatch({ skipConfirm: true, silentConfirm: true, scope: recalScope, suppressAutoSync: true });
@@ -10899,15 +11028,23 @@ Return ONLY valid JSON:
             }
           }
         } else if (st.key === 'drive_post') {
-          if (!CC.isGoogleSignedIn() || cloudAccountMismatch) {
+          if (hasDrivePre && (stepOutcomes.drive_pre === 'skipped' || stepOutcomes.drive_pre === 'failed')) {
             status = 'skipped';
+            stepNote = 'Skipped Drive push: Google Drive not connected';
+          } else if (!CC.isGoogleSignedIn() || cloudAccountMismatch) {
+            status = 'skipped';
+            stepNote = 'Skipped Drive push: Google Drive not connected';
           } else {
             const pRes = await runGoogleSyncFlow({ interactive: false, quiet: false, publishInitialLocal: true });
             status = (pRes && pRes.ok && pRes.status !== 'partial' && pRes.status !== 'account_mismatch') ? 'completed' : 'failed';
+            if (status === 'failed') stepNote = 'Final Google Drive push failed';
           }
         }
 
-        stepResults.push({ key: st.key, status });
+        stepOutcomes[st.key] = status;
+        stepResults.push({ key: st.key, status, note: stepNote });
+        if (stepNote) notes.push(stepNote);
+
         if (rebuildWorkflowCancelled) {
           stoppedEarly = true;
           const cnt = summarizeCounts();
@@ -10915,7 +11052,8 @@ Return ONLY valid JSON:
           toast('Maintenance workflow cancelled');
           return;
         }
-        setProg(`Step ${i + 1}/${steps.length} ${status}`, ((i + 1) / steps.length) * 100, status === 'failed' ? 'err' : (status === 'skipped' ? 'warn' : 'running'));
+        const progressDetail = stepNote ? `Step ${i + 1}/${steps.length}: ${stepNote}` : `Step ${i + 1}/${steps.length} ${status}`;
+        setProg(progressDetail, ((i + 1) / steps.length) * 100, status === 'failed' ? 'err' : (status === 'skipped' ? 'warn' : 'running'));
       }
 
       if (!stoppedEarly) {
@@ -10924,11 +11062,12 @@ Return ONLY valid JSON:
         const tone = cnt.failed > 0 ? 'err' : (cnt.skipped > 0 ? 'warn' : 'ok');
         const finalPct = allClean ? 100 : (cnt.completed / steps.length) * 100;
         const rightText = allClean ? '100%' : `${cnt.completed}/${steps.length}`;
+        const headlineNote = notes.length ? ` — ${notes[0]}` : '';
         const finalMsg = allClean
           ? `✅ Done: ${cnt.completed} completed`
-          : `Done: ${cnt.text}`;
+          : `Done: ${cnt.text}${headlineNote}`;
         setProg(finalMsg, finalPct, tone, rightText);
-        toast(allClean ? `✅ Rebuild complete (${cnt.completed}/${steps.length})` : `⚠️ Rebuild finished — ${cnt.text}`, 4600);
+        toast(allClean ? `✅ Rebuild complete (${cnt.completed}/${steps.length})` : `⚠️ Rebuild finished — ${cnt.text}${headlineNote}`, 5000);
       }
     } catch (err) {
       if (err?.name !== 'AbortError') {

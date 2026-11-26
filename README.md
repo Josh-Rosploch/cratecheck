@@ -6,7 +6,7 @@ A zero-backend, sharp monochrome industrial Progressive Web App (PWA) for scanni
 
 ---
 
-## Core Features (v2.3.1)
+## Core Features (v2.3.2)
 
 | Area | Highlights |
 | --- | --- |
@@ -26,18 +26,17 @@ A zero-backend, sharp monochrome industrial Progressive Web App (PWA) for scanni
 1. **Open Soft Spot:** Visit **[https://softspot.k1s.co](https://softspot.k1s.co)** (or **[https://ss.k1s.co](https://ss.k1s.co)**) on Chrome (Android/Desktop) or Safari (iOS), and optionally tap **Add to Home Screen** to install as a full-screen PWA.
 2. **Connect Google Drive:** Open **Settings → 1. Google Drive Cloud Sync** and tap **☁️ Connect Google Drive**:
    - **☁️ Connect Google Drive:** Signs in, identifies your Google account, and immediately loads your existing cloud profile, photos, spines, Taste Profile, Soft Spots, and applicable settings in one click. If Drive is empty and you already have local data, Soft Spot shows a clear empty-cloud status and waits for you to tap **🔄 Sync Now**.
-   - **⬇️ Load from Google Drive:** Pulls and merges cloud updates locally with **zero Drive writes**, preserving local-only items and unsynced edits while retaining any competing edits for review.
-   - **🔄 Sync Now:** Pulls, merges, uploads missing photos, and uploads pending batches. Once connected and bound to your Google account, optional **Auto-Sync** quietly keeps edits synced in the background.
+   - **🔄 Sync Now:** Pulls, merges, uploads missing photos, and uploads pending batches. Once connected and bound to your Google account, optional **Auto-Sync** quietly keeps edits synced in the background (or tap the header **Cloud** pill anytime to check for remote updates).
 3. **Add Your Free Gemini API Key:** Open **Settings → 2. Gemini Cloud & Playback**, create a free key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) *(free tier includes generous daily scans)*, and paste it in.
 4. **Connect Discogs (+ Optional Spotify / Taste Profile):**
-   - Open **Settings → 3. Discogs Account & Preferences**, generate a free Personal Access Token at [discogs.com/settings/developers](https://www.discogs.com/settings/developers), paste it, and tap **🔗 Verify & Load Folders**. Tap **🔄 Sync with Discogs** in Settings anytime to pull your collection copies and mirror your Discogs folders (Google Drive automatically syncs first when connected so your photos and grades stay protected). Tap **☁️ Sync with Cloud** in Stash anytime to sync phone & PC.
+   - Open **Settings → 3. Discogs Account & Preferences**, generate a free Personal Access Token at [discogs.com/settings/developers](https://www.discogs.com/settings/developers), paste it, and tap **🔗 Verify & Load Folders**. Tap **🔄 Sync with Discogs** in Settings anytime to pull your collection copies and mirror your Discogs folders (Google Drive automatically syncs first when connected so your photos and grades stay protected). Tap the header **Cloud** pill or **Settings → 🔄 Sync Now** anytime to sync phone & PC.
    - Open **Settings → 4. Music Services & Taste Profile** to edit your **Taste Profile & Soft Spots** and optionally run **💚 Sync Liked Songs** (or **🎧 Full Library Pass** — resumable via **▶ Resume Spotify Sync** if paused or rate-limited).
 
 ---
 
 ## Upgrading & Domain Migration Notes
 
-- **Update Both Phone & PC to v2.3.1:** v2.3.1 hardens Gemini JSON parsing with automatic retries and 1-item batch recalibration fallback, adds contextual one-tap Stash taste recalibration, locks down the Rebuild Workflow with honest step reporting and suppressed mid-run Drive pushes, enforces strict Franken-Copy media evidence isolation (`⚠️ Media unverified`), adds scoped Settings saves, queue-time Discogs credential binding, idempotent multi-copy legacy restores, upgraded v2.2.0 photo-slot revision initialization, and true offline PWA app-shell caching (`sw.js`). Update **both** your phone and PC to v2.3.1 for the safest two-device sync.
+- **Update Both Phone & PC to v2.3.2:** v2.3.2 adds atomic live-row batch/single taste recalibration, Discogs 429 cooldown account rechecks and strict legacy deletion guards, Rebuild Workflow prerequisite gating with accurate Spotify auth-expiry reporting, unconditional `⚠️ Media unverified (packaging only)` detection, string-aware Gemini JSON repair with root-shape validation, scope-isolated offline service worker caching (`sw.js`), 3-way concurrent extra-photo union merges, and immutable legacy backup fingerprinting. Update **both** your phone and PC to v2.3.2 for the safest two-device sync.
 - **Migrating a Local-Only Stash from an Old Domain:** Browser IndexedDB storage is scoped per origin (`https://old-domain` vs `https://softspot.k1s.co`). If you have an unsynced local-only Stash on an older domain:
   1. Open the old domain → **Settings → 5. Data, Backup & Workflow Guide** → tap **⬇️ Export JSON**.
   2. Open Soft Spot on the new domain → **Settings → 5. Data, Backup & Workflow Guide** → tap **⬆️ Restore JSON**.
@@ -57,7 +56,7 @@ A zero-backend, sharp monochrome industrial Progressive Web App (PWA) for scanni
 
 Soft Spot requires **zero build step** and runs on any static host (such as GitHub Pages):
 
-1. Fork or clone this repository and point GitHub Pages (or any static web server) at the active version directory (e.g., `v2.3.1/` or copied to root).
+1. Fork or clone this repository and point GitHub Pages (or any static web server) at the active version directory (e.g., `v2.3.2/` or copied to root).
 2. *(Optional)* Add a `CNAME` file for your custom subdomain (e.g., `softspot.yourdomain.com`) with HTTPS enabled (required for in-app Camera, Spotify PKCE, and Google Sign-In).
 3. *(Optional)* To use your own Google Cloud OAuth Client ID for Drive Sync:
    - Enable the **Google Drive API** in [Google Cloud Console](https://console.cloud.google.com/apis/library/drive.googleapis.com).
