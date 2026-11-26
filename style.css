@@ -100,6 +100,14 @@ p:last-child { margin-bottom: 0; }
 .inline-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .search-action-row { display: flex; gap: 8px; margin-top: 10px; }
 .hidden-file { display: none; }
+.inline-toggle-row {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 9px; padding: 7px 10px;
+  border-radius: 10px; background: rgba(13, 16, 23, 0.55); border: 1px solid var(--border);
+  font-size: 0.8rem; font-weight: 700; color: var(--text); cursor: pointer; user-select: none;
+}
+.inline-toggle-row input[type="checkbox"] { width: 17px; height: 17px; margin: 0; accent-color: var(--accent); flex: 0 0 auto; }
+.muted-hint { color: var(--muted); font-weight: 500; font-size: 0.74rem; }
 
 .staged-box { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
 .preview-strip { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 2px; }
@@ -122,6 +130,20 @@ p:last-child { margin-bottom: 0; }
 .upc-pill button { background: none; border: none; color: #fca5a5; font-weight: 900; cursor: pointer; padding: 0 2px; font-size: 0.9rem; }
 
 /* Pile Scan Interactive Zoom/Pan Viewport + Rotated SVG Polygon + Center Pins */
+.pile-shot-bar {
+  display: flex; align-items: center; gap: 6px; overflow-x: auto;
+  margin-bottom: 8px; padding-bottom: 2px;
+}
+.pile-fs-shot-bar {
+  margin: 0; padding: 8px 14px; background: rgba(12, 15, 22, 0.92);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.pile-shot-pill {
+  flex: 0 0 auto; padding: 5px 11px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--card-2); color: var(--muted);
+  font-size: 0.76rem; font-weight: 800; cursor: pointer;
+}
+.pile-shot-pill.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 .pile-toolbar {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   margin-bottom: 6px;
@@ -257,15 +279,30 @@ p:last-child { margin-bottom: 0; }
   position: fixed; left: 10px; right: 10px;
   bottom: calc(68px + var(--safe-bottom));
   max-width: 700px; margin: 0 auto; z-index: 75;
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: 9px;
   background: rgba(20, 26, 38, 0.97); backdrop-filter: blur(12px);
   border: 1.5px solid rgba(29, 185, 84, 0.55); border-radius: 16px;
-  padding: 10px 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.65);
+  padding: 9px 11px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.65);
 }
+.audio-bar.is-yt-direct { border-color: rgba(239, 68, 68, 0.65); }
+.audio-bar.is-yt-direct .audio-meta { cursor: pointer; }
+.audio-art {
+  width: 40px; height: 40px; border-radius: 9px; flex: 0 0 auto;
+  background: var(--card-2); border: 1px solid var(--border);
+  overflow: hidden; display: flex; align-items: center; justify-content: center;
+  font-size: 1.15rem; color: var(--muted);
+}
+.audio-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .audio-play-btn {
-  width: 42px; height: 42px; border-radius: 50%; border: none;
-  background: var(--spotify); color: #052e16; font-size: 1.05rem; font-weight: 900;
+  width: 40px; height: 40px; border-radius: 50%; border: none;
+  background: var(--spotify); color: #052e16; font-size: 1.02rem; font-weight: 900;
   cursor: pointer; flex: 0 0 auto; display: flex; align-items: center; justify-content: center;
+  transition: background 0.15s ease, transform 0.08s ease;
+}
+.audio-play-btn:active { transform: scale(0.94); }
+.audio-play-btn.is-yt {
+  background: #dc2626; color: #fff;
+  box-shadow: 0 0 12px rgba(220, 38, 38, 0.48);
 }
 .audio-menu-btn {
   width: 36px; height: 36px; border-radius: 10px; border: 1px solid var(--border);
@@ -475,18 +512,22 @@ body.has-audio .global-status-banner { bottom: calc(140px + var(--safe-bottom));
 .detail-photos img { height: 120px; border-radius: 10px; border: 1px solid var(--border); object-fit: cover; cursor: pointer; }
 
 .cam-overlay { position: fixed; inset: 0; z-index: 95; background: #000; display: flex; flex-direction: column; }
-.cam-top { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; background: rgba(0,0,0,0.75); }
+.cam-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 10px 12px; background: rgba(0,0,0,0.78); }
+.cam-top-btn { min-height: 30px; padding: 4px 8px; font-size: 0.74rem; }
+.cam-top-btn.active { background: rgba(239, 68, 68, 0.28); border-color: #ef4444; color: #fecaca; }
+.cam-top-btn.wide-on { background: rgba(59, 130, 246, 0.30); border-color: #60a5fa; color: #dbeafe; }
 .cam-stage { position: relative; flex: 1; overflow: hidden; background: #000; display: flex; align-items: center; justify-content: center; cursor: crosshair; }
 .cam-stage video { width: 100%; height: 100%; object-fit: cover; }
+.cam-peak-canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; z-index: 2; }
 .cam-focus-ring {
-  position: absolute; width: 72px; height: 72px; margin-left: -36px; margin-top: -36px;
+  position: absolute; z-index: 3; width: 72px; height: 72px; margin-left: -36px; margin-top: -36px;
   border: 2px solid #fbbf24; border-radius: 50%; pointer-events: none;
   opacity: 0; transform: scale(1.35); transition: opacity 0.2s ease, transform 0.22s ease;
   box-shadow: 0 0 12px rgba(251, 191, 36, 0.65);
 }
 .cam-focus-ring.show { opacity: 1; transform: scale(1); }
-.cam-upc-badge { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); background: rgba(16, 185, 129, 0.92); color: #052e16; font-weight: 900; font-size: 0.85rem; padding: 6px 14px; border-radius: 999px; box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
-.cam-flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; transition: opacity 0.18s ease; }
+.cam-upc-badge { position: absolute; z-index: 4; bottom: 14px; left: 50%; transform: translateX(-50%); background: rgba(16, 185, 129, 0.92); color: #052e16; font-weight: 900; font-size: 0.85rem; padding: 6px 14px; border-radius: 999px; box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
+.cam-flash { position: absolute; z-index: 5; inset: 0; background: #fff; opacity: 0; pointer-events: none; transition: opacity 0.18s ease; }
 .cam-flash.flash { opacity: 0.7; }
 .cam-bottom { background: rgba(12, 15, 22, 0.96); padding: 10px 14px calc(14px + var(--safe-bottom)); border-top: 1px solid var(--border); }
 .cam-thumbs { display: flex; gap: 10px; overflow-x: auto; margin-bottom: 10px; min-height: 58px; padding: 6px 4px 2px; align-items: center; }

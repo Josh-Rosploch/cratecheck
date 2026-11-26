@@ -50,7 +50,8 @@
   let editingStashItem = null;
 
   // Pile Scan + Interactive Zoom/Pan + Non-Blocking Price Fill state
-  let pilePhoto = null;
+  let pilePhotos = [];
+  let activePilePhotoIdx = 0;
   let pileResults = [];
   let activePileIdx = null;
   let pileRunId = 0;
@@ -60,8 +61,10 @@
 
   // Audio + Platform Menu state
   const tasteCache = new Map();
-  let activeClipKey = '';
+  let activeTrackBtnKey = '';
+  let activePlaybackKey = '';
   let activeClipState = 'idle'; // 'idle' | 'loading' | 'playing' | 'paused'
+  let activeDirectYoutubeUrl = '';
   let activePlatforms = null;
   let activeFallbackClip = null;
   let scanRunId = 0;
@@ -75,6 +78,14 @@
   let camFocusTimer = null;
   let camUpcRaf = null;
   let camTorchOn = false;
+  let camRearDevices = [];
+  let camActiveDeviceId = '';
+  let camZoomMin = 1;
+  let camZoomWideOn = false;
+  let camPeakingOn = false;
+  let camPeakRaf = null;
+  let camPeakLastTs = 0;
+  let camPeakOffscreen = null;
   let lbPhotos = [];
   let lbIdx = 0;
   let lbTouchX = 0;
@@ -254,11 +265,15 @@
   function hideCameraUI() {
     if (camUpcRaf) cancelAnimationFrame(camUpcRaf);
     camUpcRaf = null;
+    stopFocusPeaking(true);
     camTorchOn = false;
+    camZoomWideOn = false;
     camImageCapture = null;
     camCapturing = false;
     clearTimeout(camFocusTimer);
     document.getElementById('camFocusRing')?.classList.remove('show');
+    const zoomBtn = document.getElementById('camZoomBtn');
+    if (zoomBtn) { zoomBtn.classList.add('hidden'); zoomBtn.classList.remove('wide-on'); }
     if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
     document.getElementById('camVideo').srcObject = null;
     document.getElementById('cameraModal').classList.add('hidden');
@@ -637,7 +652,236 @@
     return await decodeViaImgElement(blob, opts);
   }
 
-  // ==================== CONTINUOUS 2-SHOT & PILE FULL-RES CAMERA VIEWFINDER ====================
+  // ==================== CONTINUOUS 2-SHOT & MULTI-SHOT PILE FULL-RES CAMERA VIEWFINDER ====================
+  function stopFocusPeaking(resetToggle = false) {
+    if (camPeakRaf) cancelAnimationFrame(camPeakRaf);
+    camPeakRaf = null;
+    if (resetToggle) camPeakingOn = false;
+    const canvas = document.getElementById('camPeakCanvas');
+    if (canvas) {
+      canvas.classList.add('hidden');
+      const ctx = canvas.getContext('2d');
+      if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+    const btn = document.getElementById('camPeakBtn');
+    if (btn) btn.classList.toggle('active', Boolean(camPeakingOn));
+  }
+
+  function runFocusPeakingLoop(ts) {
+    if (!camPeakingOn || !camStream) {
+      stopFocusPeaking(false);
+      return;
+    }
+    camPeakRaf = requestAnimationFrame(runFocusPeakingLoop);
+    if (ts - camPeakLastTs < 95) return;
+    camPeakLastTs = ts;
+
+    const video = document.getElementById('camVideo');
+    const canvas = document.getElementById('camPeakCanvas');
+    if (!video || !canvas || video.readyState < 2 || !video.videoWidth || !video.videoHeight) return;
+
+    const w = 280;
+    const h = Math.max(1, Math.round(w * (video.videoHeight / video.videoWidth)));
+    if (!camPeakOffscreen) camPeakOffscreen = document.createElement('canvas');
+    if (camPeakOffscreen.width !== w || camPeakOffscreen.height !== h) {
+      camPeakOffscreen.width = w;
+      camPeakOffscreen.height = h;
+    }
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+
+    const octx = camPeakOffscreen.getContext('2d', { willReadFrequently: true });
+    const pctx = canvas.getContext('2d');
+    if (!octx || !pctx) return;
+
+    octx.drawImage(video, 0, 0, w, h);
+    const src = octx.getImageData(0, 0, w, h).data;
+    const gray = new Uint8Array(w * h);
+    for (let i = 0, p = 0; i < gray.length; i++, p += 4) {
+      gray[i] = (src[p] * 77 + src[p + 1] * 150 + src[p + 2] * 29) >> 8;
+    }
+
+    const outImg = pctx.createImageData(w, h);
+    const out = outImg.data;
+    const THRESH = 115;
+
+    for (let y = 1; y < h - 1; y++) {
+      const row = y * w;
+      const prev = row - w;
+      const next = row + w;
+      for (let x = 1; x < w - 1; x++) {
+        const gx = -gray[prev + x - 1] + gray[prev + x + 1]
+                   - (gray[row + x - 1] << 1) + (gray[row + x + 1] << 1)
+                   - gray[next + x - 1] + gray[next + x + 1];
+        const gy = -gray[prev + x - 1] - (gray[prev + x] << 1) - gray[prev + x + 1]
+                   + gray[next + x - 1] + (gray[next + x] << 1) + gray[next + x + 1];
+        const mag = (gx < 0 ? -gx : gx) + (gy < 0 ? -gy : gy);
+        if (mag > THRESH) {
+          const p = (row + x) << 2;
+          out[p] = 255;
+          out[p + 1] = 36;
+          out[p + 2] = 66;
+          out[p + 3] = Math.min(245, 110 + ((mag - THRESH) >> 1));
+        }
+      }
+    }
+    pctx.putImageData(outImg, 0, 0);
+  }
+
+  window.toggleFocusPeaking = () => {
+    camPeakingOn = !camPeakingOn;
+    const btn = document.getElementById('camPeakBtn');
+    const canvas = document.getElementById('camPeakCanvas');
+    if (btn) btn.classList.toggle('active', camPeakingOn);
+    if (camPeakingOn) {
+      if (canvas) canvas.classList.remove('hidden');
+      camPeakLastTs = 0;
+      if (camPeakRaf) cancelAnimationFrame(camPeakRaf);
+      camPeakRaf = requestAnimationFrame(runFocusPeakingLoop);
+      toast('🎯 Focus peaking ON (sharp edges glow red)', 1800);
+    } else {
+      stopFocusPeaking(false);
+    }
+  };
+
+  function getCameraLensShortLabel(dev, idx) {
+    const lbl = String(dev?.label || '').toLowerCase();
+    if (/ultra|0\.5|0\.6/.test(lbl)) return '📷 Wide';
+    if (/tele|2x|3x|5x/.test(lbl)) return '📷 Tele';
+    if (/macro/.test(lbl)) return '📷 Macro';
+    return idx === 0 ? '📷 1x' : `📷 Cam ${idx + 1}`;
+  }
+
+  async function refreshCameraLensControls(track) {
+    const lensBtn = document.getElementById('camLensBtn');
+    const zoomBtn = document.getElementById('camZoomBtn');
+    const caps = track?.getCapabilities ? track.getCapabilities() : {};
+    const settings = track?.getSettings ? track.getSettings() : {};
+    camActiveDeviceId = settings.deviceId || camActiveDeviceId || '';
+
+    try {
+      const allDevs = await navigator.mediaDevices.enumerateDevices();
+      const vids = allDevs.filter(d => d.kind === 'videoinput');
+      const rearOnly = vids.filter(d => !/\b(front|user|selfie|facetime)\b/i.test(d.label || ''));
+      camRearDevices = rearOnly.length ? rearOnly : vids;
+
+      if (lensBtn) {
+        if (camRearDevices.length > 1) {
+          const curIdx = Math.max(0, camRearDevices.findIndex(d => d.deviceId === camActiveDeviceId));
+          lensBtn.textContent = getCameraLensShortLabel(camRearDevices[curIdx], curIdx);
+          lensBtn.classList.remove('hidden');
+        } else {
+          lensBtn.classList.add('hidden');
+        }
+      }
+    } catch (_) {
+      if (lensBtn) lensBtn.classList.add('hidden');
+    }
+
+    if (zoomBtn) {
+      if (caps?.zoom && typeof caps.zoom.min === 'number' && caps.zoom.min < 0.99) {
+        camZoomMin = caps.zoom.min;
+        const curZoom = typeof settings.zoom === 'number' ? settings.zoom : 1;
+        camZoomWideOn = curZoom < 0.95;
+        const wideTxt = camZoomMin <= 0.65 ? '0.5x' : `${camZoomMin.toFixed(1)}x`;
+        zoomBtn.textContent = camZoomWideOn ? `${wideTxt} ✓` : wideTxt;
+        zoomBtn.classList.toggle('wide-on', camZoomWideOn);
+        zoomBtn.classList.remove('hidden');
+      } else {
+        camZoomMin = 1;
+        camZoomWideOn = false;
+        zoomBtn.classList.add('hidden');
+        zoomBtn.classList.remove('wide-on');
+      }
+    }
+  }
+
+  window.toggleCamUltrawideZoom = async () => {
+    const track = camStream?.getVideoTracks?.()[0];
+    if (!track) return;
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    if (!caps?.zoom || caps.zoom.min >= 0.99) return;
+    const nextWide = !camZoomWideOn;
+    const targetZoom = nextWide
+      ? caps.zoom.min
+      : Math.max(caps.zoom.min, Math.min(caps.zoom.max || 1, 1));
+    try {
+      await track.applyConstraints({ advanced: [{ zoom: targetZoom }] });
+      camZoomWideOn = nextWide;
+      const zoomBtn = document.getElementById('camZoomBtn');
+      const wideTxt = caps.zoom.min <= 0.65 ? '0.5x' : `${caps.zoom.min.toFixed(1)}x`;
+      if (zoomBtn) {
+        zoomBtn.textContent = camZoomWideOn ? `${wideTxt} ✓` : wideTxt;
+        zoomBtn.classList.toggle('wide-on', camZoomWideOn);
+      }
+      toast(camZoomWideOn ? `Ultrawide ${wideTxt} lens active` : 'Standard 1x lens active', 1600);
+    } catch (_) {
+      toast('Zoom control not supported on this lens', 2200);
+    }
+  };
+
+  async function bindStreamToViewfinder(stream) {
+    const video = document.getElementById('camVideo');
+    camStream = stream;
+    video.srcObject = stream;
+    await video.play();
+
+    const track = camStream.getVideoTracks()[0];
+    const caps = track?.getCapabilities ? track.getCapabilities() : {};
+    camTorchOn = false;
+    const torchBtn = document.getElementById('camTorchBtn');
+    if (torchBtn) {
+      torchBtn.style.visibility = caps.torch ? 'visible' : 'hidden';
+      torchBtn.textContent = '🔦';
+    }
+
+    if (track && Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) {
+      track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
+    }
+
+    camImageCapture = null;
+    if ('ImageCapture' in window && track) {
+      try { camImageCapture = new window.ImageCapture(track); } catch (_) { camImageCapture = null; }
+    }
+
+    await refreshCameraLensControls(track);
+    if (camPeakingOn) {
+      document.getElementById('camPeakCanvas')?.classList.remove('hidden');
+      if (camPeakRaf) cancelAnimationFrame(camPeakRaf);
+      camPeakRaf = requestAnimationFrame(runFocusPeakingLoop);
+    }
+  }
+
+  window.cycleCameraLens = async () => {
+    if (camRearDevices.length < 2 || camCapturing) return;
+    const curIdx = camRearDevices.findIndex(d => d.deviceId === camActiveDeviceId);
+    const nextIdx = (curIdx + 1) % camRearDevices.length;
+    const nextDev = camRearDevices[nextIdx];
+    if (!nextDev?.deviceId) return;
+
+    const prevStream = camStream;
+    if (prevStream) {
+      prevStream.getTracks().forEach(t => t.stop());
+      camStream = null;
+    }
+
+    try {
+      const nextStream = await openHighResCameraStream(nextDev.deviceId);
+      cfg.preferredCameraId = nextDev.deviceId;
+      CC.persistCfg();
+      await bindStreamToViewfinder(nextStream);
+      toast(`Switched to ${getCameraLensShortLabel(nextDev, nextIdx)}`, 1600);
+    } catch (err) {
+      try {
+        const fallbackStream = await openHighResCameraStream('');
+        await bindStreamToViewfinder(fallbackStream);
+      } catch (_) {}
+      toast('Could not switch lens: ' + (err?.message || 'busy'), 2600);
+    }
+  };
+
   function updateCameraOverlayUI() {
     const badge = document.getElementById('camStepBadge');
     const thumbsEl = document.getElementById('camThumbs');
@@ -645,12 +889,27 @@
     const upcBadge = document.getElementById('camUpcBadge');
 
     if (camMode === 'pile') {
+      const n = pilePhotos.length;
       const fmtNote = activeFormat === 'Auto' ? 'All Formats' : `${activeFormat} Only`;
-      badge.textContent = `📚 Pile / Shelf Shot (${fmtNote})`;
-      badge.className = 'badge badge-purple';
-      thumbsEl.classList.add('hidden');
-      finishBtn.textContent = 'Cancel';
-      finishBtn.className = 'btn btn-secondary btn-sm';
+      thumbsEl.classList.remove('hidden');
+      if (n === 0) {
+        badge.textContent = `📚 Pile Shot 1 (${fmtNote})`;
+        badge.className = 'badge badge-purple';
+      } else if (n < 4) {
+        badge.textContent = `📚 Pile Shot ${n + 1} (${n}/4 · ${fmtNote})`;
+        badge.className = 'badge badge-green';
+      } else {
+        badge.textContent = `📚 4/4 Pile Shots Ready`;
+        badge.className = 'badge badge-green';
+      }
+      finishBtn.className = n > 0 ? 'btn btn-green btn-sm' : 'btn btn-secondary btn-sm';
+      finishBtn.innerHTML = `📚 Finish &amp; Analyze (<span id="camCountLbl">${n}</span>)`;
+      thumbsEl.innerHTML = pilePhotos.map((p, i) => `
+        <div class="cam-thumb-item" onclick="openCameraShotLightbox(${i})" title="Tap to inspect sharpness">
+          <img src="${p.saveWebp}" />
+          <button type="button" class="cam-thumb-remove" onclick="removeCameraShot(${i}, event)" title="Delete shot">×</button>
+        </div>
+      `).join('');
       upcBadge.classList.add('hidden');
       return;
     }
@@ -664,7 +923,7 @@
     finishBtn.className = n > 0 ? 'btn btn-green btn-sm' : 'btn btn-secondary btn-sm';
     finishBtn.innerHTML = `🔍 Finish &amp; Search (<span id="camCountLbl">${n}</span>)`;
     thumbsEl.innerHTML = stagedPhotos.map((p, i) => `
-      <div class="cam-thumb-item" onclick="openStagedLightbox(${i})" title="Tap to inspect sharpness">
+      <div class="cam-thumb-item" onclick="openCameraShotLightbox(${i})" title="Tap to inspect sharpness">
         <img src="${p.saveWebp}" />
         <button type="button" class="cam-thumb-remove" onclick="removeCameraShot(${i}, event)" title="Delete shot">×</button>
       </div>
@@ -676,8 +935,28 @@
     } else upcBadge.classList.add('hidden');
   }
 
+  window.openCameraShotLightbox = (idx) => {
+    const list = camMode === 'pile' ? pilePhotos : stagedPhotos;
+    openLightbox(list.map(p => p.saveWebp), idx);
+  };
+
   window.removeCameraShot = (idx, ev) => {
     if (ev) ev.stopPropagation();
+    if (camMode === 'pile') {
+      if (idx < 0 || idx >= pilePhotos.length) return;
+      pilePhotos.splice(idx, 1);
+      if (activePilePhotoIdx >= pilePhotos.length) activePilePhotoIdx = Math.max(0, pilePhotos.length - 1);
+      updateCameraOverlayUI();
+      if (pilePhotos.length > 0) {
+        document.getElementById('pilePreviewImg').src = pilePhotos[activePilePhotoIdx].saveWebp;
+        document.getElementById('pileFsImg').src = pilePhotos[activePilePhotoIdx].saveWebp;
+        renderPileShotSwitchers();
+      } else {
+        document.getElementById('pilePreviewWrap').classList.add('hidden');
+      }
+      toast('Pile shot deleted — ready to retake');
+      return;
+    }
     if (idx < 0 || idx >= stagedPhotos.length) return;
     stagedPhotos.splice(idx, 1);
     updateCameraOverlayUI();
@@ -685,13 +964,23 @@
     toast('Shot deleted — ready to retake');
   };
 
-  async function openHighResCameraStream() {
-    const attempts = [
+  async function openHighResCameraStream(preferredId = '') {
+    const devId = preferredId || cfg.preferredCameraId || '';
+    const attempts = [];
+    if (devId) {
+      attempts.push(
+        { video: { deviceId: { exact: devId }, width: { ideal: 3840 }, height: { ideal: 2160 }, focusMode: { ideal: 'continuous' } }, audio: false },
+        { video: { deviceId: { exact: devId }, width: { ideal: 2560 }, height: { ideal: 1440 } }, audio: false },
+        { video: { deviceId: { exact: devId }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false },
+        { video: { deviceId: { exact: devId } }, audio: false }
+      );
+    }
+    attempts.push(
       { video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 }, focusMode: { ideal: 'continuous' } }, audio: false },
       { video: { facingMode: { ideal: 'environment' }, width: { ideal: 2560 }, height: { ideal: 1440 } }, audio: false },
       { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false },
       { video: { facingMode: { ideal: 'environment' } }, audio: false }
-    ];
+    );
     let lastErr = null;
     for (const constraints of attempts) {
       try {
@@ -754,23 +1043,9 @@
     updateCameraOverlayUI();
 
     try {
-      camStream = await openHighResCameraStream();
-      video.srcObject = camStream;
-      await video.play();
+      const stream = await openHighResCameraStream();
+      await bindStreamToViewfinder(stream);
       try { history.pushState({ view: currentView, modal: 'camera' }, ''); } catch (_) {}
-
-      const track = camStream.getVideoTracks()[0];
-      const caps = track?.getCapabilities ? track.getCapabilities() : {};
-      document.getElementById('camTorchBtn').style.visibility = caps.torch ? 'visible' : 'hidden';
-
-      if (track && Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) {
-        track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
-      }
-
-      camImageCapture = null;
-      if ('ImageCapture' in window && track) {
-        try { camImageCapture = new window.ImageCapture(track); } catch (_) { camImageCapture = null; }
-      }
 
       if (camMode === 'single' && 'BarcodeDetector' in window) {
         const detector = new BarcodeDetector({ formats: ['upc_a', 'upc_e', 'ean_13', 'ean_8', 'code_128'] });
@@ -815,6 +1090,7 @@
   window.captureViewfinderShot = async () => {
     if (camCapturing) return;
     if (camMode === 'single' && stagedPhotos.length >= 4) { toast('Max 4 photos reached — tap Finish & Search'); return; }
+    if (camMode === 'pile' && pilePhotos.length >= 4) { toast('Max 4 pile photos reached — tap Finish & Analyze'); return; }
     const video = document.getElementById('camVideo');
     if (!video.videoWidth && !camImageCapture) return;
 
@@ -851,8 +1127,9 @@
 
       if (pair) {
         if (camMode === 'pile') {
-          closeCameraViewfinder();
-          applyLoadedPilePhoto(pair, true);
+          pilePhotos.push(pair);
+          updateCameraOverlayUI();
+          toast(`Shot ${pilePhotos.length} captured — tap thumb to check sharpness, or Finish & Analyze`);
         } else {
           stagedPhotos.push(pair);
           updateStageUI();
@@ -870,21 +1147,28 @@
   };
 
   window.closeCameraViewfinder = () => {
+    const modeNow = camMode;
     hideCameraUI();
     if (history.state?.modal === 'camera') {
       try { history.back(); } catch (_) {}
+    }
+    if (modeNow === 'pile' && pilePhotos.length > 0) {
+      applyLoadedPilePhotos(pilePhotos, false);
     }
   };
 
   window.finishCameraAndSearch = () => {
     const modeNow = camMode;
-    const hasShots = stagedPhotos.length > 0;
+    const hasSingleShots = stagedPhotos.length > 0;
+    const hasPileShots = pilePhotos.length > 0;
     hideCameraUI();
     if (history.state?.modal === 'camera') {
       try { history.replaceState({ view: currentView, modal: null }, ''); } catch (_) {}
     }
-    if (modeNow === 'single' && hasShots) {
+    if (modeNow === 'single' && hasSingleShots) {
       runFullScan();
+    } else if (modeNow === 'pile' && hasPileShots) {
+      applyLoadedPilePhotos(pilePhotos, true);
     }
   };
 
@@ -1174,10 +1458,55 @@ Return ONLY valid JSON:
     } catch (_) { audioEl.muted = false; }
   }
 
+  function setAudioArtwork(artUrl, format = '') {
+    const el = document.getElementById('audioArt');
+    if (!el) return;
+    const fallbackIcon = /vinyl/i.test(format) ? '💿' : (/cd/i.test(format) ? '📀' : '📼');
+    if (artUrl) {
+      el.innerHTML = `<img src="${esc(artUrl)}" alt="" onerror="this.parentElement.textContent='${fallbackIcon}'" />`;
+    } else {
+      el.textContent = fallbackIcon;
+    }
+  }
+
+  function clearAudioDirectYoutubeMode() {
+    activeDirectYoutubeUrl = '';
+    const bar = document.getElementById('audioBar');
+    const playBtn = document.getElementById('audioPlayBtn');
+    const openBtn = document.getElementById('audioOpenInBtn');
+    if (bar) bar.classList.remove('is-yt-direct');
+    if (playBtn) {
+      playBtn.classList.remove('is-yt');
+      playBtn.title = 'Play / Pause';
+    }
+    if (openBtn) openBtn.classList.remove('hidden');
+  }
+
+  function setAudioDirectYoutubeMode(url, labelTarget) {
+    activeDirectYoutubeUrl = url;
+    const bar = document.getElementById('audioBar');
+    const playBtn = document.getElementById('audioPlayBtn');
+    const openBtn = document.getElementById('audioOpenInBtn');
+    if (bar) bar.classList.add('is-yt-direct');
+    if (playBtn) {
+      playBtn.classList.add('is-yt');
+      playBtn.textContent = '🔴';
+      playBtn.title = 'Search on YouTube';
+    }
+    if (openBtn) openBtn.classList.add('hidden');
+    updateAudioMarquee(`🔍 Not on streaming — Tap to search YouTube: ${labelTarget}`);
+  }
+
+  window.handleAudioMetaClick = () => {
+    if (activeDirectYoutubeUrl) {
+      window.open(activeDirectYoutubeUrl, '_blank', 'noopener');
+    }
+  };
+
   function syncTrackPlayButtons() {
     document.querySelectorAll('[data-play-key]').forEach(btn => {
       const k = btn.dataset.playKey || '';
-      const isMatch = Boolean(activeClipKey && k === activeClipKey && activeClipState !== 'idle');
+      const isMatch = Boolean(activeTrackBtnKey && k === activeTrackBtnKey && activeClipState !== 'idle');
       const row = btn.closest('.track-row, .notable-row');
 
       btn.classList.remove('is-playing', 'is-loading', 'is-paused');
@@ -1209,11 +1538,14 @@ Return ONLY valid JSON:
   window.stopHighlightAudio = () => {
     clipReqId++;
     closeOpenInMenu();
+    clearAudioDirectYoutubeMode();
     try { audioEl.pause(); audioEl.removeAttribute('src'); audioEl.load(); } catch (_) {}
-    activeClipKey = '';
+    activeTrackBtnKey = '';
+    activePlaybackKey = '';
     activeClipState = 'idle';
     activePlatforms = null;
     activeFallbackClip = null;
+    setAudioArtwork('');
     document.getElementById('audioBar').classList.add('hidden');
     document.body.classList.remove('has-audio');
     document.getElementById('audioProgress').style.width = '0%';
@@ -1222,6 +1554,10 @@ Return ONLY valid JSON:
   };
 
   window.toggleHighlightAudio = () => {
+    if (activeDirectYoutubeUrl) {
+      window.open(activeDirectYoutubeUrl, '_blank', 'noopener');
+      return;
+    }
     if ((!audioEl.src || audioEl.src === SILENT_WAV) && activeFallbackClip?.previewUrl) {
       useFallbackClip();
       return;
@@ -1235,6 +1571,7 @@ Return ONLY valid JSON:
   window.useFallbackClip = () => {
     if (!activeFallbackClip?.previewUrl) return;
     const c = activeFallbackClip;
+    clearAudioDirectYoutubeMode();
     updateAudioMarquee(`🎵 ${c.trackName} — ${c.artistName} (closest available stream)`);
     audioEl.muted = false;
     audioEl.src = c.previewUrl;
@@ -1272,21 +1609,21 @@ Return ONLY valid JSON:
   audioEl.addEventListener('play', () => {
     if (audioEl.src !== SILENT_WAV) {
       document.getElementById('audioPlayBtn').textContent = '⏸';
-      if (activeClipKey) activeClipState = 'playing';
+      if (activeTrackBtnKey) activeClipState = 'playing';
       syncTrackPlayButtons();
     }
   });
   audioEl.addEventListener('pause', () => {
     if (audioEl.src === SILENT_WAV) return;
-    document.getElementById('audioPlayBtn').textContent = '▶';
-    if (activeClipKey && activeClipState !== 'loading') activeClipState = 'paused';
+    if (!activeDirectYoutubeUrl) document.getElementById('audioPlayBtn').textContent = '▶';
+    if (activeTrackBtnKey && activeClipState !== 'loading') activeClipState = 'paused';
     syncTrackPlayButtons();
   });
   audioEl.addEventListener('ended', () => {
     if (audioEl.src === SILENT_WAV) return;
-    document.getElementById('audioPlayBtn').textContent = '▶';
+    if (!activeDirectYoutubeUrl) document.getElementById('audioPlayBtn').textContent = '▶';
     document.getElementById('audioProgress').style.width = '0%';
-    if (activeClipKey) activeClipState = 'paused';
+    if (activeTrackBtnKey) activeClipState = 'paused';
     syncTrackPlayButtons();
   });
   audioEl.addEventListener('timeupdate', () => {
@@ -1302,24 +1639,39 @@ Return ONLY valid JSON:
       strictTrack = true,
       notifyUser = false,
       ignoreRunId = false,
-      targetYear = null
+      targetYear = null,
+      artworkUrl = undefined,
+      format = ''
     } = opts;
     if (!artist && !track && !album) return;
 
-    const key = normFull(`${artist}|${track || album}`);
-    if (key === activeClipKey) {
+    const resolvedYear = targetYear ?? (ignoreRunId ? activeStashItem?.year : currentInspected?.year) ?? null;
+    const resolvedArt = artworkUrl !== undefined
+      ? artworkUrl
+      : (ignoreRunId
+        ? (activeStashItem?.discogs_thumb || activeStashItem?.thumb_data_url || activeStashItem?.thumbs?.[0] || '')
+        : (currentInspected?.discogs_thumb || stagedPhotos[0]?.saveWebp || ''));
+    const resolvedFmt = format || (ignoreRunId ? activeStashItem?.format : currentInspected?.format) || '';
+
+    const btnKey = normFull(`${artist}|${track || album}`);
+    const playbackKey = normFull(`${artist}|${track || ''}|${album || ''}|${resolvedYear || ''}`);
+
+    if (playbackKey === activePlaybackKey) {
       if (activeClipState === 'loading') return;
       if (audioEl.src && audioEl.src !== SILENT_WAV) {
+        activeTrackBtnKey = btnKey;
+        setAudioArtwork(resolvedArt, resolvedFmt);
         if (notifyUser) {
           toggleHighlightAudio();
         } else if (forcePlay && audioEl.paused) {
           audioEl.muted = false;
           audioEl.play().catch(() => {});
         }
+        syncTrackPlayButtons();
         return;
       }
     }
-    if (!forceReplace && activeClipKey && !audioEl.paused) return;
+    if (!forceReplace && activePlaybackKey && !audioEl.paused) return;
 
     if (notifyUser && forcePlay) {
       unlockAudioForAutoplay(true);
@@ -1327,38 +1679,47 @@ Return ONLY valid JSON:
 
     const myClipReq = ++clipReqId;
     closeOpenInMenu();
+    clearAudioDirectYoutubeMode();
     activeFallbackClip = null;
     activePlatforms = null;
-    activeClipKey = key;
+    activeTrackBtnKey = btnKey;
+    activePlaybackKey = playbackKey;
     activeClipState = 'loading';
     syncTrackPlayButtons();
 
     const bar = document.getElementById('audioBar');
     const labelTarget = track || album;
+    setAudioArtwork(resolvedArt, resolvedFmt);
     bar.classList.remove('hidden');
     document.body.classList.add('has-audio');
     document.getElementById('audioPlayBtn').textContent = '…';
     document.getElementById('audioProgress').style.width = '0%';
     updateAudioMarquee(`Finding clip & platforms: ${labelTarget}...`);
 
-    const resolvedYear = targetYear ?? currentInspected?.year ?? activeStashItem?.year ?? null;
     const res = await CC.fetchAudioAndPlatforms(artist, track, album, strictTrack, resolvedYear);
     if ((!ignoreRunId && myRunId !== scanRunId) || myClipReq !== clipReqId) return;
 
     activePlatforms = res.platforms;
 
-    if (res.clip) {
-      activeClipKey = key;
-      updateAudioMarquee(`🎵 ${res.clip.trackName} — ${res.clip.artistName}`);
+    const chosenClip = res.clip || (res.fallbackClip?.previewUrl && res.fallbackClip.safeAlt !== false ? res.fallbackClip : null);
+    const isAltVersion = !res.clip && Boolean(chosenClip);
+
+    if (chosenClip) {
+      activeTrackBtnKey = btnKey;
+      activePlaybackKey = playbackKey;
+      const marqueeTxt = isAltVersion
+        ? `🎵 ${chosenClip.trackName} — ${chosenClip.artistName} (alt version — "${res.requestedVersion || 'exact mix'}" unavailable)`
+        : `🎵 ${chosenClip.trackName} — ${chosenClip.artistName}`;
+      updateAudioMarquee(marqueeTxt);
       audioEl.muted = false;
-      audioEl.src = res.clip.previewUrl;
+      audioEl.src = chosenClip.previewUrl;
       audioEl.load();
       audioEl.currentTime = 0;
       if (forcePlay) {
         audioEl.play().catch(() => {
           activeClipState = 'paused';
           document.getElementById('audioPlayBtn').textContent = '▶';
-          updateAudioMarquee(`Tap ▶ for 30s clip: ${res.clip.trackName} — ${res.clip.artistName}`);
+          updateAudioMarquee(`Tap ▶ for 30s clip: ${chosenClip.trackName} — ${chosenClip.artistName}`);
           syncTrackPlayButtons();
         });
       } else {
@@ -1369,19 +1730,30 @@ Return ONLY valid JSON:
       return;
     }
 
-    activeClipKey = '';
+    activeTrackBtnKey = '';
+    activePlaybackKey = '';
     activeClipState = 'idle';
     try { audioEl.pause(); audioEl.removeAttribute('src'); } catch (_) {}
     syncTrackPlayButtons();
-    if (res.fallbackClip) {
+
+    if (res.fallbackClip?.previewUrl) {
       activeFallbackClip = res.fallbackClip;
       document.getElementById('audioPlayBtn').textContent = '▶';
       updateAudioMarquee(`No exact stream for "${labelTarget}" — tap ▶ for closest (${res.fallbackClip.trackName}) or ▲`);
       if (notifyUser) toast(`Exact mix not on streaming — tap ▶ for closest or ▲ YouTube`, 3200);
+      return;
+    }
+
+    const hasStreamingPlatform = Boolean(
+      res.platforms?.spotify || res.platforms?.apple || res.platforms?.deezer
+    );
+    if (!hasStreamingPlatform && res.platforms?.youtube?.url) {
+      setAudioDirectYoutubeMode(res.platforms.youtube.url, labelTarget);
+      if (notifyUser) toast(`Not on streaming — tap 🔴 to search YouTube`, 3000);
     } else {
       document.getElementById('audioPlayBtn').textContent = '—';
-      updateAudioMarquee(`No 30s stream for "${labelTarget}" — tap ▲ to search YouTube`);
-      if (notifyUser) toast(`No 30s stream found — tap ▲ to open YouTube`, 3000);
+      updateAudioMarquee(`No 30s stream for "${labelTarget}" — tap ▲ to open on streaming/YouTube`);
+      if (notifyUser) toast(`No 30s preview — tap ▲ to open streaming/YouTube`, 3000);
     }
   }
 
@@ -1461,14 +1833,31 @@ Return ONLY valid JSON:
     await runDiscogsSearch(myRunId);
   };
 
+  window.toggleAutoGradeOnScan = (checked) => {
+    cfg.autoGradeOnScan = Boolean(checked);
+    CC.persistCfg();
+    const scanChk = document.getElementById('scanAutoGradeChk');
+    const cfgChk = document.getElementById('cfgAutoGradeOnScan');
+    if (scanChk) scanChk.checked = cfg.autoGradeOnScan;
+    if (cfgChk) cfgChk.checked = cfg.autoGradeOnScan;
+  };
+
   async function runVisionOCR(myRunId) {
     const keepOldGrades = Boolean(editingStashItem && !document.getElementById('chkRegradeEdit').checked);
-    setStatus(`Inspecting ${stagedPhotos.length} photo(s) on ${aiEngineLabel()}...`, true, { cancellable: true });
+    const shouldGradeNow = Boolean(cfg.autoGradeOnScan) && !keepOldGrades;
+    setStatus(
+      shouldGradeNow
+        ? `Inspecting & grading ${stagedPhotos.length} photo(s) on ${aiEngineLabel()}...`
+        : `Reading ${stagedPhotos.length} photo(s) (fast OCR) on ${aiEngineLabel()}...`,
+      true,
+      { cancellable: true }
+    );
 
     const fmtHint = activeFormat === 'Auto' ? 'Auto-detect Cassette, CD, or Vinyl' : `User selected format: ${activeFormat}`;
     const upcHint = stagedUpc ? `User also scanned UPC barcode: ${stagedUpc}.` : '';
 
-    const prompt = `You are a meticulous physical music media OCR, Discogs pressing-ID, and strict Goldmine visual grading expert. Inspect ALL attached photos carefully. ${fmtHint}. ${upcHint}
+    const prompt = shouldGradeNow
+      ? `You are a meticulous physical music media OCR, Discogs pressing-ID, and strict Goldmine visual grading expert. Inspect ALL attached photos carefully. ${fmtHint}. ${upcHint}
 
 PHOTO-SCOPE & LOOSE-MEDIA AWARENESS:
 - The user ALWAYS photographs Front of Case + Side A together and Back of Case + Side B together.
@@ -1518,6 +1907,35 @@ Return ONLY valid JSON:
   "sleeve_condition": "exact Discogs sleeve grade",
   "condition_note": "blunt factual seller note listing visible flaws (NEVER say 'mint' unless sealed)",
   "visible_tracks": ["every song title clearly visible on shell/insert"]
+}`
+      : `You are a fast, meticulous physical music media OCR and Discogs pressing-ID expert. Inspect ALL attached photos carefully. ${fmtHint}. ${upcHint}
+
+PHOTO-SCOPE & LOOSE-MEDIA AWARENESS:
+- The user photographs Front of Case + Side A together and Back of Case + Side B together.
+- If ONLY the bare cassette shell or bare disc is shown (no case, no J-card, no cover insert), set "has_case_or_insert": false and note in "physical_details" that this is loose media with no case/insert.
+
+OCR RULES:
+- Ignore non-catalog manufacturing/tax/standard codes (Dolby, HX Pro, TSE, TS-2240, KTB, JASRAC, GEMA, BIEM) for "raw_catalog_number".
+- Read EVERY visible song title verbatim in "visible_tracks" so we can verify Discogs listings against the actual tape.
+- Read exact physical shell/window/pressing clues: shell color, timing window markings (e.g. "100-50-0" vs "0-50-0" vs blank vs dots), plant codes (e.g. "SR", "AR", "CR"), screws vs welded, paper label vs direct print, club stamps ("CRC", "BMG"), country/address text, copyright years.
+- ANTI-HALLUCINATION CLUB RULE: NEVER guess "CRC" or "BMG" for "club_edition" unless you can quote the EXACT legible club text visibly printed in the photo inside "club_evidence". Otherwise set "club_evidence": "" and "club_edition": "None" or "Unknown".
+
+Return ONLY valid JSON:
+{
+  "detected_format": "Cassette" | "CD" | "Vinyl",
+  "has_case_or_insert": true | false,
+  "raw_catalog_number": "exact record-label catalog code or empty string",
+  "cleaned_catalog_variants": ["catalog variations stripping hyphens/spaces/price prefixes"],
+  "barcode": "digits only UPC/EAN if visible, else empty string",
+  "album_title": "album or release title",
+  "artists": ["main artist name(s), or 'Various' if a compilation"],
+  "label": "record label name or empty string",
+  "year": "4-digit copyright/release year printed, else empty string",
+  "country_clues": "country printed (e.g. 'Printed in U.S.A.', 'Turkey') or 'Not visible'",
+  "club_edition": "None" | "CRC" | "BMG" | "Unknown",
+  "club_evidence": "exact quoted club text visible in photo (e.g. 'CRC', 'BMG Direct', 'Columbia House'), or empty string",
+  "physical_details": "detailed plain-English list of EVERY visible physical pressing identifier (mention if loose media with no case/insert; shell color, window markings like 100-50-0 vs 0-50-0, plant codes like SR/AR, paper label vs direct print, barcode presence, promo stamps)",
+  "visible_tracks": ["every song title clearly visible on shell/insert"]
 }`;
 
     const parts = [{ text: prompt }, ...stagedPhotos.map(p => ({ inline_data: { mime_type: 'image/jpeg', data: p.apiB64 } }))];
@@ -1535,6 +1953,14 @@ Return ONLY valid JSON:
         ext.media_condition = editingStashItem.media_condition;
         ext.sleeve_condition = editingStashItem.sleeve_condition;
         ext.condition_note = editingStashItem.condition_note;
+        ext.graded_by_ai = false;
+      } else if (!shouldGradeNow) {
+        ext.media_condition = 'Very Good Plus (VG+)';
+        ext.sleeve_condition = ext.has_case_or_insert === false ? 'No Cover' : 'Not Graded';
+        ext.condition_note = '';
+        ext.graded_by_ai = false;
+      } else {
+        ext.graded_by_ai = true;
       }
 
       currentExtracted = ext;
@@ -1912,7 +2338,31 @@ Return ONLY valid JSON:
 
     const parts = [{ text: prompt }, ...stagedPhotos.map(p => ({ inline_data: { mime_type: 'image/jpeg', data: p.apiB64 } }))];
     const verdict = await CC.callAI(parts, 'MEDIUM', { retryLabel });
-    if (!verdict || typeof verdict !== 'object' || myRunId !== scanRunId || deepSearchCancelled) return null;
+    if (myRunId !== scanRunId || deepSearchCancelled) return null;
+
+    const VALID_OUTCOMES = new Set(['exact_match', 'likely_match', 'needs_user', 'not_found']);
+    const isObj = verdict && typeof verdict === 'object' && !Array.isArray(verdict);
+    const outcome = isObj ? verdict.outcome : null;
+    let verdictValid = isObj && VALID_OUTCOMES.has(outcome);
+
+    if (verdictValid && (outcome === 'exact_match' || outcome === 'likely_match')) {
+      const bestId = Number(verdict.best_release_id);
+      const idKnown = Number.isFinite(bestId) && bestId > 0 && (
+        batchFetchedIds.has(bestId) || currentCandidates.some(c => Number(c.id) === bestId)
+      );
+      if (!idKnown) verdictValid = false;
+      else verdict.best_release_id = bestId;
+    }
+
+    if (verdictValid && outcome === 'needs_user') {
+      const hasPrompt = Boolean(String(verdict.question?.prompt || '').trim());
+      const hasReason = Boolean(String(verdict.reasoning || '').trim());
+      if (!hasPrompt && !hasReason) verdictValid = false;
+    }
+
+    if (!verdictValid) {
+      throw new Error('Empty or invalid verification verdict from Gemini — retry to re-check this batch');
+    }
 
     batchFetchedIds.forEach(id => detectiveInspectedIds.add(id));
     detectiveInspectedCount = detectiveInspectedIds.size;
@@ -2452,8 +2902,35 @@ Return ONLY valid JSON:
     document.getElementById('gSleeveCond').innerHTML = gradeOptionsHtml(SLEEVE_GRADES, item.sleeve_condition);
     document.getElementById('gNotes').value = item.condition_note || '';
     const keptEdit = editingStashItem && !document.getElementById('chkRegradeEdit').checked;
-    document.getElementById('aiGradeHint').textContent = keptEdit ? 'Kept Saved Grade'
-      : (stagedPhotos.length ? `AI Graded (${stagedPhotos.length} photo${stagedPhotos.length > 1 ? 's' : ''})` : 'Manual Grade');
+    const isAiGraded = Boolean(currentExtracted?.graded_by_ai);
+    const hintEl = document.getElementById('aiGradeHint');
+    if (hintEl) {
+      if (keptEdit) {
+        hintEl.textContent = 'Kept Saved Grade';
+        hintEl.className = 'badge badge-purple';
+      } else if (stagedPhotos.length && !isAiGraded) {
+        hintEl.textContent = 'Not Graded Yet';
+        hintEl.className = 'badge badge-yellow';
+      } else if (stagedPhotos.length && isAiGraded) {
+        hintEl.textContent = `AI Graded (${stagedPhotos.length} photo${stagedPhotos.length > 1 ? 's' : ''})`;
+        hintEl.className = 'badge badge-purple';
+      } else {
+        hintEl.textContent = 'Manual Grade';
+        hintEl.className = 'badge badge-purple';
+      }
+    }
+
+    const aiGradeBtn = document.getElementById('btnAiGradeNow');
+    if (aiGradeBtn) {
+      if (stagedPhotos.length > 0) {
+        aiGradeBtn.classList.remove('hidden');
+        aiGradeBtn.disabled = false;
+        aiGradeBtn.className = (!keptEdit && !isAiGraded) ? 'btn btn-green' : 'btn btn-secondary';
+        aiGradeBtn.textContent = (!keptEdit && !isAiGraded) ? '✨ AI Grade Photos' : '✨ Re-Run AI Visual Grade';
+      } else {
+        aiGradeBtn.classList.add('hidden');
+      }
+    }
 
     const vBtn = document.getElementById('btnVoiceRegradeScan');
     if (vBtn) { vBtn.disabled = false; vBtn.classList.remove('listening'); vBtn.textContent = VOICE_BTN_IDLE; }
@@ -2701,6 +3178,94 @@ Return ONLY valid JSON:
     }
   }
 
+  window.gradeCurrentPhotosOnDemand = async () => {
+    if (!currentInspected) return;
+    if (!stagedPhotos.length) { toast('Stage photos first to AI grade'); return; }
+    if (!CC.isAiReady()) { toast('Add your Gemini API Key in Settings first'); return; }
+
+    const btn = document.getElementById('btnAiGradeNow');
+    const targetItem = currentInspected;
+    const myRun = scanRunId;
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '⏳ Grading photos...';
+    }
+    setStatus(`✨ AI grading ${stagedPhotos.length} photo(s) on ${aiEngineLabel()}...`, true, { cancellable: true });
+
+    const prompt = `You are a strict, conservative Discogs/Goldmine visual grading expert. Inspect ALL attached photos closely for every physical flaw on the media and case/sleeve/insert.
+
+Item: "${targetItem.artist} - ${targetItem.title}" (${targetItem.format || 'Cassette'})
+
+PHOTO-SCOPE & LOOSE-MEDIA AWARENESS:
+- If ONLY the bare cassette shell or bare disc is shown (no case, no J-card, no cover insert), set "sleeve_condition": "No Cover" and note loose media in "condition_note".
+
+STRICT DISCOGS SELLER GRADING RULES (Be brutally honest and conservative — never over-grade!):
+1. List every flaw first in "media_defects" and "sleeve_defects".
+2. Media Condition MUST be one of: ${JSON.stringify(MEDIA_GRADES)}
+   * "Mint (M)" ONLY if factory sealed. "Near Mint (NM or M-)" = spotless, zero visible wear.
+   * "Very Good Plus (VG+)" = very clean, only tiny handling scuffs, crisp flat label.
+   * "Very Good (VG)" = visible scuffs/scratches, light label wear or fading.
+   * "Good Plus (G+)" = heavy scratches/scuffing, peeling/warped/bubbling/stained label, writing/yellowing.
+   * "Good (G)" / "Fair (F)" / "Poor (P)" = cracked shell, missing felt pad, torn label, deep gouges.
+3. Sleeve Condition MUST be one of: ${JSON.stringify(SLEEVE_GRADES)}
+   * No case/cover shown = "No Cover". Plain blank = "Generic".
+   * "Very Good Plus (VG+)" = clean insert, minimal edge wear, no case cracks.
+   * "Very Good (VG)" = creases, sticker residue, moderate case scuffs or small crack.
+   * "Good Plus (G+)" = paint/ink/water stains, heavy creases, ripped flap, heavily scratched/cracked case.
+   * "Good (G)" / "Fair (F)" / "Poor (P)" = severe stains obscuring art, torn/missing pieces, heavy water damage.
+4. When between two grades, ALWAYS pick the LOWER grade. NEVER say "mint" in "condition_note" unless factory sealed.
+
+Return ONLY valid JSON:
+{
+  "media_defects": ["list every flaw on cassette/disc, or empty array if spotless"],
+  "sleeve_defects": ["list every flaw on case/insert, or empty array if spotless or no cover"],
+  "media_condition": "exact Discogs media grade from list",
+  "sleeve_condition": "exact Discogs sleeve grade from list",
+  "condition_note": "blunt, factual, buyer-ready Discogs seller note listing visible flaws (1-3 short sentences, NEVER say 'mint' unless sealed)"
+}`;
+
+    const parts = [{ text: prompt }, ...stagedPhotos.map(p => ({ inline_data: { mime_type: 'image/jpeg', data: p.apiB64 } }))];
+    try {
+      const res = await CC.callAI(parts, 'MEDIUM', { retryLabel: 'AI Visual Grade' });
+      if (myRun !== scanRunId || currentInspected !== targetItem) return;
+
+      const newMedia = normalizeGrade(res.media_condition, MEDIA_GRADES, 'Very Good Plus (VG+)');
+      const newSleeve = normalizeGrade(res.sleeve_condition, SLEEVE_GRADES, 'Very Good Plus (VG+)');
+      const newNote = String(res.condition_note || '').trim();
+
+      document.getElementById('gMediaCond').value = newMedia;
+      document.getElementById('gSleeveCond').value = newSleeve;
+      document.getElementById('gNotes').value = newNote;
+
+      targetItem.media_condition = newMedia;
+      targetItem.sleeve_condition = newSleeve;
+      targetItem.condition_note = newNote;
+      if (!currentExtracted) currentExtracted = {};
+      currentExtracted.media_condition = newMedia;
+      currentExtracted.sleeve_condition = newSleeve;
+      currentExtracted.condition_note = newNote;
+      currentExtracted.graded_by_ai = true;
+
+      const hintEl = document.getElementById('aiGradeHint');
+      if (hintEl) {
+        hintEl.textContent = `✅ AI Graded (${stagedPhotos.length} photo${stagedPhotos.length > 1 ? 's' : ''})`;
+        hintEl.className = 'badge badge-purple';
+      }
+      setStatus('', false);
+      toast(`✨ AI Graded: ${shortGrade(newMedia)} / ${shortGrade(newSleeve)}`, 3400);
+    } catch (err) {
+      setStatus('', false);
+      if (err.name !== 'AbortError') toast('AI Grade error: ' + err.message, 4500);
+    } finally {
+      if (btn && myRun === scanRunId && currentInspected === targetItem) {
+        const gradedNow = Boolean(currentExtracted?.graded_by_ai);
+        btn.disabled = false;
+        btn.className = gradedNow ? 'btn btn-secondary' : 'btn btn-green';
+        btn.textContent = gradedNow ? '✨ Re-Run AI Visual Grade' : '✨ AI Grade Photos';
+      }
+    }
+  };
+
   window.retryCurrentTaste = () => {
     if (!currentInspected) return;
     document.getElementById('tasteScore').textContent = '...';
@@ -2715,7 +3280,7 @@ Return ONLY valid JSON:
       return;
     }
 
-    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v193`;
+    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v194`;
     if (tasteCache.has(cacheKey)) { applyTasteUI(item, tasteCache.get(cacheKey), myRunId); return; }
 
     const tracksStr = (item.tracklist || []).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title).join('; ');
@@ -2871,12 +3436,16 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
     if (!silent) toast('Taste Profile & Soft Spots saved!');
   };
 
-  // ==================== PILE / SHELF ZOOM-PAN CONTROLLER ====================
+  // ==================== PILE / SHELF ZOOM-PAN CONTROLLER (2-FINGER PINCH + PAN) ====================
   function createZoomPanController(viewportEl, contentEl, labelEl) {
     const state = { scale: 1, tx: 0, ty: 0 };
     const pointers = new Map();
     let pinchStartDist = 0;
     let pinchStartScale = 1;
+    let pinchStartRelX = 0;
+    let pinchStartRelY = 0;
+    let pinchOriginTx = 0;
+    let pinchOriginTy = 0;
     let panStartX = 0;
     let panStartY = 0;
     let panOriginTx = 0;
@@ -2911,6 +3480,28 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
       return Math.hypot(a.x - b.x, a.y - b.y);
     }
 
+    function getMidRelToViewportCenter(a, b) {
+      const rect = viewportEl.getBoundingClientRect();
+      const vcx = rect.left + rect.width / 2;
+      const vcy = rect.top + rect.height / 2;
+      return {
+        rx: (a.x + b.x) / 2 - vcx,
+        ry: (a.y + b.y) / 2 - vcy
+      };
+    }
+
+    function beginPinchBaseline() {
+      const pts = Array.from(pointers.values());
+      if (pts.length < 2) return;
+      pinchStartDist = Math.max(1, dist(pts[0], pts[1]));
+      pinchStartScale = state.scale;
+      const mid = getMidRelToViewportCenter(pts[0], pts[1]);
+      pinchStartRelX = mid.rx;
+      pinchStartRelY = mid.ry;
+      pinchOriginTx = state.tx;
+      pinchOriginTy = state.ty;
+    }
+
     viewportEl.addEventListener('pointerdown', (e) => {
       try { viewportEl.setPointerCapture(e.pointerId); } catch (_) {}
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -2929,9 +3520,7 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
         hadMultiTouch = true;
         dragged = true;
         pinDownIdx = null;
-        const pts = Array.from(pointers.values());
-        pinchStartDist = Math.max(1, dist(pts[0], pts[1]));
-        pinchStartScale = state.scale;
+        beginPinchBaseline();
       }
     });
 
@@ -2944,7 +3533,13 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
         dragged = true;
         const pts = Array.from(pointers.values());
         const d = dist(pts[0], pts[1]);
-        state.scale = pinchStartScale * (d / pinchStartDist);
+        const nextScale = Math.max(1, Math.min(6, pinchStartScale * (d / pinchStartDist)));
+        const scaleRatio = nextScale / Math.max(0.01, pinchStartScale);
+        const curMid = getMidRelToViewportCenter(pts[0], pts[1]);
+
+        state.scale = nextScale;
+        state.tx = curMid.rx - scaleRatio * (pinchStartRelX - pinchOriginTx);
+        state.ty = curMid.ry - scaleRatio * (pinchStartRelY - pinchOriginTy);
         clampAndApply();
       } else if (pointers.size === 1) {
         const dx = e.clientX - panStartX;
@@ -2961,7 +3556,9 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
     const releasePtr = (e) => {
       if (!pointers.has(e.pointerId)) return;
       pointers.delete(e.pointerId);
-      if (pointers.size === 1) {
+      if (pointers.size >= 2) {
+        beginPinchBaseline();
+      } else if (pointers.size === 1) {
         const rem = Array.from(pointers.values())[0];
         panStartX = rem.x;
         panStartY = rem.y;
@@ -3067,37 +3664,100 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
     return { point, poly };
   }
 
-  function applyLoadedPilePhoto(pair, autoAnalyze = true) {
+  function renderPileShotSwitchers() {
+    const bars = [
+      document.getElementById('pileShotSwitcher'),
+      document.getElementById('pileFsShotSwitcher')
+    ];
+    const addBtn = document.getElementById('btnAddPileShot');
+    if (addBtn) addBtn.classList.toggle('hidden', pilePhotos.length >= 4);
+
+    if (pilePhotos.length <= 1) {
+      bars.forEach(b => { if (b) { b.classList.add('hidden'); b.innerHTML = ''; } });
+      return;
+    }
+
+    const html = pilePhotos.map((_, i) => {
+      const cnt = pileResults.filter(r => (r.photoIdx ?? 0) === i).length;
+      const suffix = pileResults.length ? ` (${cnt})` : '';
+      return `<button type="button" class="pile-shot-pill ${i === activePilePhotoIdx ? 'active' : ''}" onclick="selectPilePhoto(${i})">📷 Shot ${i + 1}${suffix}</button>`;
+    }).join('');
+    bars.forEach(b => {
+      if (!b) return;
+      b.innerHTML = html;
+      b.classList.remove('hidden');
+    });
+  }
+
+  window.selectPilePhoto = (idx) => {
+    if (!pilePhotos.length) return;
+    const clamped = Math.max(0, Math.min(pilePhotos.length - 1, Number(idx) || 0));
+    if (clamped === activePilePhotoIdx && document.getElementById('pilePreviewImg').src) {
+      renderPileShotSwitchers();
+      return;
+    }
+    activePilePhotoIdx = clamped;
+    const src = pilePhotos[activePilePhotoIdx]?.saveWebp || '';
+    document.getElementById('pilePreviewImg').src = src;
+    document.getElementById('pileFsImg').src = src;
+    if (pileZoomInline) pileZoomInline.reset();
+    if (pileZoomFs) pileZoomFs.reset();
+    renderPileUI();
+  };
+
+  function applyLoadedPilePhotos(photosArr, autoAnalyze = true) {
     pileRunId++;
     pileBatchPriceRunning = false;
-    pilePhoto = pair;
+    pilePhotos = Array.isArray(photosArr) ? photosArr.slice(0, 4) : [];
+    activePilePhotoIdx = 0;
     pileResults = [];
     activePileIdx = null;
 
-    document.getElementById('pilePreviewImg').src = pair.saveWebp;
-    document.getElementById('pileFsImg').src = pair.saveWebp;
+    if (!pilePhotos.length) {
+      document.getElementById('pilePreviewWrap').classList.add('hidden');
+      document.getElementById('pileResultsCard').classList.add('hidden');
+      return;
+    }
+
+    document.getElementById('pilePreviewImg').src = pilePhotos[0].saveWebp;
+    document.getElementById('pileFsImg').src = pilePhotos[0].saveWebp;
     document.getElementById('pileSvg').innerHTML = '';
     document.getElementById('pilePins').innerHTML = '';
     document.getElementById('pileFsSvg').innerHTML = '';
     document.getElementById('pileFsPins').innerHTML = '';
     document.getElementById('pileHighlightBar').classList.add('hidden');
     document.getElementById('pileFsHighlightBar').classList.add('hidden');
-    document.getElementById('pilePhotoHint').textContent = 'Pinch or use +/− to zoom · Tap pins to spotlight';
+    document.getElementById('pilePhotoHint').textContent = 'Pinch + drag with 2 fingers to zoom & pan · Tap pins to spotlight';
     document.getElementById('pilePreviewWrap').classList.remove('hidden');
     document.getElementById('pileResultsCard').classList.add('hidden');
+    renderPileShotSwitchers();
     if (pileZoomInline) pileZoomInline.reset();
     if (pileZoomFs) pileZoomFs.reset();
 
     if (autoAnalyze) runPileScan();
   }
 
-  async function handlePilePhoto(file) {
-    if (!file) return;
-    setStatus('Decoding high-res pile photo (3072px AI / 2048px zoom)...', true);
+  async function handlePilePhotos(fileList, appendMode = false) {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    const baseList = appendMode ? pilePhotos.slice() : [];
+    const remainingSlots = Math.max(0, 4 - baseList.length);
+    if (!remainingSlots) {
+      toast('Max 4 pile photos reached — clear or analyze current shots');
+      return;
+    }
+    const toDecode = files.slice(0, remainingSlots);
+    if (files.length > remainingSlots) toast(`Using first ${remainingSlots} photo(s) (max 4 per pile scan)`);
+
+    setStatus(`Decoding ${toDecode.length} high-res pile photo(s) (3072px AI / 2048px zoom)...`, true);
     try {
-      const pair = await decodeBlobToPhotoPair(file, { aiMaxDim: 3072, aiQuality: 0.92, saveMaxDim: 2048, saveQuality: 0.82 });
+      const decoded = [];
+      for (const file of toDecode) {
+        const pair = await decodeBlobToPhotoPair(file, { aiMaxDim: 3072, aiQuality: 0.92, saveMaxDim: 2048, saveQuality: 0.82 });
+        decoded.push(pair);
+      }
       setStatus('', false);
-      applyLoadedPilePhoto(pair, true);
+      applyLoadedPilePhotos([...baseList, ...decoded], true);
     } catch (err) {
       setStatus('', false);
       toast('Photo error: ' + (err?.message || 'Could not decode image'), 5500);
@@ -3105,8 +3765,9 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
   }
 
   window.openPileFullscreen = () => {
-    if (!pilePhoto?.saveWebp) return;
-    document.getElementById('pileFsImg').src = pilePhoto.saveWebp;
+    const activeShot = pilePhotos[activePilePhotoIdx] || pilePhotos[0];
+    if (!activeShot?.saveWebp) return;
+    document.getElementById('pileFsImg').src = activeShot.saveWebp;
     document.getElementById('pileFullscreenModal').classList.remove('hidden');
     renderPileUI();
     if (pileZoomFs) pileZoomFs.reset();
@@ -3123,7 +3784,8 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
   window.resetPileScan = () => {
     pileRunId++;
     pileBatchPriceRunning = false;
-    pilePhoto = null;
+    pilePhotos = [];
+    activePilePhotoIdx = 0;
     pileResults = [];
     activePileIdx = null;
     hidePileFsUI();
@@ -3137,6 +3799,7 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
     document.getElementById('pileResultsCard').classList.add('hidden');
     document.getElementById('pileGalleryInput').value = '';
     document.getElementById('pileCamInput').value = '';
+    renderPileShotSwitchers();
     if (pileZoomInline) pileZoomInline.reset();
     if (pileZoomFs) pileZoomFs.reset();
   };
@@ -3285,10 +3948,20 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
     if (ev) ev.stopPropagation();
     if (idx < 0 || idx >= pileResults.length) return;
     activePileIdx = (activePileIdx === idx && !fromOverlay) ? null : idx;
-    renderPileUI();
 
     if (activePileIdx !== null) {
       const sel = pileResults[activePileIdx];
+      const itemPhotoIdx = sel.photoIdx ?? 0;
+      if (itemPhotoIdx !== activePilePhotoIdx && pilePhotos[itemPhotoIdx]) {
+        activePilePhotoIdx = itemPhotoIdx;
+        const src = pilePhotos[activePilePhotoIdx].saveWebp;
+        document.getElementById('pilePreviewImg').src = src;
+        document.getElementById('pileFsImg').src = src;
+        if (pileZoomInline) pileZoomInline.reset();
+        if (pileZoomFs) pileZoomFs.reset();
+      }
+      renderPileUI();
+
       if (cfg.discogsToken && (sel.priceStatus === 'idle' || sel.priceStatus === 'error')) {
         fetchPileItemPrice(sel, pileRunId);
       }
@@ -3301,6 +3974,8 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
           document.getElementById('pilePreviewWrap').scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
       }
+    } else {
+      renderPileUI();
     }
   };
 
@@ -3327,7 +4002,8 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
   function renderPileOverlayInto(svgEl, pinsEl, maskId) {
     if (!svgEl || !pinsEl) return;
     const sel = (activePileIdx !== null && pileResults[activePileIdx]) ? pileResults[activePileIdx] : null;
-    const hasFocus = Boolean(sel && (sel.poly || sel.point));
+    const selOnActiveShot = Boolean(sel && (sel.photoIdx ?? 0) === activePilePhotoIdx);
+    const hasFocus = Boolean(selOnActiveShot && (sel.poly || sel.point));
 
     if (hasFocus) {
       const strokeColor = sel.highVal ? '#fbbf24' : '#22c55e';
@@ -3358,7 +4034,7 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
 
     pinsEl.classList.toggle('has-focus', hasFocus);
     pinsEl.innerHTML = pileResults.map((r, i) => {
-      if (!r.point) return '';
+      if ((r.photoIdx ?? 0) !== activePilePhotoIdx || !r.point) return '';
       const [py, px] = r.point;
       const cls = [
         'pile-pin',
@@ -3393,6 +4069,7 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
   }
 
   function renderPileUI() {
+    renderPileShotSwitchers();
     renderPileOverlayInto(document.getElementById('pileSvg'), document.getElementById('pilePins'), 'pileMaskInline');
     renderPileOverlayInto(document.getElementById('pileFsSvg'), document.getElementById('pileFsPins'), 'pileMaskFs');
     updatePileRetryTasteBtn();
@@ -3450,6 +4127,7 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
               ${r.localArtistHit ? `<span class="badge badge-green">In Spotify</span>` : ''}
               ${askBadge}${vgBadge}${statusBadge}${histLink}
               ${(r.roughWant > r.roughHave && r.roughWant >= 15) ? `<span class="badge badge-purple">💎 High Want (${r.roughWant})</span>` : ''}
+              ${pilePhotos.length > 1 ? `<span class="badge" style="background:#0d1017; color:#c4b5fd;">📷 #${(r.photoIdx ?? 0) + 1}</span>` : ''}
               ${(r.point || r.poly) ? `<span class="badge" style="background:#0d1017; color:#93c5fd;">📍 #${i + 1}</span>` : ''}
             </div>
           </div>
@@ -3537,8 +4215,21 @@ Return ONLY valid JSON:
     runPileTasteBatch(pileRunId);
   };
 
+  function pileGeomQualityScore(it, geom) {
+    let q = 0;
+    if (geom.poly && geom.poly.length >= 4) q += 40;
+    if (geom.point) {
+      const [py, px] = geom.point;
+      const edgeClearance = Math.min(py, 1000 - py, px, 1000 - px);
+      q += Math.min(100, edgeClearance / 3);
+    }
+    if (it.catno && String(it.catno).trim()) q += 20;
+    q += Math.min(25, String(it.title || '').trim().length * 0.6 + String(it.artist || '').trim().length * 0.4);
+    return q;
+  }
+
   window.runPileScan = async () => {
-    if (!pilePhoto) return;
+    if (!pilePhotos.length) return;
     if (!CC.isAiReady()) { toast('Add your Gemini API Key in Settings first'); switchView('settings'); return; }
 
     pileRunId++;
@@ -3548,14 +4239,13 @@ Return ONLY valid JSON:
     document.getElementById('pileResultsCard').classList.add('hidden');
     activePileIdx = null;
     const fmtLabel = activeFormat === 'Auto' ? 'all formats' : `${activeFormat}s only`;
-    setStatus(`📚 Reading & locating ${fmtLabel} (ultra-high detail)...`, true, { cancellable: true });
+    const shotCount = pilePhotos.length;
 
     const formatRule = activeFormat === 'Auto'
       ? '- Extract legible Cassettes, CDs, and Vinyl — from BOTH spines AND visible front covers/faces.'
       : `- FORMAT FILTER ACTIVE: The user selected "${activeFormat}". ONLY extract ${activeFormat} items and strictly IGNORE all other formats in the photo. Read both spines AND visible front covers/faces of ${activeFormat} items.`;
 
-    try {
-      const ocrPrompt = `You are inspecting a high-resolution photo of a crate, shelf, box, or stack of physical music media (cassettes, CDs, and/or vinyl).
+    const ocrPrompt = `You are inspecting a high-resolution photo of a crate, shelf, box, or stack of physical music media (cassettes, CDs, and/or vinyl).
 
 SYSTEMATIC COVERAGE & ACCURACY RULES:
 - Dense shelves can contain 60–100+ items. Scan systematically ROW-BY-ROW and STACK-BY-STACK (top-to-bottom, left-to-right) so you do not skip legible items.
@@ -3580,36 +4270,90 @@ Return ONLY valid JSON:
     }
   ]
 }`;
-      const ocr = await CC.callAI(
-        [{ text: ocrPrompt }, { inline_data: { mime_type: 'image/jpeg', data: pilePhoto.apiB64 } }],
-        'MEDIUM',
-        {
-          retryLabel: 'Pile OCR',
-          maxOutputTokens: 16384,
-          mediaResolution: 'MEDIA_RESOLUTION_ULTRA_HIGH'
-        }
-      );
-      if (myPileRunId !== pileRunId) return;
 
-      let items = Array.isArray(ocr.items) ? ocr.items.filter(x => x.title || x.artist) : [];
-      if (activeFormat !== 'Auto') {
-        items = items.filter(x => !x.format || norm(x.format) === norm(activeFormat));
+    try {
+      const deduped = [];
+      const dedupMap = new Map();
+      let totalUnreadable = 0;
+      let mergedDupCount = 0;
+
+      for (let pIdx = 0; pIdx < shotCount; pIdx++) {
+        if (myPileRunId !== pileRunId) return;
+        setStatus(
+          shotCount > 1
+            ? `📚 Scanning section ${pIdx + 1}/${shotCount} (${fmtLabel}, ultra-high detail)...`
+            : `📚 Reading & locating ${fmtLabel} (ultra-high detail)...`,
+          true,
+          { cancellable: true }
+        );
+
+        const ocr = await CC.callAI(
+          [{ text: ocrPrompt }, { inline_data: { mime_type: 'image/jpeg', data: pilePhotos[pIdx].apiB64 } }],
+          'MEDIUM',
+          {
+            retryLabel: shotCount > 1 ? `Pile OCR (${pIdx + 1}/${shotCount})` : 'Pile OCR',
+            maxOutputTokens: 16384,
+            mediaResolution: 'MEDIA_RESOLUTION_ULTRA_HIGH'
+          }
+        );
+        if (myPileRunId !== pileRunId) return;
+
+        totalUnreadable += Number(ocr.unreadable_count || 0);
+        let sectionItems = Array.isArray(ocr.items) ? ocr.items.filter(x => x.title || x.artist) : [];
+        if (activeFormat !== 'Auto') {
+          sectionItems = sectionItems.filter(x => !x.format || norm(x.format) === norm(activeFormat));
+        }
+
+        for (const it of sectionItems) {
+          const geom = normalizePileGeometry(it);
+          const qScore = pileGeomQualityScore(it, geom);
+          const na = norm(it.artist || '');
+          const nt = norm(it.title || '');
+          const dedupKey = (na && nt) ? `${na}|${nt}` : '';
+
+          if (dedupKey && dedupMap.has(dedupKey)) {
+            const existing = dedupMap.get(dedupKey);
+            if (existing.photoIdx !== pIdx) {
+              mergedDupCount++;
+              const inCat = String(it.catno || '').trim();
+              const exCat = String(existing.catno || '').trim();
+              if (inCat.length > exCat.length) existing.catno = inCat;
+              if (String(it.title || '').trim().length > String(existing.title || '').trim().length) existing.title = it.title;
+              if (String(it.artist || '').trim().length > String(existing.artist || '').trim().length) existing.artist = it.artist;
+              if (qScore > existing._qScore) {
+                existing.photoIdx = pIdx;
+                existing.point = geom.point;
+                existing.poly = geom.poly;
+                existing._qScore = qScore;
+              }
+              continue;
+            }
+          }
+
+          const entry = {
+            ...it,
+            photoIdx: pIdx,
+            point: geom.point,
+            poly: geom.poly,
+            _qScore: qScore
+          };
+          deduped.push(entry);
+          if (dedupKey && !dedupMap.has(dedupKey)) dedupMap.set(dedupKey, entry);
+        }
       }
-      if (!items.length) {
+
+      if (!deduped.length) {
         setStatus('', false);
         toast(`Could not read any legible ${activeFormat === 'Auto' ? 'items' : activeFormat + 's'} — try brighter light or zoom closer`, 4200);
         return;
       }
 
       // PROGRESSIVE RENDERING: Show all pins, owned badges & Pull List IMMEDIATELY after OCR!
-      pileResults = items.map(it => {
+      pileResults = deduped.map(it => {
         const localArtistHit = Boolean(spotifyProfile && it.artist && spotifyProfile.allArtists?.[norm(it.artist)]);
         const ownedMatch = checkPileOwnedMatch(it.artist, it.title);
-        const geom = normalizePileGeometry(it);
         return {
           ...it,
-          point: geom.point,
-          poly: geom.poly,
           tasteStatus: 'loading',
           taste_score: null,
           taste_reason: '',
@@ -3630,12 +4374,18 @@ Return ONLY valid JSON:
         };
       });
 
+      activePilePhotoIdx = 0;
+      document.getElementById('pilePreviewImg').src = pilePhotos[0].saveWebp;
+      document.getElementById('pileFsImg').src = pilePhotos[0].saveWebp;
       setStatus('', false);
       document.getElementById('pileCount').textContent = pileResults.length;
-      document.getElementById('pilePhotoHint').textContent = 'Pinch or use +/− to zoom · Tap any numbered pin to spotlight';
-      document.getElementById('pileSkippedNote').textContent = ocr.unreadable_count
-        ? `Skipped ${ocr.unreadable_count} blurry/unreadable item(s). Tap any pin or card to spotlight & check rough Discogs pricing, or tap 💰 Check Prices.`
-        : 'Tap any pin or card to spotlight & check rough Discogs pricing, or tap 💰 Check Prices.';
+      document.getElementById('pilePhotoHint').textContent = 'Pinch + drag with 2 fingers to zoom & pan · Tap any numbered pin to spotlight';
+
+      const noteParts = [];
+      if (mergedDupCount > 0) noteParts.push(`Merged ${mergedDupCount} overlapping item(s) across ${shotCount} shots.`);
+      if (totalUnreadable > 0) noteParts.push(`Skipped ${totalUnreadable} blurry/unreadable item(s).`);
+      noteParts.push('Tap any pin or card to spotlight & check rough Discogs pricing, or tap 💰 Check Prices.');
+      document.getElementById('pileSkippedNote').textContent = noteParts.join(' ');
 
       renderPileUI();
       updatePilePriceBtn();
@@ -3732,18 +4482,26 @@ Return ONLY valid JSON:
       setStatus(`Checking Discogs to avoid duplicate copy of #${releaseId}...`, true);
       const remoteNow = await CC.findDiscogsInstances(releaseId, { throwOnError: true });
       const prevIds = new Set((existing.preExistingInstanceIds || []).map(Number));
-      const newlyCreated = remoteNow.filter(r => !prevIds.has(Number(r.instance_id)));
+      const allNew = remoteNow.filter(r => !prevIds.has(Number(r.instance_id)));
+      const expectedFolder = String(existing.folderId || defaultFolderId || '1');
+      const newlyCreated = allNew.filter(r => String(r.folder_id || '1') === expectedFolder);
+      const wrongFolderCreated = allNew.filter(r => String(r.folder_id || '1') !== expectedFolder);
+
       if (newlyCreated.length > 1) {
         const idsList = newlyCreated.map(r => `#${r.instance_id}`).join(', ');
-        throw new Error(`Multiple new Discogs copies found for #${releaseId} (${idsList}) — please clean up duplicates on Discogs before syncing grades so the wrong copy isn't updated.`);
+        throw new Error(`Multiple new Discogs copies found for #${releaseId} in folder ${expectedFolder} (${idsList}) — please clean up duplicates on Discogs before syncing grades so the wrong copy isn't updated.`);
       }
       if (newlyCreated.length === 1 && newlyCreated[0]?.instance_id) {
         const created = newlyCreated[0];
-        const fId = String(created.folder_id || existing.folderId || defaultFolderId);
+        const fId = String(created.folder_id || expectedFolder);
         const updatedOp = { ...existing, status: 'created', instanceId: created.instance_id, folderId: fId };
         setPendingDiscogsOp(ledgerKey, updatedOp);
         if (postingMatch.key !== ledgerKey) setPendingDiscogsOp(postingMatch.key, updatedOp);
         return { instanceId: created.instance_id, folderId: fId, reused: true };
+      }
+      if (wrongFolderCreated.length > 0) {
+        const desc = wrongFolderCreated.map(r => `#${r.instance_id} (folder ${r.folder_id ?? '?'})`).join(', ');
+        throw new Error(`Found unseen Discogs copy for #${releaseId} in an unexpected folder (expected folder ${expectedFolder}): ${desc}. Please verify on Discogs before retrying.`);
       }
     }
 
@@ -3826,15 +4584,33 @@ Return ONLY valid JSON:
       return;
     }
 
-    const isEditing = Boolean(editingStashItem);
-    const oldItem = editingStashItem;
-    const ledgerKey = isEditing && oldItem?.id ? `stash:${oldItem.id}` : `rel:${currentInspected.discogs_id || 'local'}`;
-    const relKey = currentInspected.discogs_id ? `rel:${currentInspected.discogs_id}` : '';
+    // Capture an immutable snapshot at tap-time so starting another scan mid-save
+    // can NEVER cross-pair release IDs, instance IDs, photos, or wipe the new scan.
+    const snap = {
+      syncToDiscogs: Boolean(syncToDiscogs),
+      inspected: JSON.parse(JSON.stringify(currentInspected)),
+      editingItem: editingStashItem ? JSON.parse(JSON.stringify(editingStashItem)) : null,
+      stagedWebps: stagedPhotos.map(p => p.saveWebp),
+      mediaCond: document.getElementById('gMediaCond').value || 'Very Good Plus (VG+)',
+      sleeveCond: document.getElementById('gSleeveCond').value || 'Very Good Plus (VG+)',
+      condNote: document.getElementById('gNotes').value.trim(),
+      tiebreakChecked,
+      scanRunIdAtTap: scanRunId,
+      defaultFolderId: cfg.discogsFolderId || '1'
+    };
+    snap.inspected.media_condition = snap.mediaCond;
+    snap.inspected.sleeve_condition = snap.sleeveCond;
+    snap.inspected.condition_note = snap.condNote;
+
+    const isEditing = Boolean(snap.editingItem);
+    const oldItem = snap.editingItem;
+    const ledgerKey = isEditing && oldItem?.id ? `stash:${oldItem.id}` : `rel:${snap.inspected.discogs_id || 'local'}`;
+    const relKey = snap.inspected.discogs_id ? `rel:${snap.inspected.discogs_id}` : '';
     const lockKeys = Array.from(new Set([ledgerKey, relKey].filter(Boolean)));
 
     if (lockKeys.some(k => activeDiscogsSaves.has(k))) return;
 
-    if (syncToDiscogs && (!cfg.discogsToken || !cfg.discogsUser || !currentInspected.discogs_id)) {
+    if (snap.syncToDiscogs && (!cfg.discogsToken || !cfg.discogsUser || !snap.inspected.discogs_id)) {
       toast('Verify Discogs in Settings first');
       return;
     }
@@ -3846,20 +4622,12 @@ Return ONLY valid JSON:
     if (saveLocalBtn) saveLocalBtn.disabled = true;
 
     try {
-      const mediaCond = document.getElementById('gMediaCond').value || 'Very Good Plus (VG+)';
-      const sleeveCond = document.getElementById('gSleeveCond').value || 'Very Good Plus (VG+)';
-      const condNote = document.getElementById('gNotes').value.trim();
-
-      currentInspected.media_condition = mediaCond;
-      currentInspected.sleeve_condition = sleeveCond;
-      currentInspected.condition_note = condNote;
-
-      const changedRelease = isEditing && Number(oldItem.discogs_id || 0) !== Number(currentInspected.discogs_id || 0);
-      const sameRelease = isEditing && oldItem.synced_to_discogs && Number(oldItem.discogs_id) === Number(currentInspected.discogs_id);
-      const swappedRelease = isEditing && oldItem.synced_to_discogs && oldItem.discogs_id && Number(oldItem.discogs_id) !== Number(currentInspected.discogs_id);
+      const changedRelease = isEditing && Number(oldItem.discogs_id || 0) !== Number(snap.inspected.discogs_id || 0);
+      const sameRelease = isEditing && oldItem.synced_to_discogs && Number(oldItem.discogs_id) === Number(snap.inspected.discogs_id);
+      const swappedRelease = isEditing && oldItem.synced_to_discogs && oldItem.discogs_id && Number(oldItem.discogs_id) !== Number(snap.inspected.discogs_id);
 
       let synced = isEditing ? Boolean(oldItem.synced_to_discogs) : false;
-      let folderId = isEditing ? (oldItem.discogs_folder_id || cfg.discogsFolderId || '1') : (cfg.discogsFolderId || '1');
+      let folderId = isEditing ? (oldItem.discogs_folder_id || snap.defaultFolderId) : snap.defaultFolderId;
       let instanceId = isEditing ? (oldItem.discogs_instance_id || null) : null;
       let pendingDiscogsSync = isEditing ? Boolean(oldItem.pending_discogs_sync) : false;
       let pendingDeleteOld = isEditing ? (oldItem.pending_delete_old || null) : null;
@@ -3870,16 +4638,17 @@ Return ONLY valid JSON:
       let sameReleaseSkippedRemote = false;
       let sameReleaseRemoteCopies = 0;
 
-      const newThumbs = stagedPhotos.map(p => p.saveWebp);
-      const finalThumbs = newThumbs.length ? newThumbs : (isEditing ? (oldItem.thumbs || (oldItem.thumb_data_url ? [oldItem.thumb_data_url] : [])) : []);
+      const finalThumbs = snap.stagedWebps.length
+        ? snap.stagedWebps
+        : (isEditing ? (oldItem.thumbs || (oldItem.thumb_data_url ? [oldItem.thumb_data_url] : [])) : []);
 
       const buildRecord = () => {
-        const cleanInspected = { ...currentInspected };
+        const cleanInspected = { ...snap.inspected };
         delete cleanInspected._pendingDiscogsAdd;
         const rec = {
           ...cleanInspected,
-          is_conservative_tiebreak: Boolean(currentInspected.is_conservative_tiebreak),
-          tiebreak_confirmed: Boolean(!currentInspected.is_conservative_tiebreak || tiebreakChecked),
+          is_conservative_tiebreak: Boolean(snap.inspected.is_conservative_tiebreak),
+          tiebreak_confirmed: Boolean(!snap.inspected.is_conservative_tiebreak || snap.tiebreakChecked),
           synced_to_discogs: synced,
           pending_discogs_sync: pendingDiscogsSync,
           pending_field_sync: pendingFieldSync,
@@ -3887,7 +4656,7 @@ Return ONLY valid JSON:
           discogs_folder_id: synced ? folderId : null,
           discogs_instance_id: synced ? instanceId : null,
           thumbs: finalThumbs,
-          thumb_data_url: finalThumbs[0] || currentInspected.discogs_thumb || '',
+          thumb_data_url: finalThumbs[0] || snap.inspected.discogs_thumb || '',
           created_at: isEditing ? (oldItem.created_at || Date.now()) : Date.now(),
           updated_at: Date.now()
         };
@@ -3895,7 +4664,7 @@ Return ONLY valid JSON:
         return rec;
       };
 
-      if (syncToDiscogs) {
+      if (snap.syncToDiscogs) {
         try {
           if (sameRelease) {
             setStatus('Updating grades & notes on your existing Discogs item...', true);
@@ -3910,20 +4679,20 @@ Return ONLY valid JSON:
               }
             }
             if (instanceId) {
-              fieldRes = await CC.syncDiscogsInstanceFields(folderId, currentInspected.discogs_id, instanceId, mediaCond, sleeveCond, condNote);
+              fieldRes = await CC.syncDiscogsInstanceFields(folderId, snap.inspected.discogs_id, instanceId, snap.mediaCond, snap.sleeveCond, snap.condNote);
               pendingFieldSync = fieldRes.failedCount > 0;
             }
             synced = true;
             pendingDiscogsSync = false;
           } else {
-            // 1. Durable Add-First with unified cross-path ledger + remote reconciliation on retry/reload
-            const added = await ensureDiscogsInstanceDurable(ledgerKey, currentInspected.discogs_id, cfg.discogsFolderId || '1', relKey ? [relKey] : []);
+            // 1. Durable Add-First with unified cross-path ledger + folder-safe reconciliation
+            const added = await ensureDiscogsInstanceDurable(ledgerKey, snap.inspected.discogs_id, snap.defaultFolderId, relKey ? [relKey] : []);
             folderId = added.folderId;
             instanceId = added.instanceId;
 
             // 2. Sync Media/Sleeve/Notes fields on the new instance
             setStatus('Saving Media/Sleeve grade & notes to Discogs...', true);
-            fieldRes = await CC.syncDiscogsInstanceFields(folderId, currentInspected.discogs_id, instanceId, mediaCond, sleeveCond, condNote);
+            fieldRes = await CC.syncDiscogsInstanceFields(folderId, snap.inspected.discogs_id, instanceId, snap.mediaCond, snap.sleeveCond, snap.condNote);
 
             synced = true;
             pendingDiscogsSync = false;
@@ -3960,11 +4729,11 @@ Return ONLY valid JSON:
 
         // Cross-path recovery: if a prior Sync attempt already created a Discogs instance before IDB failed,
         // attach that instanceId now so a subsequent "Push to Discogs" never creates a duplicate copy.
-        if (currentInspected.discogs_id) {
-          const priorCreated = findMatchingPendingDiscogsOp([ledgerKey, relKey], currentInspected.discogs_id, { requireCreated: true });
+        if (snap.inspected.discogs_id) {
+          const priorCreated = findMatchingPendingDiscogsOp([ledgerKey, relKey], snap.inspected.discogs_id, { requireCreated: true });
           if (priorCreated?.op?.instanceId) {
             instanceId = priorCreated.op.instanceId;
-            folderId = priorCreated.op.folderId || cfg.discogsFolderId || '1';
+            folderId = priorCreated.op.folderId || snap.defaultFolderId;
             synced = true;
             pendingDiscogsSync = false;
             pendingFieldSync = true;
@@ -3978,7 +4747,7 @@ Return ONLY valid JSON:
       try {
         const savedKey = await CC.idbPut('stash', record);
         if (!record.id) record.id = savedKey;
-        if (syncToDiscogs || attachedFromLedger) {
+        if (snap.syncToDiscogs || attachedFromLedger) {
           clearPendingDiscogsOp(ledgerKey);
           if (relKey && relKey !== ledgerKey) clearPendingDiscogsOp(relKey);
         }
@@ -3990,7 +4759,7 @@ Return ONLY valid JSON:
 
       // 4. Only delete old copy when ALL requested field writes succeeded (fieldRes.failedCount === 0)
       let oldDeleteWarning = '';
-      if (syncToDiscogs && record.pending_delete_old) {
+      if (snap.syncToDiscogs && record.pending_delete_old) {
         if (fieldRes.failedCount > 0) {
           oldDeleteWarning = `${fieldRes.failedCount} grade/note field(s) failed to sync (${fieldRes.errors[0] || ''}) — old copy #${record.pending_delete_old.releaseId} was kept safely on Discogs. Retry from Stash Detail.`;
         } else {
@@ -4012,16 +4781,19 @@ Return ONLY valid JSON:
       } else if (attachedFromLedger) {
         toast('💾 Saved locally & linked existing Discogs copy (sync grades from Stash Detail).', 4800);
       } else if (isEditing) {
-        toast(syncToDiscogs
+        toast(snap.syncToDiscogs
           ? '✅ Stash & Discogs updated cleanly!'
           : (pendingDiscogsSync ? '💾 Updated locally (marked Pending Discogs Sync)' : '💾 Stash updated!'));
       } else {
         toast(synced ? `✅ Saved to Discogs${fieldRes.okCount ? ' (with grades!)' : ''} & Stash!` : '💾 Saved to Local Stash!');
       }
 
-      editingStashItem = null;
-      document.getElementById('editModeBanner').classList.add('hidden');
-      resetScanner();
+      // Only clear editing state and reset the scanner if the user hasn't started a new scan mid-save
+      if (scanRunId === snap.scanRunIdAtTap) {
+        editingStashItem = null;
+        document.getElementById('editModeBanner').classList.add('hidden');
+        resetScanner();
+      }
     } finally {
       lockKeys.forEach(k => activeDiscogsSaves.delete(k));
       if (currentInspected) {
@@ -4248,7 +5020,7 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
       it.taste_scored_at = Date.now();
       it.updated_at = Date.now();
 
-      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v193`);
+      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v194`);
       await CC.idbPut('stash', it);
       await loadStashCache();
       renderStash();
@@ -4805,6 +5577,9 @@ Return ONLY valid JSON:
     cfg.geminiModel = document.getElementById('cfgGeminiModel').value;
     cfg.autoPlayHighlight = document.getElementById('cfgAutoPlay').checked;
     cfg.autoDetective = document.getElementById('cfgAutoDetective').checked;
+    cfg.autoGradeOnScan = Boolean(document.getElementById('cfgAutoGradeOnScan')?.checked);
+    const scanChk = document.getElementById('scanAutoGradeChk');
+    if (scanChk) scanChk.checked = cfg.autoGradeOnScan;
     cfg.discogsToken = document.getElementById('cfgDiscogsToken').value.trim();
     cfg.discogsFolderId = document.getElementById('cfgDiscogsFolder').value || '1';
     cfg.homeCountry = document.getElementById('cfgHomeCountry').value;
@@ -5013,6 +5788,8 @@ Return ONLY valid JSON:
     document.getElementById('cfgGeminiModel').value = cfg.geminiModel || 'gemini-3.5-flash-lite';
     document.getElementById('cfgAutoPlay').checked = cfg.autoPlayHighlight !== false;
     document.getElementById('cfgAutoDetective').checked = cfg.autoDetective !== false;
+    document.getElementById('cfgAutoGradeOnScan').checked = Boolean(cfg.autoGradeOnScan);
+    document.getElementById('scanAutoGradeChk').checked = Boolean(cfg.autoGradeOnScan);
     document.getElementById('cfgDiscogsToken').value = cfg.discogsToken || '';
     document.getElementById('cfgHomeCountry').value = cfg.homeCountry ?? 'US';
     document.getElementById('cfgFetchVg').checked = cfg.fetchVgSuggestions !== false;
@@ -5073,8 +5850,8 @@ Return ONLY valid JSON:
 
     document.getElementById('galleryInput').addEventListener('change', (e) => { stagePhotoFiles(e.target.files); e.target.value = ''; });
     document.getElementById('nativeCamInput').addEventListener('change', (e) => { stagePhotoFiles(e.target.files); e.target.value = ''; });
-    document.getElementById('pileGalleryInput').addEventListener('change', (e) => { handlePilePhoto(e.target.files[0]); e.target.value = ''; });
-    document.getElementById('pileCamInput').addEventListener('change', (e) => { handlePilePhoto(e.target.files[0]); e.target.value = ''; });
+    document.getElementById('pileGalleryInput').addEventListener('change', (e) => { handlePilePhotos(e.target.files, false); e.target.value = ''; });
+    document.getElementById('pileCamInput').addEventListener('change', (e) => { handlePilePhotos(e.target.files, pilePhotos.length > 0 && pilePhotos.length < 4); e.target.value = ''; });
 
     const p = new URLSearchParams(location.search);
     if (p.get('error')) {

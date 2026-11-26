@@ -7,12 +7,12 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>CrateCheck — Media Scanner</title>
-  <link rel="stylesheet" href="style.css?v=1.9.3" />
+  <link rel="stylesheet" href="style.css?v=1.9.4" />
 </head>
 <body>
 
 <header>
-  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.9.3</span></div>
+  <div class="brand">📼 CrateCheck <span class="ver-tag">v1.9.4</span></div>
   <div class="status-pills">
     <span id="aiPill" class="pill" title="Gemini Cloud AI status" onclick="switchView('settings')">Gemini: Off</span>
     <span id="ratePill" class="pill" title="Discogs API sliding window (max 58/min)">API 0/58</span>
@@ -75,6 +75,11 @@
           </button>
         </div>
 
+        <label class="inline-toggle-row">
+          <input id="scanAutoGradeChk" type="checkbox" onchange="toggleAutoGradeOnScan(this.checked)" />
+          <span>🏷️ Grade in one go <span class="muted-hint">(off = faster thrift scan)</span></span>
+        </label>
+
         <div id="stagedSummary" class="staged-box hidden">
           <div id="stagedUpcRow" class="hidden" style="margin-bottom:8px;"></div>
           <div id="previewStrip" class="preview-strip"></div>
@@ -95,20 +100,21 @@
     <!-- ==================== PILE / SHELF SCAN MODE ==================== -->
     <div id="pileModeWrap" class="hidden">
       <div class="card">
-        <input id="pileGalleryInput" class="hidden-file" type="file" accept="image/*" />
+        <input id="pileGalleryInput" class="hidden-file" type="file" accept="image/*" multiple />
         <input id="pileCamInput" class="hidden-file" type="file" accept="image/*" capture="environment" />
         <p style="font-size:0.84rem; margin-bottom:6px;">
-          Snap or upload a crate/shelf. Auto-analyzes immediately against your <strong>Taste Profile &amp; Soft Spots</strong>. Tap any numbered pin or result to spotlight it &amp; check rough Discogs prices.
+          Snap 1–4 close-up shelf sections (or upload photos). Review sharpness before analyzing against your <strong>Taste Profile &amp; Soft Spots</strong>, with smart overlap deduplication.
         </p>
         <p style="font-size:0.76rem; color:#93c5fd; margin-bottom:10px;">
           💡 Works best with spines (cassettes, CDs, vinyl), and also attempts front covers/faces.
         </p>
         <div class="btn-row" style="margin-top:0;">
           <button class="btn btn-primary-scan" style="min-height:46px; font-size:0.9rem;" onclick="openCameraViewfinder('pile')">📷 Snap Pile / Shelf</button>
-          <button class="btn btn-secondary" onclick="document.getElementById('pileGalleryInput').click()">🖼️ Upload Photo</button>
+          <button class="btn btn-secondary" onclick="document.getElementById('pileGalleryInput').click()">🖼️ Upload Photos</button>
         </div>
 
         <div id="pilePreviewWrap" class="hidden" style="margin-top:10px;">
+          <div id="pileShotSwitcher" class="pile-shot-bar hidden"></div>
           <div class="pile-toolbar">
             <div class="inline-actions" style="gap:4px;">
               <button type="button" class="btn btn-secondary btn-sm pile-zbtn" onclick="stepPileZoom('inline', -0.5)" title="Zoom Out">−</button>
@@ -129,14 +135,17 @@
 
           <div id="pileHighlightBar" class="pile-highlight-bar hidden"></div>
           <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-top:6px;">
-            <span id="pilePhotoHint" style="font-size:0.74rem; color:var(--muted);">Pinch or use +/− to zoom · Tap pins to spotlight</span>
+            <span id="pilePhotoHint" style="font-size:0.74rem; color:var(--muted);">Pinch + drag with 2 fingers to zoom &amp; pan · Tap pins to spotlight</span>
           </div>
 
           <div id="pileActionRow" class="search-action-row">
-            <button id="btnRunPileScan" class="btn btn-secondary btn-sm" style="flex:1; min-height:40px;" onclick="runPileScan()">
-              🔄 Re-Analyze Pile
+            <button id="btnAddPileShot" type="button" class="btn btn-secondary btn-sm" style="width:auto; min-height:40px;" onclick="openCameraViewfinder('pile')">
+              📷 + Shot
             </button>
-            <button id="btnClearPile" class="btn btn-secondary btn-sm" style="width:auto; min-width:74px; min-height:40px;" onclick="resetPileScan()">
+            <button id="btnRunPileScan" class="btn btn-secondary btn-sm" style="flex:1; min-height:40px;" onclick="runPileScan()">
+              🔄 Analyze Pile
+            </button>
+            <button id="btnClearPile" class="btn btn-secondary btn-sm" style="width:auto; min-width:68px; min-height:40px;" onclick="resetPileScan()">
               Clear
             </button>
           </div>
@@ -231,6 +240,10 @@
           <strong style="font-size:0.92rem;">🏷️ Discogs Grading &amp; Notes</strong>
           <span id="aiGradeHint" class="badge badge-purple" style="margin:0;">AI Estimate</span>
         </div>
+
+        <button id="btnAiGradeNow" type="button" class="btn btn-green hidden" style="width:100%; min-height:44px; font-size:0.88rem; margin-bottom:8px;" onclick="gradeCurrentPhotosOnDemand()">
+          ✨ AI Grade Photos
+        </button>
 
         <button id="btnVoiceRegradeScan" type="button" class="btn btn-purple dictate-btn" style="width:100%; min-height:44px; font-size:0.88rem; margin-bottom:8px;" onclick="voiceRegrade('scan', 'btnVoiceRegradeScan')">
           🎤 Don't Agree? AI Voice Re-Grade
@@ -361,6 +374,13 @@
             <div style="font-size:0.76rem; color:var(--muted);">Fast Top-10 sweep + [r=ID] siblings, optional Deep Search for all remaining pressings</div>
           </div>
           <input id="cfgAutoDetective" type="checkbox" style="width:22px; height:22px;" />
+        </div>
+        <div class="toggle-row">
+          <div>
+            <div style="font-size:0.9rem; font-weight:600;">🏷️ Grade in one go during scan</div>
+            <div style="font-size:0.76rem; color:var(--muted);">Off = faster OCR-only thrift scanning; grade on demand with ✨ AI Grade Photos</div>
+          </div>
+          <input id="cfgAutoGradeOnScan" type="checkbox" style="width:22px; height:22px;" onchange="toggleAutoGradeOnScan(this.checked)" />
         </div>
         <div class="inline-actions" style="margin-top:8px;">
           <button class="btn btn-sm" onclick="saveSettings()">Save Settings</button>
@@ -623,6 +643,7 @@
     </div>
     <button type="button" class="btn btn-secondary btn-sm" onclick="closePileFullscreen()">✕ Close</button>
   </div>
+  <div id="pileFsShotSwitcher" class="pile-shot-bar pile-fs-shot-bar hidden"></div>
   <div id="pileFsViewport" class="pile-viewport pile-viewport-fs">
     <div id="pileFsZoomContent" class="pile-zoom-content">
       <img id="pileFsImg" class="pile-preview-img pile-preview-img-fs" draggable="false" />
@@ -642,17 +663,21 @@
   <div id="sdBody" class="detail-body"></div>
 </div>
 
-<!-- Continuous 2-Shot / Pile Full-Res In-App Camera Viewfinder -->
+<!-- Continuous 2-Shot / Multi-Shot Pile Full-Res In-App Camera Viewfinder -->
 <div id="cameraModal" class="cam-overlay hidden">
   <div class="cam-top">
-    <span id="camStepBadge" class="badge badge-blue" style="margin:0; font-size:0.82rem;">Shot 1: Front / Side A</span>
-    <div class="inline-actions" style="gap:6px;">
-      <button type="button" class="btn btn-secondary btn-sm" style="min-height:32px; padding:4px 9px;" onclick="fallbackToNativeCam()">Native Cam</button>
-      <button type="button" class="btn btn-secondary btn-sm" style="min-height:32px; padding:4px 10px;" onclick="closeCameraViewfinder()">Done</button>
+    <span id="camStepBadge" class="badge badge-blue" style="margin:0; font-size:0.78rem;">Shot 1: Front / Side A</span>
+    <div class="inline-actions" style="gap:5px; justify-content:flex-end;">
+      <button id="camLensBtn" type="button" class="btn btn-secondary btn-sm cam-top-btn hidden" onclick="cycleCameraLens()" title="Switch rear camera lens">📷 1x</button>
+      <button id="camZoomBtn" type="button" class="btn btn-secondary btn-sm cam-top-btn hidden" onclick="toggleCamUltrawideZoom()" title="Toggle ultrawide 0.5x zoom">0.5x</button>
+      <button id="camPeakBtn" type="button" class="btn btn-secondary btn-sm cam-top-btn" onclick="toggleFocusPeaking()" title="Toggle Sony-style red focus peaking">🎯 Peak</button>
+      <button type="button" class="btn btn-secondary btn-sm cam-top-btn" onclick="fallbackToNativeCam()">Native</button>
+      <button type="button" class="btn btn-secondary btn-sm cam-top-btn" onclick="closeCameraViewfinder()">Done</button>
     </div>
   </div>
   <div id="camStage" class="cam-stage">
     <video id="camVideo" playsinline muted></video>
+    <canvas id="camPeakCanvas" class="cam-peak-canvas hidden"></canvas>
     <div id="camFocusRing" class="cam-focus-ring"></div>
     <div id="camUpcBadge" class="cam-upc-badge hidden"></div>
     <div id="camFlash" class="cam-flash"></div>
@@ -693,8 +718,9 @@
 
 <!-- Floating 30s Audio Mini-Player -->
 <div id="audioBar" class="audio-bar hidden">
+  <div id="audioArt" class="audio-art">📼</div>
   <button id="audioPlayBtn" class="audio-play-btn" onclick="toggleHighlightAudio()">▶</button>
-  <div class="audio-meta">
+  <div class="audio-meta" onclick="handleAudioMetaClick()">
     <div id="audioMarqueeWrap" class="marquee-wrap">
       <span id="audioTitle" class="audio-title">Loading 30s highlight...</span>
     </div>
@@ -714,7 +740,7 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="apis.js?v=1.9.3"></script>
-<script src="app.js?v=1.9.3"></script>
+<script src="apis.js?v=1.9.4"></script>
+<script src="app.js?v=1.9.4"></script>
 </body>
 </html>

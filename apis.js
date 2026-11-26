@@ -42,6 +42,8 @@
     geminiModel: 'gemini-3.5-flash-lite',
     autoPlayHighlight: true,
     autoDetective: true,
+    autoGradeOnScan: false,
+    preferredCameraId: '',
     discogsToken: '',
     discogsUser: '',
     discogsFolderId: '1',
@@ -527,7 +529,7 @@
     const isVarious = !targetArtist || /^various(\s+artists)?$/i.test(targetArtist.trim());
     const aSim = isVarious ? 0.7 : CC.similarity(targetArtist, candArtist || '');
     const isTribute = /karaoke|tribute|cover band|lullaby|in the style of/i.test(`${candArtist} ${candAlbum} ${candTrack}`);
-    if (isTribute) return { score: -1, versionMatched: false };
+    if (isTribute) return { score: -1, versionMatched: false, safeAlt: false };
 
     const req = splitTrackVersion(rawTrack);
     const cand = splitTrackVersion(candTrack);
@@ -582,8 +584,8 @@
     };
 
     if (strictTrack && req.base) {
-      if (tSimBase < 0.45) return { score: -1, versionMatched: false };
-      if (!isVarious && aSim < 0.35) return { score: -1, versionMatched: false };
+      if (tSimBase < 0.45) return { score: -1, versionMatched: false, safeAlt: false };
+      if (!isVarious && aSim < 0.35) return { score: -1, versionMatched: false, safeAlt: false };
 
       let score = tSimBase * 0.50 + aSim * 0.25 + albSim * 0.18;
       let versionMatched = !req.version;
@@ -614,12 +616,13 @@
         else score += 0.12;
       }
       score = applyEraAndAltAdjustments(score);
-      return { score, versionMatched };
+      const safeAlt = tSimBase >= 0.55 && (isVarious || aSim >= 0.45);
+      return { score, versionMatched, safeAlt };
     }
 
-    if (!isVarious && aSim < 0.45) return { score: -1, versionMatched: false };
-    if (targetAlbum && albSim < 0.35) return { score: -1, versionMatched: false };
-    return { score: applyEraAndAltAdjustments(aSim * 0.55 + albSim * 0.45), versionMatched: true };
+    if (!isVarious && aSim < 0.45) return { score: -1, versionMatched: false, safeAlt: false };
+    if (targetAlbum && albSim < 0.35) return { score: -1, versionMatched: false, safeAlt: false };
+    return { score: applyEraAndAltAdjustments(aSim * 0.55 + albSim * 0.45), versionMatched: true, safeAlt: false };
   }
 
   async function queryApple(term, artist, rawTrack, album, strictTrack, targetYear = null) {
@@ -633,7 +636,7 @@
         .map(r => {
           const candYear = extractYear4(r.releaseDate);
           const ev = scoreAudioCandidate(r.artistName, r.trackName, r.collectionName, artist, rawTrack, album, strictTrack, targetYear, candYear);
-          return { r, score: ev.score, versionMatched: ev.versionMatched };
+          return { r, score: ev.score, versionMatched: ev.versionMatched, safeAlt: Boolean(ev.safeAlt) };
         })
         .filter(x => x.score > 0)
         .sort((a, b) => b.score - a.score)[0];
@@ -644,7 +647,8 @@
         trackName: best.r.trackName,
         artistName: best.r.artistName,
         score: best.score,
-        exactVersion: best.versionMatched
+        exactVersion: best.versionMatched,
+        safeAlt: best.safeAlt
       };
     } catch (_) { return null; }
   }
@@ -664,7 +668,7 @@
           .map(x => {
             const candYear = extractYear4(x.album?.release_date || x.release_date);
             const ev = scoreAudioCandidate(x.artist?.name, x.title, x.album?.title, artist, rawTrack, album, strictTrack, targetYear, candYear);
-            return { x, score: ev.score, versionMatched: ev.versionMatched };
+            return { x, score: ev.score, versionMatched: ev.versionMatched, safeAlt: Boolean(ev.safeAlt) };
           })
           .filter(y => y.score > 0)
           .sort((a, b) => b.score - a.score)[0];
@@ -675,7 +679,8 @@
             trackName: best.x.title,
             artistName: best.x.artist?.name || artist,
             score: best.score,
-            exactVersion: best.versionMatched
+            exactVersion: best.versionMatched,
+            safeAlt: best.safeAlt
           });
         } else resolve(null);
       };
