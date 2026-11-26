@@ -23,6 +23,8 @@
 
   let spotifyProfile = null;
   let spotifyCheckpoint = null;
+  let spotifyCooldownTimer = null;
+  let spotifySyncActive = false;
   let discogsCollectionIndex = null;
   let stashCache = [];
   let currentView = 'scan';
@@ -133,8 +135,8 @@
 
   function renderBanner(el, text, show, cancellable) {
     if (!el) return;
-    if (!show) { el.classList.remove('show'); return; }
-    el.style.borderColor = cancellable ? 'var(--yellow)' : '';
+    if (!show) { el.classList.remove('show', 'is-cancellable'); return; }
+    el.classList.toggle('is-cancellable', Boolean(cancellable));
     el.innerHTML = `
       <div class="spinner"></div>
       <div style="flex:1; font-size:0.84rem;">${esc(text)}</div>
@@ -3245,7 +3247,7 @@ Return ONLY valid JSON:
       const showArt = lArt && norm(lArt) !== norm(item.artist) && !/^various/i.test(lArt);
       const fn = source === 'stash' ? 'previewStashLitmus()' : 'previewLitmusTrack()';
       const litmusKey = normFull(`${lArt || ''}|${item.litmus_track}`);
-      html += `<div class="notable-row" style="border-bottom:1px solid rgba(255,255,255,0.12); padding-bottom:9px; margin-bottom:6px;">
+      html += `<div class="notable-row litmus-row">
         <div><strong>🎧 Test Song:</strong> ${showArt ? `${esc(lArt)} — ` : ''}${esc(item.litmus_track)}</div>
         <button type="button" class="play-pill-btn sm" data-play-key="${esc(litmusKey)}" onclick="${fn}" title="Play Test Song">▶</button>
       </div>`;
@@ -3820,7 +3822,7 @@ Return ONLY valid JSON:
       return;
     }
 
-    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v202`;
+    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v203`;
     if (tasteCache.has(cacheKey)) { applyTasteUI(item, tasteCache.get(cacheKey), myRunId); return; }
 
     const tracksStr = (item.tracklist || []).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title).join('; ');
@@ -5787,7 +5789,7 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
         'notable_songs', 'litmus_track', 'litmus_artist', 'taste_scored_at'
       ]);
 
-      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v202`);
+      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v203`);
       await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
       await loadStashCache();
       renderStash();
@@ -7048,10 +7050,14 @@ Return ONLY valid JSON:
         await refreshAllAfterCloudPull(res);
         if (!quiet) {
           setStatus('', false);
-          const photoNote = res.downloadedPhotos ? ` · ↓${res.downloadedPhotos} photo(s)` : '';
-          const confNote = res.conflicts?.length ? ` · ⚠️ ${res.conflicts.length} conflict(s) saved for review` : '';
-          const errNote = res.partialErrors?.length ? ` · ⚠️ ${res.partialErrors.length} warning(s)` : '';
-          toast(`⬇️ Loaded ${res.stashCount} Stash item(s) from ${res.email}${photoNote}${confNote}${errNote}`, 4200);
+          if (res.repairSummary) {
+            toast(`🧹 ${res.repairSummary}`, 5200);
+          } else {
+            const photoNote = res.downloadedPhotos ? ` · ↓${res.downloadedPhotos} photo(s)` : '';
+            const confNote = res.conflicts?.length ? ` · ⚠️ ${res.conflicts.length} conflict(s) saved for review` : '';
+            const errNote = res.partialErrors?.length ? ` · ⚠️ ${res.partialErrors.length} warning(s)` : '';
+            toast(`⬇️ Loaded ${res.stashCount} Stash item(s) from ${res.email}${photoNote}${confNote}${errNote}`, 4200);
+          }
         }
         return res;
       } catch (err) {
@@ -7117,11 +7123,15 @@ Return ONLY valid JSON:
         if (res.remainingPending > 0) cloudFollowupNeeded = true;
         if (!quiet) {
           setStatus('', false);
-          const photoNote = (res.uploadedPhotos || res.downloadedPhotos)
-            ? ` · ↑${res.uploadedPhotos} ↓${res.downloadedPhotos} photos`
-            : '';
-          const confNote = res.conflicts?.length ? ` · ⚠️ ${res.conflicts.length} conflict(s)` : '';
-          toast(`☁️ Synced ${res.stashCount} Stash item(s) (↑${res.uploadedBatches} batch${res.uploadedBatches === 1 ? '' : 'es'})${photoNote}${confNote}`, 4000);
+          if (res.repairSummary) {
+            toast(`☁️ ${res.repairSummary}`, 5200);
+          } else {
+            const photoNote = (res.uploadedPhotos || res.downloadedPhotos)
+              ? ` · ↑${res.uploadedPhotos} ↓${res.downloadedPhotos} photos`
+              : '';
+            const confNote = res.conflicts?.length ? ` · ⚠️ ${res.conflicts.length} conflict(s)` : '';
+            toast(`☁️ Synced ${res.stashCount} Stash item(s) (↑${res.uploadedBatches} batch${res.uploadedBatches === 1 ? '' : 'es'})${photoNote}${confNote}`, 4000);
+          }
         }
         return res;
       } catch (err) {
@@ -7236,13 +7246,17 @@ Return ONLY valid JSON:
         scheduleGoogleAutoSync();
         if (!quiet) {
           setStatus('', false);
-          const parts = [];
-          if (recRes.addedCount) parts.push(`+${recRes.addedCount} added`);
-          if (recRes.movedCount) parts.push(`${recRes.movedCount} moved`);
-          if (recRes.removedCount) parts.push(`${recRes.removedCount} removed`);
-          if (recRes.ambiguousCount) parts.push(`⚠️ ${recRes.ambiguousCount} link check`);
-          const summary = parts.length ? parts.join(' · ') : 'all copies & folders up to date';
-          toast(`📀 Discogs synced (${recRes.totalCopies} copies · ${recRes.folders.length} folders): ${summary}`, 4200);
+          if (recRes.repairSummary) {
+            toast(`📀 ${recRes.repairSummary}`, 5200);
+          } else {
+            const parts = [];
+            if (recRes.addedCount) parts.push(`+${recRes.addedCount} added`);
+            if (recRes.movedCount) parts.push(`${recRes.movedCount} moved`);
+            if (recRes.removedCount) parts.push(`${recRes.removedCount} removed`);
+            if (recRes.ambiguousCount) parts.push(`⚠️ ${recRes.ambiguousCount} link check`);
+            const summary = parts.length ? parts.join(' · ') : 'all copies & folders up to date';
+            toast(`📀 Discogs synced (${recRes.totalCopies} copies · ${recRes.folders.length} folders): ${summary}`, 4200);
+          }
         }
         return recRes;
       } catch (err) {
@@ -7390,21 +7404,86 @@ Return ONLY valid JSON:
     document.getElementById('discogsUserBadge').textContent = cfg.discogsUser ? `Connected: @${cfg.discogsUser}` : '';
   }
 
+  function hasActiveSpotifyCheckpoint() {
+    return Boolean(spotifyCheckpoint && spotifyCheckpoint.stage && spotifyCheckpoint.stage !== 'done');
+  }
+
+  function ensureSpotifyCooldownTicker() {
+    clearInterval(spotifyCooldownTimer);
+    spotifyCooldownTimer = null;
+    if (CC.getSpotifyCooldownRemainingSec() <= 0) return;
+    spotifyCooldownTimer = setInterval(() => {
+      updateSpotifyUI();
+      if (CC.getSpotifyCooldownRemainingSec() <= 0) {
+        clearInterval(spotifyCooldownTimer);
+        spotifyCooldownTimer = null;
+        updateSpotifyUI();
+      }
+    }, 1000);
+  }
+
   window.startSpotifyAuth = async (mode = 'liked') => {
     saveSettings(true);
+    if (spotifySyncActive || CC.isSpotifySyncRunning()) {
+      toast('Spotify sync is already running');
+      return;
+    }
+    const remCd = CC.getSpotifyCooldownRemainingSec();
+    if (remCd > 0) {
+      updateSpotifyUI();
+      toast(`Spotify is cooling down (${remCd}s remaining) — wait before starting or resuming.`, 3800);
+      return;
+    }
     const syncMode = mode === 'full' ? 'full' : 'liked';
+    const modeLabel = syncMode === 'full' ? 'Sync Full Library' : 'Sync Liked Songs';
+
+    // Never accidentally discard saved checkpoint progress on a stray tap!
+    if (hasActiveSpotifyCheckpoint()) {
+      const prog = CC.formatSpotifyProgress(spotifyCheckpoint);
+      const ok = confirm(`You have a saved Spotify sync in progress (${prog}).\n\nDiscard saved progress and start a fresh "${modeLabel}" run?`);
+      if (!ok) return;
+      await CC.clearSpotifyCheckpoint();
+      spotifyCheckpoint = null;
+      updateSpotifyUI();
+    }
+
     if (!cfg.spotifyClientId) { toast('Paste Spotify Client ID first'); return; }
     if (!window.crypto?.subtle) { toast('Spotify login requires HTTPS'); return; }
     if (cfg.spotifyRefreshToken && await CC.refreshSpotifyToken()) {
       await runSpotifySyncUI(syncMode, false);
       return;
     }
-    await CC.beginSpotifyRedirect(syncMode);
+    await CC.beginSpotifyRedirect(syncMode, { resumeOnReturn: false });
   };
 
   window.resumeSpotifySyncUI = async () => {
     saveSettings(true);
+    if (spotifySyncActive || CC.isSpotifySyncRunning()) {
+      toast('Spotify sync is already running');
+      return;
+    }
+    if (!hasActiveSpotifyCheckpoint()) {
+      toast('No saved Spotify run to resume');
+      return;
+    }
+    const remCd = CC.getSpotifyCooldownRemainingSec();
+    if (remCd > 0) {
+      updateSpotifyUI();
+      toast(`Spotify cooldown active — ${remCd}s remaining`, 3400);
+      return;
+    }
     if (!cfg.spotifyClientId) { toast('Paste Spotify Client ID first'); return; }
+
+    // If previous pause was HTTP 401 (expired login), refresh or reconnect and resume the exact same saved run!
+    if (spotifyCheckpoint?.lastError?.needsReconnect) {
+      if (cfg.spotifyRefreshToken && await CC.refreshSpotifyToken()) {
+        await runSpotifySyncUI('resume', true);
+        return;
+      }
+      await CC.beginSpotifyRedirect(spotifyCheckpoint?.mode || 'liked', { resumeOnReturn: true });
+      return;
+    }
+
     if (cfg.spotifyRefreshToken && await CC.refreshSpotifyToken()) {
       await runSpotifySyncUI('resume', true);
       return;
@@ -7413,12 +7492,15 @@ Return ONLY valid JSON:
       await runSpotifySyncUI('resume', true);
       return;
     }
-    await CC.beginSpotifyRedirect(spotifyCheckpoint?.mode || 'liked');
+    await CC.beginSpotifyRedirect(spotifyCheckpoint?.mode || 'liked', { resumeOnReturn: true });
   };
 
   async function runSpotifySyncUI(mode = 'liked', resume = false) {
+    if (spotifySyncActive || CC.isSpotifySyncRunning()) return;
     switchView('settings');
     document.getElementById('accMusic').open = true;
+    spotifySyncActive = true;
+    updateSpotifyUI();
     try {
       const prevDna = spotifyProfile?.tasteDna || document.getElementById('cfgTasteDna').value.trim();
       const prevSoftSpots = spotifyProfile?.softSpots || document.getElementById('cfgSoftSpots').value.trim();
@@ -7426,41 +7508,50 @@ Return ONLY valid JSON:
         mode,
         resume,
         existingDna: prevDna,
-        existingSoftSpots: prevSoftSpots
+        existingSoftSpots: prevSoftSpots,
+        autoCommitProfile: true
       });
 
       if (res.completed && res.profile) {
         spotifyProfile = res.profile;
         spotifyCheckpoint = null;
-        await CC.commitLocalMutation({
-          metaPuts: [{ key: 'spotify_profile', value: spotifyProfile }],
-          extraOps: [{ type: 'spotify_profile', profile: spotifyProfile }],
-          queueOutbox: true
-        });
         tasteCache.clear();
         document.getElementById('cfgTasteDna').value = spotifyProfile.tasteDna || '';
         document.getElementById('cfgSoftSpots').value = spotifyProfile.softSpots || '';
-        updateSpotifyUI();
         setStatus('', false);
         updateCloudUI();
         scheduleGoogleAutoSync();
-        toast(`🎧 Synced ${spotifyProfile.totalTracks} tracks & ${spotifyProfile.totalArtists} artists (${spotifyProfile.syncMode === 'full' ? 'Full Library' : 'Liked Songs'})!`, 4500);
+        const modeTxt = spotifyProfile.syncMode === 'full' ? 'Sync Full Library' : 'Sync Liked Songs';
+        const skipped = Array.isArray(res.skippedPlaylists) ? res.skippedPlaylists : [];
+        const skipTxt = skipped.length
+          ? ` · Skipped ${skipped.length} inaccessible playlist${skipped.length === 1 ? '' : 's'} (${skipped.map(s => s.name).join(', ')})`
+          : '';
+        toast(`🎧 ${modeTxt} complete: ${spotifyProfile.totalTracks.toLocaleString()} tracks & ${spotifyProfile.totalArtists.toLocaleString()} artists${skipTxt}`, 5200);
         return;
       }
 
       if (res.paused) {
-        // Preserve prior usable spotifyProfile, Taste Profile, and Soft Spots untouched!
-        spotifyCheckpoint = res.checkpoint || await CC.getSpotifyCheckpoint();
-        updateSpotifyUI();
+        // Keep existing completed spotifyProfile, Taste Profile, and Soft Spots completely untouched!
+        spotifyCheckpoint = res.checkpoint ? CC.normalizeSpotifyCheckpoint(res.checkpoint) : await CC.getSpotifyCheckpoint();
         setStatus('', false);
-        const waitHint = res.retryAfterSec ? ` Wait ~${res.retryAfterSec}s then tap ▶ Resume Spotify Sync.` : ' Tap ▶ Resume Spotify Sync when ready.';
-        toast(`⏸️ Spotify sync paused with progress saved.${waitHint}`, 5400);
+        if (res.reason === 'rate_limit') {
+          ensureSpotifyCooldownTicker();
+          toast(`⏸️ Spotify HTTP 429 during ${res.stageLabel || res.stage || 'sync'} — wait ${res.retryAfterSec || CC.getSpotifyCooldownRemainingSec()}s then tap Resume Spotify Sync.`, 5600);
+        } else if (res.reason === 'auth_expired') {
+          toast('🔑 Spotify login expired (HTTP 401) — tap Resume Spotify Sync to reconnect and continue where you left off.', 5600);
+        } else if (res.reason === 'http_error') {
+          toast(`⚠️ Spotify sync paused (HTTP ${res.status || '?'} during ${res.stageLabel || res.stage || 'sync'}). Progress saved — tap Resume Spotify Sync.`, 5600);
+        } else if (res.reason !== 'already_running') {
+          toast('⏸️ Spotify sync paused with progress saved. Tap Resume Spotify Sync when ready.', 4600);
+        }
       }
     } catch (err) {
       setStatus('', false);
       spotifyCheckpoint = await CC.getSpotifyCheckpoint();
-      updateSpotifyUI();
       if (err.name !== 'AbortError') toast('Spotify sync error: ' + err.message, 5000);
+    } finally {
+      spotifySyncActive = false;
+      updateSpotifyUI();
     }
   }
 
@@ -7518,42 +7609,106 @@ Return ONLY valid JSON:
     const pill = document.getElementById('spotifyPill');
     const sum = document.getElementById('spotifySummary');
     const dnaSum = document.getElementById('dnaSummary');
-    const resBox = document.getElementById('spotifyResumeBox');
+    const runStatus = document.getElementById('spotifyRunStatus');
     const resBtn = document.getElementById('btnResumeSpotify');
+    const resHint = document.getElementById('spotifyResumeHint');
+    const btnLiked = document.getElementById('btnSyncSpotifyLiked');
+    const btnFull = document.getElementById('btnSyncSpotifyFull');
 
+    // 1. Active completed profile (always labeled separately from any in-progress/paused sync!)
     if (spotifyProfile && spotifyProfile.totalArtists > 0) {
       pill.textContent = `Spotify: ${spotifyProfile.totalArtists} art`;
       pill.className = 'pill ok';
       const pl = spotifyProfile.totalPlaylists ? ` · ${spotifyProfile.totalPlaylists} playlists` : '';
-      const modeTag = spotifyProfile.syncMode === 'liked' ? ' [Liked Songs]' : (spotifyProfile.syncMode === 'full' ? ' [Full Library]' : '');
-      sum.textContent = `✅ Synced locally (${spotifyProfile.userDisplayName})${modeTag}: ${spotifyProfile.totalTracks} tracks · ${spotifyProfile.totalArtists} artists${pl}`;
+      const modeTag = spotifyProfile.syncMode === 'liked' ? 'Liked Songs' : (spotifyProfile.syncMode === 'full' ? 'Full Library' : 'Library');
+      const skipped = Array.isArray(spotifyProfile.skippedPlaylists) && spotifyProfile.skippedPlaylists.length
+        ? ` · ${spotifyProfile.skippedPlaylists.length} skipped (${spotifyProfile.skippedPlaylists.map(s => s.name).join(', ')})`
+        : '';
+      sum.textContent = `Active profile (${spotifyProfile.userDisplayName} · ${modeTag}): ${Number(spotifyProfile.totalTracks || 0).toLocaleString()} tracks · ${Number(spotifyProfile.totalArtists || 0).toLocaleString()} artists${pl}${skipped}`;
     } else {
       pill.textContent = 'Spotify: Off';
       pill.className = 'pill';
-      sum.textContent = 'Not synced yet (local exact matching disabled).';
+      sum.textContent = 'Active profile: Not synced yet (local exact matching disabled).';
     }
 
-    if (resBox && resBtn) {
-      if (spotifyCheckpoint && spotifyCheckpoint.stage && spotifyCheckpoint.stage !== 'done') {
-        const modeLbl = spotifyCheckpoint.mode === 'full' ? 'Full Library Pass' : 'Liked Songs';
-        const progressParts = [];
-        if (spotifyCheckpoint.scannedLiked) progressParts.push(`${spotifyCheckpoint.scannedLiked} liked songs (page ${spotifyCheckpoint.pageNum || 0})`);
-        if (spotifyCheckpoint.scannedAlbums) progressParts.push(`${spotifyCheckpoint.scannedAlbums} albums`);
-        if (spotifyCheckpoint.stage === 'playlist_items') progressParts.push(`playlist ${(spotifyCheckpoint.playlistIdx || 0) + 1}/${(spotifyCheckpoint.ownedPlaylists || []).length}`);
-        resBox.textContent = `⏸️ Paused ${modeLbl} checkpoint saved (${spotifyCheckpoint.userDisplayName || 'Spotify'}): ${progressParts.join(' · ') || `stage: ${spotifyCheckpoint.stage}`}. Your previous Spotify profile & Taste Profile remain active.`;
-        resBox.classList.remove('hidden');
-        resBtn.classList.remove('hidden');
+    // 2. Current / paused sync status & button states (no checkpoint, running, cooldown, ready to resume, completed)
+    const isRunning = Boolean(spotifySyncActive || CC.isSpotifySyncRunning());
+    const hasCp = hasActiveSpotifyCheckpoint();
+    const cooldownSec = CC.getSpotifyCooldownRemainingSec();
+
+    if (runStatus) {
+      if (isRunning) {
+        const curProg = hasCp ? CC.formatSpotifyProgress(spotifyCheckpoint) : 'Syncing with Spotify...';
+        runStatus.textContent = `⏳ Current sync: ${curProg}`;
+        runStatus.className = 'spotify-status-box is-running';
+      } else if (hasCp) {
+        const modeLbl = spotifyCheckpoint.mode === 'full' ? 'Sync Full Library' : 'Sync Liked Songs';
+        const progTxt = CC.formatSpotifyProgress(spotifyCheckpoint);
+        runStatus.textContent = `Saved run (${modeLbl}): ${progTxt}`;
+        runStatus.className = 'spotify-status-box is-paused';
       } else {
-        resBox.classList.add('hidden');
-        resBox.textContent = '';
-        resBtn.classList.add('hidden');
+        runStatus.textContent = '';
+        runStatus.className = 'spotify-status-box hidden';
+      }
+    }
+
+    if (btnLiked && btnFull && resBtn && resHint) {
+      if (isRunning) {
+        btnLiked.disabled = true;
+        btnFull.disabled = true;
+        resBtn.disabled = true;
+        resBtn.className = 'btn btn-secondary btn-sm';
+        resBtn.textContent = '⏳ Syncing Spotify...';
+        resHint.textContent = 'A Spotify sync is currently running.';
+      } else if (hasCp && cooldownSec > 0) {
+        btnLiked.disabled = true;
+        btnFull.disabled = true;
+        btnLiked.className = 'btn btn-secondary btn-sm';
+        btnFull.className = 'btn btn-secondary btn-sm';
+        resBtn.disabled = true;
+        resBtn.className = 'btn btn-secondary btn-sm';
+        resBtn.textContent = `⏳ Resume Spotify Sync (${cooldownSec}s)`;
+        resHint.textContent = `Spotify rate limit cooldown active — ${cooldownSec}s remaining. Requests are paused until cooldown ends.`;
+        ensureSpotifyCooldownTicker();
+      } else if (hasCp) {
+        // Checkpoint ready to resume: Resume becomes the PRIMARY prominent action; fresh syncs are secondary & confirm-guarded!
+        btnLiked.disabled = false;
+        btnFull.disabled = false;
+        btnLiked.className = 'btn btn-secondary btn-sm';
+        btnFull.className = 'btn btn-secondary btn-sm';
+        resBtn.disabled = false;
+        resBtn.className = 'btn btn-spotify btn-sm';
+        resBtn.textContent = spotifyCheckpoint?.lastError?.needsReconnect
+          ? '🔑 Reconnect & Resume Spotify Sync'
+          : '▶ Resume Spotify Sync';
+        resHint.textContent = spotifyCheckpoint?.lastError?.needsReconnect
+          ? 'Your Spotify login expired. Reconnect to continue this exact saved run without losing progress.'
+          : 'Ready to resume where you left off. Starting a new sync above will ask before discarding saved progress.';
+      } else if (cooldownSec > 0) {
+        btnLiked.disabled = true;
+        btnFull.disabled = true;
+        resBtn.disabled = true;
+        resBtn.className = 'btn btn-secondary btn-sm';
+        resBtn.textContent = `▶ Resume Spotify Sync`;
+        resHint.textContent = `Spotify rate limit cooldown: ${cooldownSec}s remaining. No saved run to resume.`;
+        ensureSpotifyCooldownTicker();
+      } else {
+        // No checkpoint & idle
+        btnLiked.disabled = false;
+        btnFull.disabled = false;
+        btnLiked.className = 'btn btn-spotify btn-sm';
+        btnFull.className = 'btn btn-secondary btn-sm';
+        resBtn.disabled = true;
+        resBtn.className = 'btn btn-secondary btn-sm';
+        resBtn.textContent = '▶ Resume Spotify Sync';
+        resHint.textContent = 'No saved run to resume.';
       }
     }
 
     const ssTag = spotifyProfile?.softSpots ? ' · Soft Spots active' : '';
     dnaSum.textContent = spotifyProfile?.tasteDna
       ? `✅ Taste Profile active (${spotifyProfile.tasteDna.length} chars)${ssTag}`
-      : `Tip: Write your Taste Profile above (or tap optional 🧠 Auto-Draft Profile after syncing Spotify).${ssTag}`;
+      : `Write your Taste Profile above, or tap 🧠 Auto-Draft Profile after syncing Spotify.${ssTag}`;
     updateSettingsPills();
   }
 
@@ -7579,11 +7734,17 @@ Return ONLY valid JSON:
     CC.setStatusCallback(setStatus);
     CC.setRateCallback(updateRatePill);
     await CC.openDB();
+    // Automatically repair any verified duplicate Discogs copies locally on startup (zero Discogs/Drive writes!)
+    const startupRepair = await CC.repairLocalDiscogsDuplicates().catch(() => null);
     await loadStashCache();
+    if (startupRepair?.repairSummary) {
+      setTimeout(() => toast(`🧹 ${startupRepair.repairSummary}`, 5200), 600);
+    }
 
     const spRec = await CC.idbGet('meta', 'spotify_profile');
     if (spRec?.value) spotifyProfile = spRec.value;
     spotifyCheckpoint = await CC.getSpotifyCheckpoint();
+    if (CC.getSpotifyCooldownRemainingSec() > 0) ensureSpotifyCooldownTicker();
 
     const dcRec = await CC.idbGet('meta', 'discogs_collection_index');
     if (dcRec?.value) discogsCollectionIndex = dcRec.value;
@@ -7680,12 +7841,14 @@ Return ONLY valid JSON:
     } else if (p.get('code')) {
       const code = p.get('code'), state = p.get('state');
       const savedMode = localStorage.getItem('sp_sync_mode') || 'liked';
+      const wantResume = localStorage.getItem('sp_resume_on_return') === '1';
+      localStorage.removeItem('sp_resume_on_return');
       history.replaceState({ view: 'scan', modal: null }, '', location.pathname);
       setStatus('Connecting Spotify...', true);
       try {
         await CC.exchangeSpotifyCode(code, state);
-        const hasCp = Boolean(spotifyCheckpoint && spotifyCheckpoint.mode === savedMode);
-        await runSpotifySyncUI(savedMode, hasCp);
+        const shouldResume = Boolean(hasActiveSpotifyCheckpoint() && (wantResume || spotifyCheckpoint.mode === savedMode));
+        await runSpotifySyncUI(shouldResume ? 'resume' : savedMode, shouldResume);
       } catch (e) { setStatus('', false); toast('Spotify error: ' + e.message, 4500); }
     } else {
       try { history.replaceState({ view: 'scan', modal: null }, ''); } catch (_) {}

@@ -7,13 +7,13 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>Soft Spot — Physical Media Scanner</title>
-  <link rel="stylesheet" href="style.css?v=2.0.2" />
+  <link rel="stylesheet" href="style.css?v=2.0.3" />
   <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
 <header>
-  <div class="brand">📼 Soft Spot <span class="ver-tag">v2.0.2</span></div>
+  <div class="brand">📼 Soft Spot <span class="ver-tag">v2.0.3</span></div>
   <div class="status-pills">
     <span id="cloudPill" class="pill" title="Google Drive Cloud Sync" onclick="handleCloudPillClick()">Cloud: Off</span>
     <span id="aiPill" class="pill" title="Gemini Cloud AI status" onclick="switchView('settings')">Gemini: Off</span>
@@ -25,14 +25,14 @@
 <main>
   <!-- ==================== SCANNER VIEW ==================== -->
   <section id="view-scan" class="view active">
-    <div id="setupNotice" class="card hidden" style="border-color: var(--yellow); background: var(--yellow-bg);">
+    <div id="setupNotice" class="card card-warn hidden">
       <div style="font-weight: 800; color: #fde68a; margin-bottom: 4px;">Finish Quick Setup First</div>
       <p style="color: #fef3c7; font-size: 0.84rem; margin-bottom: 8px;">Configure your Gemini API Key &amp; Discogs Token in Settings.</p>
       <button class="btn btn-sm" onclick="switchView('settings')">⚙️ Open Settings</button>
     </div>
 
     <!-- Edit / Re-Check Existing Stash Item Banner -->
-    <div id="editModeBanner" class="card hidden" style="border-color: var(--purple); border-left: 3px solid var(--purple); background: var(--card-2);">
+    <div id="editModeBanner" class="card card-edit hidden">
       <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px;">
         <strong style="font-size:0.9rem; color:#e9d5ff;">🔄 Editing Stash Item</strong>
         <button type="button" class="btn btn-secondary btn-sm" style="min-height:30px; padding:4px 10px;" onclick="cancelEditMode()">Cancel Edit</button>
@@ -391,7 +391,7 @@
           <input id="cfgGoogleSyncSecrets" type="checkbox" style="width:20px; height:20px;" onchange="saveSettings(true)" />
         </div>
 
-        <details style="margin-top:10px; border-top:1px solid var(--border); padding-top:9px;">
+        <details class="settings-subsection">
           <summary style="font-size:0.78rem; color:var(--muted);">Advanced: Self-Hosting / Custom Google Client ID</summary>
           <div style="margin-top:10px;">
             <div class="inline-guide">
@@ -567,9 +567,13 @@
           <textarea id="cfgSoftSpots" rows="3" placeholder="Italo Disco, 80s Euro-dance, synthwave, game/movie soundtracks..."></textarea>
         </div>
 
-        <button type="button" class="btn btn-sm" style="margin-bottom:14px;" onclick="saveTasteDnaManual()">💾 Save Taste Profile &amp; Soft Spots</button>
+        <div class="btn-row" style="margin-top:0; margin-bottom:8px;">
+          <button type="button" class="btn btn-sm" style="width:100%;" onclick="saveTasteDnaManual()">💾 Save Taste Profile</button>
+          <button id="btnAnalyzeDna" type="button" class="btn btn-secondary btn-sm" style="width:100%;" onclick="analyzeFullSpotifyDNA()">🧠 Auto-Draft Profile</button>
+        </div>
+        <div id="dnaSummary" style="font-size:0.78rem; color:var(--muted); margin-bottom:14px;"></div>
 
-        <!-- Spotify Local Zero-AI Exact Matching + Optional One-Time AI Draft -->
+        <!-- Spotify Local Zero-AI Exact Matching -->
         <div class="sub-panel" style="margin-bottom:12px;">
           <div style="font-weight:800; font-size:0.88rem; margin-bottom:4px;">🟢 Spotify Local Library Sync (Zero-AI Exact Matcher)</div>
           <p style="font-size:0.78rem; margin-bottom:8px;">
@@ -585,30 +589,30 @@
             <button class="btn btn-secondary btn-sm" onclick="copyRedirectUri()">Copy</button>
           </div>
 
-          <div id="spotifySummary" style="font-size:0.84rem; color:var(--spotify); font-weight:700; margin:8px 0 4px;">Not synced yet.</div>
-          <div id="spotifyResumeBox" class="hidden" style="margin:6px 0 8px; padding:8px 10px; background:#141414; border:1px solid var(--yellow); border-left:3px solid var(--yellow); font-size:0.78rem; color:#fde68a;"></div>
-          <div id="dnaSummary" style="font-size:0.78rem; color:var(--muted); margin-bottom:10px;"></div>
+          <div id="spotifySummary" style="font-size:0.82rem; color:var(--spotify); font-weight:700; margin:10px 0 6px;">Active profile: Not synced yet.</div>
+          <div id="spotifyRunStatus" class="spotify-status-box hidden"></div>
 
-          <div class="btn-row" style="margin-top:0; margin-bottom:8px;">
-            <button class="btn btn-spotify btn-sm" style="width:100%;" onclick="startSpotifyAuth('liked')">💚 Sync Liked Songs</button>
-            <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="startSpotifyAuth('full')">🎧 Full Library Pass</button>
+          <div class="btn-row" style="margin-top:8px; margin-bottom:6px;">
+            <button id="btnSyncSpotifyLiked" type="button" class="btn btn-spotify btn-sm" style="width:100%;" onclick="startSpotifyAuth('liked')">💚 Sync Liked Songs</button>
+            <button id="btnSyncSpotifyFull" type="button" class="btn btn-secondary btn-sm" style="width:100%;" onclick="startSpotifyAuth('full')">🎧 Sync Full Library</button>
           </div>
-          <div class="btn-row" style="margin-top:0; margin-bottom:8px;">
-            <button id="btnResumeSpotify" type="button" class="btn btn-green btn-sm hidden" style="width:100%;" onclick="resumeSpotifySyncUI()">▶ Resume Spotify Sync</button>
-            <button id="btnAnalyzeDna" class="btn btn-secondary btn-sm" style="width:100%;" onclick="analyzeFullSpotifyDNA()">🧠 Auto-Draft Profile</button>
-          </div>
-          <div style="font-size:0.73rem; color:var(--muted); margin-bottom:8px;">
-            Optional one-time helper: <strong>Auto-Draft Profile</strong> asks Gemini to summarize your synced Spotify library into the editable box above.
+          <div style="font-size:0.74rem; color:var(--muted); margin-bottom:10px;">
+            <strong>Sync Full Library</strong> includes Liked Songs, saved albums, top artists and tracks, and accessible playlists.
           </div>
 
-          <details>
+          <div class="spotify-resume-card">
+            <button id="btnResumeSpotify" type="button" class="btn btn-secondary btn-sm" style="width:100%;" onclick="resumeSpotifySyncUI()" disabled>▶ Resume Spotify Sync</button>
+            <div id="spotifyResumeHint" style="font-size:0.75rem; color:var(--muted); margin-top:6px;">No saved run to resume.</div>
+          </div>
+
+          <details style="margin-top:10px;">
             <summary style="font-size:0.8rem;">Optional: Merge Exportify CSV (for playlists made by others)</summary>
             <p style="margin-top:6px; font-size:0.78rem;">Export any playlist at <strong>exportify.net</strong> and import the CSV here.</p>
             <input id="csvImportInput" type="file" accept=".csv" onchange="importExportifyCSV(this.files[0])" />
           </details>
         </div>
 
-        <div style="border-top:1px solid var(--border); padding-top:10px;">
+        <div class="settings-subsection">
           <div style="font-weight:800; font-size:0.88rem; margin-bottom:4px;">▲ Mini-Player "Open In" Platforms</div>
           <p style="font-size:0.78rem; margin-bottom:6px;">Only shows platforms toggled ON here <em>and</em> where the song is actually available (Apple Music &amp; Deezer need zero API keys).</p>
           <div class="toggle-row">
@@ -832,7 +836,7 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="apis.js?v=2.0.2"></script>
-<script src="app.js?v=2.0.2"></script>
+<script src="apis.js?v=2.0.3"></script>
+<script src="app.js?v=2.0.3"></script>
 </body>
 </html>
