@@ -6,7 +6,7 @@ A zero-backend, sharp monochrome industrial Progressive Web App (PWA) for scanni
 
 ---
 
-## Core Features (v2.3.0)
+## Core Features (v2.3.1)
 
 | Area | Highlights |
 | --- | --- |
@@ -37,7 +37,7 @@ A zero-backend, sharp monochrome industrial Progressive Web App (PWA) for scanni
 
 ## Upgrading & Domain Migration Notes
 
-- **Update Both Phone & PC to v2.3.0:** v2.3.0 adds single-transaction Google Drive reconciliation, independent per-slot photo revisions (`front`/`back`/`extras`), Franken-Copy detection, an offline thrift verification queue, Stash sorting + A–Z scrubber, Settings #5 Maintenance Workflow, and exact vs. alt-version Spotify track matching with a 90s rate-limit cooldown. Update **both** your phone and PC to v2.3.0 for the safest two-device sync.
+- **Update Both Phone & PC to v2.3.1:** v2.3.1 hardens Gemini JSON parsing with automatic retries and 1-item batch recalibration fallback, adds contextual one-tap Stash taste recalibration, locks down the Rebuild Workflow with honest step reporting and suppressed mid-run Drive pushes, enforces strict Franken-Copy media evidence isolation (`⚠️ Media unverified`), adds scoped Settings saves, queue-time Discogs credential binding, idempotent multi-copy legacy restores, upgraded v2.2.0 photo-slot revision initialization, and true offline PWA app-shell caching (`sw.js`). Update **both** your phone and PC to v2.3.1 for the safest two-device sync.
 - **Migrating a Local-Only Stash from an Old Domain:** Browser IndexedDB storage is scoped per origin (`https://old-domain` vs `https://softspot.k1s.co`). If you have an unsynced local-only Stash on an older domain:
   1. Open the old domain → **Settings → 5. Data, Backup & Workflow Guide** → tap **⬇️ Export JSON**.
   2. Open Soft Spot on the new domain → **Settings → 5. Data, Backup & Workflow Guide** → tap **⬆️ Restore JSON**.
@@ -57,7 +57,7 @@ A zero-backend, sharp monochrome industrial Progressive Web App (PWA) for scanni
 
 Soft Spot requires **zero build step** and runs on any static host (such as GitHub Pages):
 
-1. Fork or clone this repository and point GitHub Pages (or any static web server) at the active version directory (e.g., `v2.3.0/` or copied to root).
+1. Fork or clone this repository and point GitHub Pages (or any static web server) at the active version directory (e.g., `v2.3.1/` or copied to root).
 2. *(Optional)* Add a `CNAME` file for your custom subdomain (e.g., `softspot.yourdomain.com`) with HTTPS enabled (required for in-app Camera, Spotify PKCE, and Google Sign-In).
 3. *(Optional)* To use your own Google Cloud OAuth Client ID for Drive Sync:
    - Enable the **Google Drive API** in [Google Cloud Console](https://console.cloud.google.com/apis/library/drive.googleapis.com).

@@ -7,13 +7,13 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>Soft Spot — Physical Media Scanner</title>
-  <link rel="stylesheet" href="style.css?v=2.3.0" />
+  <link rel="stylesheet" href="style.css?v=2.3.1" />
   <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
 <header>
-  <div class="brand">📼 Soft Spot <span class="ver-tag">v2.3.0</span></div>
+  <div class="brand">📼 Soft Spot <span class="ver-tag">v2.3.1</span></div>
   <div class="status-pills">
     <span id="cloudPill" class="pill" title="Google Drive Cloud Sync" onclick="handleCloudPillClick()">Cloud: Off</span>
     <span id="aiPill" class="pill" title="Gemini Cloud AI status" onclick="switchView('settings')">Gemini: Off</span>
@@ -407,6 +407,7 @@
       </div>
       <div id="stashFolderRow" class="chip-row hidden" aria-label="Discogs Folders"></div>
       <div id="stashDiscogsSyncLine" style="font-size:0.74rem; color:var(--muted);"></div>
+      <button id="btnRecalibrateStash" type="button" class="btn btn-purple btn-sm hidden" style="width:100%; margin-top:8px;" onclick="recalibrateStashBatch()">🔄 Recalibrate All (0)</button>
     </div>
     <div id="stashList"></div>
     <div id="stashAlphaRail" class="stash-alpha-rail hidden" aria-label="Alphabetical quick jump"></div>
@@ -446,14 +447,14 @@
             <div style="font-size:0.88rem; font-weight:700;">Auto-Sync after Stash saves</div>
             <div style="font-size:0.74rem; color:var(--muted);">Runs quietly after edits once connected and bound to your Google account</div>
           </div>
-          <input id="cfgGoogleAutoSync" type="checkbox" style="width:20px; height:20px;" onchange="saveSettings(true)" />
+          <input id="cfgGoogleAutoSync" type="checkbox" style="width:20px; height:20px;" onchange="saveSettings(true, 'cloud')" />
         </div>
         <div class="toggle-row">
           <div>
             <div style="font-size:0.88rem; font-weight:700;">Sync API Keys &amp; Tokens across my devices</div>
             <div style="font-size:0.74rem; color:var(--muted);">Opt-in (OFF by default): stores Gemini key, Discogs token &amp; Spotify Client ID in a separate private file inside your appDataFolder</div>
           </div>
-          <input id="cfgGoogleSyncSecrets" type="checkbox" style="width:20px; height:20px;" onchange="saveSettings(true)" />
+          <input id="cfgGoogleSyncSecrets" type="checkbox" style="width:20px; height:20px;" onchange="saveSettings(true, 'cloud')" />
         </div>
 
         <details class="settings-subsection">
@@ -536,11 +537,11 @@
             <div style="font-size:0.9rem; font-weight:600;">✂️ Auto-crop uploaded &amp; scanned photos</div>
             <div style="font-size:0.76rem; color:var(--muted);">Uses Gemini Vision to tightly frame media &amp; upright spines immediately on upload/capture</div>
           </div>
-          <input id="cfgAutoCropPhotos" type="checkbox" style="width:22px; height:22px;" onchange="saveSettings(false)" />
+          <input id="cfgAutoCropPhotos" type="checkbox" style="width:22px; height:22px;" onchange="saveSettings(false, 'gemini')" />
         </div>
         <div style="margin:8px 0 6px;">
           <label class="field-label" for="cfgPhotoQuality">Photo Save Resolution</label>
-          <select id="cfgPhotoQuality" onchange="saveSettings(false)">
+          <select id="cfgPhotoQuality" onchange="saveSettings(false, 'gemini')">
             <option value="low">Low (800px — smallest storage)</option>
             <option value="medium">Medium — 1200px (Recommended)</option>
             <option value="high">High (1600px)</option>
@@ -549,7 +550,7 @@
           </select>
         </div>
         <div class="btn-row" style="margin-top:10px;">
-          <button id="btnSaveGemini" type="button" class="btn btn-sm" onclick="saveSettings()" disabled>Save Settings</button>
+          <button id="btnSaveGemini" type="button" class="btn btn-sm" onclick="saveSettings(false, 'gemini')" disabled>Save Settings</button>
           <button type="button" class="btn btn-secondary btn-sm" onclick="testAiConnection()">🧪 Test Gemini</button>
         </div>
         <div id="aiStatusBadge" style="font-size:0.82rem; font-weight:700; margin-top:6px;"></div>
@@ -624,8 +625,8 @@
           <input id="cfgVoice" type="checkbox" style="width:22px; height:22px;" onchange="updateSettingsDirtyButtons()" />
         </div>
         <div class="btn-row" style="margin-top:10px;">
+          <button id="btnSaveDiscogs" type="button" class="btn btn-sm" onclick="saveSettings(false, 'discogs')" disabled>Save Settings</button>
           <button type="button" class="btn btn-secondary btn-sm" onclick="verifyDiscogsAccount()">🔗 Verify &amp; Load Folders</button>
-          <button id="btnSaveDiscogs" type="button" class="btn btn-sm" onclick="saveSettings()" disabled>Save Settings</button>
         </div>
       </div>
     </details>
@@ -702,19 +703,19 @@
           <p style="font-size:0.78rem; margin-bottom:6px;">Only shows platforms toggled ON here <em>and</em> where the song is actually available (Apple Music &amp; Deezer need zero API keys).</p>
           <div class="toggle-row">
             <span style="font-size:0.88rem; font-weight:600;">Spotify (exact track check via your login)</span>
-            <input id="cfgShowSpotify" type="checkbox" style="width:22px; height:22px;" onchange="saveSettings(true)" />
+            <input id="cfgShowSpotify" type="checkbox" style="width:22px; height:22px;" onchange="saveSettings(true, 'music')" />
           </div>
           <div class="toggle-row">
             <span style="font-size:0.88rem; font-weight:600;">Apple Music (keyless live check)</span>
-            <input id="cfgShowApple" type="checkbox" style="width:22px; height:22px;" onchange="saveSettings(true)" />
+            <input id="cfgShowApple" type="checkbox" style="width:22px; height:22px;" onchange="saveSettings(true, 'music')" />
           </div>
           <div class="toggle-row">
             <span style="font-size:0.88rem; font-weight:600;">Deezer (keyless live check)</span>
-            <input id="cfgShowDeezer" type="checkbox" style="width:22px; height:22px;" onchange="saveSettings(true)" />
+            <input id="cfgShowDeezer" type="checkbox" style="width:22px; height:22px;" onchange="saveSettings(true, 'music')" />
           </div>
           <div class="toggle-row">
             <span style="font-size:0.88rem; font-weight:600;">YouTube (always-available fallback)</span>
-            <input id="cfgShowYoutube" type="checkbox" style="width:22px; height:22px;" onchange="saveSettings(true)" />
+            <input id="cfgShowYoutube" type="checkbox" style="width:22px; height:22px;" onchange="saveSettings(true, 'music')" />
           </div>
         </div>
       </div>
@@ -767,7 +768,7 @@
             <div class="rebuild-progress-track"><div id="rebuildProgressFill" class="rebuild-progress-fill"></div></div>
           </div>
 
-          <div class="btn-row" style="margin-top:8px;">
+          <div class="rebuild-action-row">
             <button id="btnRunRebuild" type="button" class="btn btn-green btn-sm" onclick="runMaintenanceWorkflow()">▶ Run Selected Steps</button>
             <button id="btnCancelRebuild" type="button" class="btn btn-danger btn-sm hidden" onclick="cancelMaintenanceWorkflow()">✕ Cancel</button>
           </div>
@@ -1005,7 +1006,7 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="apis.js?v=2.3.0"></script>
-<script src="app.js?v=2.3.0"></script>
+<script src="apis.js?v=2.3.1"></script>
+<script src="app.js?v=2.3.1"></script>
 </body>
 </html>

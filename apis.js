@@ -502,7 +502,9 @@
   };
 
   CC.discogsFetch = (path, params = {}, method = 'GET', body = null) => new Promise((resolve, reject) => {
-    dQueue.push({ path, params, method, body, resolve, reject });
+    const boundToken = (CC.cfg.discogsToken || '').trim();
+    const boundUser = (CC.cfg.discogsUser || '').trim().toLowerCase();
+    dQueue.push({ path, params, method, body, boundToken, boundUser, resolve, reject });
     runDQueue();
   });
 
@@ -511,6 +513,13 @@
     dBusy = true;
     const job = dQueue.shift();
     try {
+      const currentUser = (CC.cfg.discogsUser || '').trim().toLowerCase();
+      const currentToken = (CC.cfg.discogsToken || '').trim();
+      const isUserScopedPath = /^\/users\/[^/]+(\/|$)/i.test(String(job.path || ''));
+      if (isUserScopedPath && (currentUser !== job.boundUser || currentToken !== job.boundToken)) {
+        throw new Error('Discogs account changed while request was queued — aborted safely');
+      }
+
       const now = Date.now();
       recentDCalls = recentDCalls.filter(t => now - t < 60000);
       if (recentDCalls.length >= 57) {
@@ -522,9 +531,18 @@
       const gap = Date.now() - lastDCall;
       if (gap < minGap) await CC.sleep(minGap - gap);
 
+      // Re-verify account binding immediately before sending fetch (in case account switched during rate-limit sleep)
+      if (isUserScopedPath) {
+        const curUserNow = (CC.cfg.discogsUser || '').trim().toLowerCase();
+        const curTokenNow = (CC.cfg.discogsToken || '').trim();
+        if (curUserNow !== job.boundUser || curTokenNow !== job.boundToken) {
+          throw new Error('Discogs account changed while request was queued — aborted safely');
+        }
+      }
+
       const url = new URL('https://api.discogs.com' + job.path);
       Object.entries(job.params || {}).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v); });
-      if (CC.cfg.discogsToken) url.searchParams.set('token', CC.cfg.discogsToken.trim());
+      if (job.boundToken) url.searchParams.set('token', job.boundToken);
 
       lastDCall = Date.now();
       recentDCalls.push(lastDCall);
@@ -1256,7 +1274,7 @@
 
       CC.cfg.discogsFolders = syncResult.folders;
       CC.cfg.discogsLastSyncAt = syncedAt;
-      if (!syncResult.folders.some(f => String(f.id) === String(CC.cfg.discogsFolderId))) {
+      if (String(CC.cfg.discogsFolderId) !== 'auto' && !syncResult.folders.some(f => String(f.id) === String(CC.cfg.discogsFolderId))) {
         CC.cfg.discogsFolderId = '1';
       }
       CC.persistCfg();
@@ -1739,13 +1757,46 @@
 
   function cleanJsonText(raw) {
     const noThink = String(raw || '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-    const cleaned = noThink.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
-    try { return JSON.parse(cleaned); }
-    catch (_) {
-      const m = cleaned.match(/\{[\s\S]*\}/);
-      if (m) return JSON.parse(m[0]);
-      throw new Error('Could not parse AI JSON response');
+    const cleaned = noThink
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```\s*$/i, '')
+      .trim();
+
+    try { return JSON.parse(cleaned); } catch (_) {}
+
+    const repairJsonStr = (str) => String(str || '')
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+      .replace(/,\s*([}\]])/g, '$1')
+      .trim();
+
+    // Extract outermost {...} and [...] spans and attempt repaired JSON.parse
+    const candidates = [];
+    const firstObj = cleaned.indexOf('{');
+    const lastObj = cleaned.lastIndexOf('}');
+    const firstArr = cleaned.indexOf('[');
+    const lastArr = cleaned.lastIndexOf(']');
+    const objSpan = (firstObj !== -1 && lastObj > firstObj) ? cleaned.slice(firstObj, lastObj + 1) : '';
+    const arrSpan = (firstArr !== -1 && lastArr > firstArr) ? cleaned.slice(firstArr, lastArr + 1) : '';
+    if (firstArr !== -1 && (firstObj === -1 || firstArr < firstObj)) {
+      if (arrSpan) candidates.push(arrSpan);
+      if (objSpan) candidates.push(objSpan);
+    } else {
+      if (objSpan) candidates.push(objSpan);
+      if (arrSpan) candidates.push(arrSpan);
     }
+    candidates.push(cleaned);
+
+    for (const cand of candidates) {
+      const repaired = repairJsonStr(cand);
+      if (!repaired) continue;
+      try {
+        return JSON.parse(repaired);
+      } catch (_) {}
+    }
+
+    const err = new Error('Could not parse AI JSON response');
+    err.code = 'AI_JSON_PARSE';
+    throw err;
   }
 
   async function runGeminiRequest(parts, thinkingLevel, opts = {}) {
@@ -1792,6 +1843,7 @@
     const isUltra = mediaResolution === 'MEDIA_RESOLUTION_ULTRA_HIGH';
 
     let attempt = 0;
+    let jsonRetry = 0;
     try {
       while (true) {
         if (signal.aborted) throw new DOMException('Cancelled by user', 'AbortError');
@@ -1840,7 +1892,27 @@
         const data = await res.json();
         const raw = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
         if (!expectJSON) return raw.trim();
-        return cleanJsonText(raw);
+
+        const finishReason = data.candidates?.[0]?.finishReason || '';
+        let parseErr = null;
+        if (finishReason === 'MAX_TOKENS') {
+          parseErr = new Error('AI JSON response truncated (MAX_TOKENS)');
+          parseErr.code = 'AI_JSON_PARSE';
+        } else {
+          try {
+            return cleanJsonText(raw);
+          } catch (e) {
+            parseErr = e;
+          }
+        }
+
+        if (parseErr && parseErr.code === 'AI_JSON_PARSE' && jsonRetry < 2) {
+          jsonRetry++;
+          statusCb(`${retryLabel}: malformed AI JSON — retrying (${jsonRetry}/2)...`, true, { cancellable: true });
+          await CC.sleep(1500, signal);
+          continue;
+        }
+        throw parseErr;
       }
     } finally {
       if (activeAiCtrl === ctrl) activeAiCtrl = null;
@@ -3280,6 +3352,32 @@
     if (rec.photo_slots && typeof rec.photo_slots === 'object') {
       const prevSlots = prevRecord ? CC.normalizePhotoSlots(prevRecord) : { front: '', back: '', extras: [] };
       const nextSlots = CC.normalizePhotoSlots(rec);
+
+      // Upgraded v2.2.0 record support: if prevRecord had photo_slots or legacy thumbs without
+      // per-slot field_revs yet, initialize missing sub-slot revisions from prevRecord's baseline
+      // BEFORE stamping the newly changed slot(s) so concurrent Phone/PC edits merge cleanly.
+      if (prevRecord) {
+        const hasPrevPhotos = Boolean(
+          (prevRecord.photo_slots && typeof prevRecord.photo_slots === 'object') ||
+          (Array.isArray(prevRecord.thumbs) && prevRecord.thumbs.length > 0) ||
+          prevSlots.front || prevSlots.back || prevSlots.extras.length > 0
+        );
+        if (hasPrevPhotos) {
+          const baseParent = prevRecord.field_revs?.photo_slots ||
+            prevRecord._fieldMeta?.photo_slots ||
+            { ts: Number(prevRecord.updated_at || prevRecord.created_at || 1), rev: prevRecord.rev || '' };
+          const baseline = {
+            ts: Number(baseParent.ts || prevRecord.updated_at || prevRecord.created_at || 1),
+            rev: baseParent.rev || prevRecord.rev || '',
+            ...(baseParent.deviceId ? { deviceId: baseParent.deviceId } : {})
+          };
+          ['photo_slots.front', 'photo_slots.back', 'photo_slots.extras'].forEach(sk => {
+            if (!fRevs[sk]) fRevs[sk] = { ...baseline };
+            if (!fMeta[sk]) fMeta[sk] = { ...baseline };
+          });
+        }
+      }
+
       const slotChecks = [
         ['photo_slots.front', prevSlots.front, nextSlots.front, Boolean(nextSlots.front)],
         ['photo_slots.back', prevSlots.back, nextSlots.back, Boolean(nextSlots.back)],
@@ -5476,7 +5574,7 @@
   // Alias for backward compatibility
   CC.syncWithGoogleDrive = CC.syncNowWithGoogleDrive;
 
-  // Deterministic legacy fallback ID for pre-sync_id backups (artist|title|format|catno|year|created_at)
+  // Deterministic legacy fallback ID for pre-sync_id backups (includes condition & notes so distinct copies survive)
   function computeLegacyFingerprintSyncId(rec) {
     const raw = [
       CC.norm(rec?.artist || ''),
@@ -5484,7 +5582,10 @@
       CC.norm(rec?.format || ''),
       CC.norm(rec?.catno || ''),
       String(rec?.year || '').trim(),
-      String(Number(rec?.created_at || 0))
+      String(Number(rec?.created_at || 0)),
+      CC.norm(rec?.condition_note || ''),
+      CC.norm(rec?.media_condition || ''),
+      CC.norm(rec?.sleeve_condition || '')
     ].join('|');
     let h1 = 0x811c9dc5;
     let h2 = 0x01000193;
@@ -5545,16 +5646,23 @@
           Object.entries(liveDeleted).forEach(([k, v]) => foldDel(k, v));
           Object.entries(incomingDeleted).forEach(([k, v]) => foldDel(k, v));
 
-          // 3. Index live stash by canonical sync_id AND by deterministic legacy fingerprint
+          // 3. Index live stash by canonical sync_id AND by deterministic legacy fingerprint (preserving occurrence index for distinct copies)
           const bySyncId = new Map();
           const legacyFpToSyncId = new Map();
+          const liveFpCounts = new Map();
           const liveSnapshotJsonBySid = new Map();
           liveRows.forEach(r => {
             const copy = { ...r };
-            if (!copy.sync_id) copy.sync_id = computeLegacyFingerprintSyncId(copy);
+            const baseFp = computeLegacyFingerprintSyncId(copy);
+            const occ = (liveFpCounts.get(baseFp) || 0) + 1;
+            liveFpCounts.set(baseFp, occ);
+            const occFp = occ > 1 ? `${baseFp}#${occ}` : baseFp;
+            if (!copy.sync_id) copy.sync_id = occFp;
             copy.sync_id = resolveCanonicalSyncId(copy.sync_id, mergedAliases);
-            const fp = computeLegacyFingerprintSyncId(copy);
-            if (!legacyFpToSyncId.has(fp)) legacyFpToSyncId.set(fp, copy.sync_id);
+            if (!legacyFpToSyncId.has(occFp)) legacyFpToSyncId.set(occFp, copy.sync_id);
+            if (String(copy.sync_id).startsWith('legacy_') && !legacyFpToSyncId.has(copy.sync_id)) {
+              legacyFpToSyncId.set(copy.sync_id, copy.sync_id);
+            }
             const noId = { ...copy };
             delete noId.id;
             liveSnapshotJsonBySid.set(copy.sync_id, JSON.stringify(noId));
@@ -5568,16 +5676,21 @@
           });
 
           // 4. Merge incoming stash preserving original rev / updated_at / field_revs / _fieldMeta
+          //    Multiple legacy items sharing the exact same fingerprint get deterministic #2, #3, ... suffixes in array order.
+          const incomingFpCounts = new Map();
           for (const rawItem of incomingStash) {
             if (!rawItem || typeof rawItem !== 'object') continue;
             const imp = { ...rawItem };
             delete imp.id;
-            const fp = computeLegacyFingerprintSyncId(imp);
+            const baseFp = computeLegacyFingerprintSyncId(imp);
+            const occ = (incomingFpCounts.get(baseFp) || 0) + 1;
+            incomingFpCounts.set(baseFp, occ);
+            const occFp = occ > 1 ? `${baseFp}#${occ}` : baseFp;
             if (!imp.sync_id) {
-              imp.sync_id = legacyFpToSyncId.get(fp) || fp;
+              imp.sync_id = legacyFpToSyncId.get(occFp) || occFp;
             }
             imp.sync_id = resolveCanonicalSyncId(imp.sync_id, mergedAliases);
-            if (!legacyFpToSyncId.has(fp)) legacyFpToSyncId.set(fp, imp.sync_id);
+            if (!legacyFpToSyncId.has(occFp)) legacyFpToSyncId.set(occFp, imp.sync_id);
             if (!imp.photo_slots) imp.photo_slots = CC.normalizePhotoSlots(imp);
             const impDerived = CC.deriveThumbsFromSlots(imp.photo_slots, imp.discogs_thumb || '');
             imp.thumbs = impDerived.thumbs;

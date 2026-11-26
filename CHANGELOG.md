@@ -1,38 +1,43 @@
-# Changelog — Soft Spot v2.3.0
+# Changelog — Soft Spot v2.3.1
 
 ## Highlights
 
-1. **Two-Device Sync, Live-Row, Ownership & Backup Reliability**
-   - Upgraded `pullFromGoogleDrive` Phase 2, `repairLocalDiscogsDuplicates`, and `queueFullLocalProfileToOutbox` to read & write `stash`, `deleted_sync_ids`, `sync_id_aliases`, `cloud_outbox_v2`, and `cloud_sync_meta_v2` inside ONE `readwrite` IndexedDB transaction so concurrent deletions in another tab can never be undone or lose tombstones.
-   - Updated `saveStashEdits` to commit locally via `CC.mutateStashItemIfAlive` so items deleted while waiting on Discogs are never resurrected.
-   - Added independent per-slot photo revisions (`field_revs['photo_slots.front']`, `field_revs['photo_slots.back']`, `field_revs['photo_slots.extras']`) so Phone replacing Front and PC replacing Back merge cleanly, while guarding `thumbs` derivation so older `photo_slots` never overwrite newer `thumbs` from v2.1.x devices.
-   - Added a fresh Discogs account re-verification immediately before `CC.deleteDiscogsInstance` in `attemptDeleteOldCopy`.
-   - Added deterministic `legacy_<hash>` fallback IDs in `CC.importJsonBackupAtomic` so legacy pre-`sync_id` JSON backups restore 100% idempotently without duplicates.
-   - Applied the exact same staleness guard inside `regradeWithAI`'s `catch` block so failed Voice Re-Grades from a prior pressing never overwrite the current pressing's UI or retry memo.
+1. **Bulletproof Gemini JSON Parsing, Auto-Retry & Resilient Recalibration**
+   - Upgraded `cleanJsonText()` (`apis.js`) to strip `<think>` blocks and code fences, extract outermost `{...}` / `[...]` spans, strip raw ASCII control characters, remove trailing commas before `}` / `]`, and throw `err.code = 'AI_JSON_PARSE'` on persistent malformed JSON.
+   - Added automatic 2-retry recovery (1.5s delay with live status banner) in `runGeminiRequest()` whenever `finishReason === 'MAX_TOKENS'` or `cleanJsonText()` throws `AI_JSON_PARSE`.
+   - Lowered `recalibrateStashBatch` chunk size from `10` to `5` (keeping `maxOutputTokens: 8192`) and added an automatic 1-item-at-a-time fallback whenever a 5-item chunk fails with `AI_JSON_PARSE`, continuing past any single bad item and reporting exact succeeded/failed counts.
 
-2. **Smart Auto-Identify Photo Roles, Reliable Auto-Crop & Upright Spines**
-   - Stopped assuming photo slot order in `runVisionOCR` and `autoCropImageWithGemini` — Gemini now identifies each photo's true visual role (`front`, `back`, `spine`, `extra`) and auto-slots staged photos cleanly.
-   - Upgraded auto-crop to `thinkingLevel: 'MEDIUM'`, always requiring `[ymin, xmin, ymax, xmax]` (skipping canvas cropping only when the box already covers `>= 96%` of both width and height), explicitly checking **letter-top direction** (`top` → `0`, `bottom` → `180`, `left` → `90`, `right` → `270`) so upside-down spines rotate upright reliably, and avoiding redundant double crop passes.
+2. **Contextual Stash Recalibrate Button & One-Tap Per-Item `🔄 TASTE`**
+   - Added a contextual **`🔄 Recalibrate All (N)`** button inside `#view-stash` (hidden whenever `staleCount === 0`, shown automatically whenever stale items exist).
+   - Converted every Stash card's stale **`🔄 TASTE`** badge into a clickable one-tap button calling `recalibrateSingleStashItem(id)` directly without opening the detail view.
 
-3. **🧟 Franken-Copy Detector (Packaging vs. Physical Media Mismatch)**
-   - `runVisionOCR` now reads `packaging_identity` and `media_identity` independently and flags `different_album`, `different_pressing`, or `different_format` mismatches.
-   - Renders a high-visibility **`🧟 FRANKEN-COPY DETECTED`** warning banner defaulting Discogs search to physical media, pre-setting `No Cover` for wrong-album/format cases, offering **`📼 Verify Media (Default)`**, **`📦 Verify Packaging Instead`**, and **`💾 Also Save Orphan Packaging Locally`**, persisting `is_franken_copy`/`franken_type`/`franken_note`, and instructing `verifyCandidateBatch` never to ignore media-vs-packaging contradictions.
+3. **Rebuild Workflow: No Mid-Run Drive Pushes, UI Lockdown & Honest Step Reporting**
+   - Suppressed `scheduleGoogleAutoSync()` during active Rebuild runs, cleared pending auto-sync timers on start, and passed `{ suppressAutoSync: true }` to Steps 2–5 (`syncWithDiscogsUI` also `{ skipDriveGate: true }`, `recalibrateStashBatch` also `{ skipConfirm: true }`) so Google Drive only executes in Step 1 and Step 6.
+   - Added full Settings + Rebuild control lockdown and bottom-nav tab-switch protection while Rebuild runs (keeping **`✕ Cancel`** enabled and always unlocking in `finally`).
+   - Replaced optimistic `100%` completion with honest per-step tracking (`completed` / `skipped` / `failed`), showing exact counts and yellow/red semantic bars whenever any step was skipped or failed.
+   - Made the Rebuild action bar flex full-width so **`▶ Run Selected Steps`** spans 100% width when **`✕ Cancel`** is hidden.
 
-4. **📥 Offline Thrift Queue ("Save Now, Verify Later")**
-   - Added **`📥 Save Now, Verify Later`** in the Single Item scanner (100% offline, zero AI/Discogs calls) saving staged photos, UPC, and format with `needs_verification: true`.
-   - Added the **`⏳ To Verify`** Stash filter chip/badge and Stash Detail **`🔍 Verify & Price Now`** button that preloads saved photos & UPC straight back into the scanner and clears `needs_verification: false` on save.
+4. **Franken-Copy Evidence Isolation & `⚠️ Media unverified` Warning**
+   - Strictly isolated `fTitle`, `fArtist`, `fCatno`, `fLabel`, `fYear`, `fBarcode`, and `currentExtracted.cleaned_catalog_variants` in `'media'` mode (`runVisionOCR` and `switchFrankenVerifyMode`) so packaging clues never leak into physical media searches.
+   - Added a prominent **`⚠️ Media unverified`** warning inside `#frankenBanner` when physical media text is unreadable while packaging is readable, preventing silent Discogs searches using mismatched packaging clues.
 
-5. **Stash Sorting, Group Headings, A–Z Scrubber & Streamlined Stash Tab**
-   - Removed the 4 redundant action buttons from `#view-stash` and added a persisted Sort dropdown (`Newest Added`, `Artist A–Z`, `Title A–Z`, `Highest/Lowest Value`, `Highest Taste`, `Year Newest/Oldest`).
-   - Added crisp monochrome Artist / Title group headings (ignoring leading `"The "`) and a fixed right-edge **`# A–Z` alphabet scrubber rail** supporting tap & thumb-drag smooth scrolling.
+5. **Upgraded v2.2.0 Photo-Slot Revision Initialization**
+   - Updated `CC.stampStashRevision` to initialize missing `photo_slots.front` / `back` / `extras` entries from `prevRecord`'s baseline timestamp/rev before stamping newly changed slot(s), ensuring concurrent Phone/PC photo edits on upgraded v2.2.0 records merge cleanly.
 
-6. **Settings UI Uniformity, Dirty-State Buttons, Auto-Match Folders & Rebuild Workflow**
-   - Removed `⬇️ Load from Google Drive`; unified full-width 50/50 `.btn-row` action bars across Settings #1, #2, and #3; added dirty-state disabling (`updateSettingsDirtyButtons`) for Gemini Save, Discogs Save, Taste Save, and Cloud Sync Now (with quiet focus/visibility pull when signed in and stale > 2 min).
-   - Added **`✨ Auto-Match by Format`** (`value="auto"`) to Target Discogs Folder (`CC.resolveTargetDiscogsFolderId`).
-   - Added **🔧 Rebuild & Sync Workflow** checklist + progress bar + Cancel inside Settings #5 (runs selected steps sequentially with zero AI grading and zero photo re-encoding, pausing cleanly on Spotify rate limits).
+6. **Queue-Time Discogs Credential Binding**
+   - Bound `boundToken` and `boundUser` at queue push time in `CC.discogsFetch()` and enforced live account/token verification inside `runDQueue()` before issuing `/users/...` requests so queued requests never fire against a switched Discogs account.
 
-7. **Spotify 90s Cooldown, Exact vs. Alt-Version Matching, Compact Voice Re-Grade & DRY Consolidation**
-   - Enforced `Math.max(90, headerSec || 90)` cooldown on Spotify HTTP 429 in `spFetch`.
-   - Split track matching into `CC.normTrackEdition` (supporting double-hyphen remasters like `"Save a Prayer - 2009 - Remaster"`) vs. `CC.normTrackLoose` (alt-version fallback showing muted/blue `Alt Version` badges and `"Another version you like"` narrative), fixed grammar in `buildSpotifyHowYouKnowHtml`, and shared `getSpotifyLookup()` with Pile Scan.
-   - Made Voice Re-Grade compact (`.btn-sm`) with an inline **`✕ Cancel`** button that stops listening with zero AI calls.
-   - Consolidated `getPhotoQualitySpec()` across all rotate/crop/save paths (removing hardcoded `960`/`0.82` in `rotateStashSpine90`) and unified Taste prompt construction into `buildTasteEvaluationPrompt()` (`|v230`).
+7. **Legacy JSON Restore: Preserve Distinct Copies + Stay Idempotent**
+   - Expanded `computeLegacyFingerprintSyncId()` to include `condition_note`, `media_condition`, and `sleeve_condition`, and appended deterministic occurrence indices (`#2`, `#3`, ...) in array order in `CC.importJsonBackupAtomic()` so real duplicate legacy copies survive restore while re-importing the same file remains 100% idempotent.
+
+8. **Scoped Settings Saves, Uniform Left-Side Order & Preserve `'auto'` Folder**
+   - Placed **`Save Settings`** on the **LEFT** and **`🔗 Verify & Load Folders`** on the **RIGHT** in Settings #3 to match Settings #2 and #4.
+   - Added `scope` support to `saveSettings(silent, scope)` so Gemini saves only commit Gemini/playback/photo fields and Discogs saves only commit Discogs fields.
+   - Preserved `cfg.discogsFolderId === 'auto'` across Discogs collection sync (`reconcileDiscogsCollectionIntoStash`) and folder dropdown rendering (`populateFolders`).
+
+9. **True Offline App-Shell Caching (Service Worker)**
+   - Added `./sw.js` (`softspot-shell-v2.3.1`) with pre-cached app shell, network-first + offline cache fallback for same-origin shell assets, old cache cleanup, and third-party API exclusion, safely registered on load in `app.js`.
+
+10. **Spine Re-Slot Crop Guard & Scanner Polish**
+    - Added a dedicated `photo.spineCropped` flag set only after spine cropping/rotation so re-slotted spines in `runVisionOCR` always get cropped and rotated upright.
+    - Updated `renderInspector` format-mismatch alerts to use `getEffectiveScanFormat()` + `CC.matchesMediaFormat()`, and delegated single-mode `removeCameraShot` deletions to `removeStagedPhoto`.

@@ -469,6 +469,10 @@
 
   window.switchView = (name, fromPop = false) => {
     const viewChanged = name !== currentView;
+    if (rebuildWorkflowActive && !fromPop && viewChanged) {
+      toast('Rebuild in progress — tap Cancel to stop', 2600);
+      return;
+    }
     hideStashDetailUI();
     hideManualModalUI();
     hidePileFsUI();
@@ -2143,10 +2147,10 @@ Return ONLY valid JSON:
       toast('Pile shot deleted — ready to retake');
       return;
     }
-    if (idx < 0 || idx >= stagedPhotos.length) return;
-    stagedPhotos.splice(idx, 1);
-    updateCameraOverlayUI();
-    updateStageUI();
+    const entries = getStagedSlotEntries();
+    const target = entries[idx];
+    if (!target) return;
+    removeStagedPhoto(target.slotKey, target.extraIdx, null);
     toast('Shot deleted — ready to retake');
   };
 
@@ -2356,6 +2360,7 @@ Return ONLY valid JSON:
           if (myStageSeq !== stageSeq) return;
           if (!pair.origDataUrl) pair.origDataUrl = pair.apiB64 ? `data:image/jpeg;base64,${pair.apiB64}` : pair.saveWebp;
           pair.autoCropped = false;
+          pair.spineCropped = false;
           pair.cropBox = null;
           pair.rotationDeg = 0;
           const placed = assignPhotoToFirstEmptySlot(pair);
@@ -2448,6 +2453,7 @@ Return ONLY valid JSON:
             croppedCount++;
           }
           p.autoCropped = true;
+          p.spineCropped = true;
         } else {
           if (needsCrop) {
             const cropped = await cropImageByBox(srcUrl, res.box_2d, {
@@ -2554,6 +2560,7 @@ Return ONLY valid JSON:
         });
         if (myStageSeq !== stageSeq) return;
         pair.autoCropped = false;
+        pair.spineCropped = false;
         pair.cropBox = null;
         pair.rotationDeg = 0;
         const placed = assignPhotoToFirstEmptySlot(pair);
@@ -2805,6 +2812,7 @@ Return ONLY valid JSON:
           if (stagedSlots.spine) {
             stagedSlots.spine.saveWebp = croppedWebp;
             stagedSlots.spine.autoCropped = true;
+            stagedSlots.spine.spineCropped = true;
             stagedSlots.spine.cropBox = origCoordsBox;
             stagedSlots.spine.rotationDeg = finalRotDeg;
             stagedSlots.spine.spineRotation = finalRotDeg;
@@ -3673,16 +3681,43 @@ Return ONLY valid JSON:
     };
   }
 
-  function applyIdentityToSearchFields(ident, fallbackExtracted = null) {
+  function cleanFrankenField(val) {
+    const s = Array.isArray(val) ? val.filter(Boolean).join(', ').trim() : String(val || '').trim();
+    if (!s || /^(unknown|unreadable|illegible|n\/a|none|\?+)$/i.test(s)) return '';
+    return s;
+  }
+
+  function isIdentityReadable(ident) {
+    if (!ident || typeof ident !== 'object') return false;
+    return Boolean(cleanFrankenField(ident.title) || cleanFrankenField(ident.artist) || cleanFrankenField(ident.catno));
+  }
+
+  function buildCatalogVariantsFromCatno(catno) {
+    const raw = cleanFrankenField(catno);
+    if (!raw) return [];
+    const stripped = raw.replace(/[\s\-_.]+/g, '');
+    const spaced = raw.replace(/[-_.]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return Array.from(new Set([raw, stripped, spaced].filter(Boolean)));
+  }
+
+  function applyIdentityToSearchFields(ident, fallbackExtracted = null, strict = false) {
     if (!ident) return;
-    const artStr = Array.isArray(ident.artist) ? ident.artist.join(', ') : (ident.artist || '');
-    document.getElementById('fTitle').value = ident.title || fallbackExtracted?.album_title || '';
-    document.getElementById('fArtist').value = artStr || (Array.isArray(fallbackExtracted?.artists) ? fallbackExtracted.artists.join(', ') : (fallbackExtracted?.artists || ''));
-    document.getElementById('fCatno').value = ident.catno || '';
-    document.getElementById('fLabel').value = ident.label || '';
-    document.getElementById('fYear').value = ident.year || '';
-    if (ident.format && !/^unknown$/i.test(String(ident.format))) {
-      setSelectFormatValue('fFormat', CC.normalizeDiscogsFormat(ident.format));
+    const titleVal = cleanFrankenField(ident.title);
+    const artVal = cleanFrankenField(ident.artist);
+    const catVal = cleanFrankenField(ident.catno);
+    const lblVal = cleanFrankenField(ident.label);
+    const yrVal = cleanFrankenField(ident.year);
+    const fmtVal = cleanFrankenField(ident.format);
+
+    document.getElementById('fTitle').value = strict ? titleVal : (titleVal || fallbackExtracted?.album_title || '');
+    document.getElementById('fArtist').value = strict
+      ? artVal
+      : (artVal || (Array.isArray(fallbackExtracted?.artists) ? fallbackExtracted.artists.join(', ') : (fallbackExtracted?.artists || '')));
+    document.getElementById('fCatno').value = catVal;
+    document.getElementById('fLabel').value = lblVal;
+    document.getElementById('fYear').value = yrVal;
+    if (fmtVal && !/^unknown$/i.test(fmtVal)) {
+      setSelectFormatValue('fFormat', CC.normalizeDiscogsFormat(fmtVal));
     }
   }
 
@@ -3696,15 +3731,19 @@ Return ONLY valid JSON:
     }
     const f = frankenState;
     const isDiffAlbumOrFmt = f.mismatchType === 'different_album' || f.mismatchType === 'different_format';
-    const mediaLabel = [f.media?.artist, f.media?.title].filter(Boolean).join(' — ') || 'Unknown media';
-    const packLabel = [f.packaging?.artist, f.packaging?.title].filter(Boolean).join(' — ') || 'Unknown packaging';
-    const mediaMeta = [f.media?.format, f.media?.catno, f.media?.label, f.media?.year].filter(Boolean).join(' · ');
-    const packMeta = [f.packaging?.format, f.packaging?.catno, f.packaging?.label, f.packaging?.year].filter(Boolean).join(' · ');
+    const mediaLabel = [cleanFrankenField(f.media?.artist), cleanFrankenField(f.media?.title)].filter(Boolean).join(' — ') || 'Unreadable / Unknown media';
+    const packLabel = [cleanFrankenField(f.packaging?.artist), cleanFrankenField(f.packaging?.title)].filter(Boolean).join(' — ') || 'Unknown packaging';
+    const mediaMeta = [cleanFrankenField(f.media?.format), cleanFrankenField(f.media?.catno), cleanFrankenField(f.media?.label), cleanFrankenField(f.media?.year)].filter(Boolean).join(' · ');
+    const packMeta = [cleanFrankenField(f.packaging?.format), cleanFrankenField(f.packaging?.catno), cleanFrankenField(f.packaging?.label), cleanFrankenField(f.packaging?.year)].filter(Boolean).join(' · ');
+    const unverifiedWarnHtml = f.mediaUnverified
+      ? `<div class="alert-box alert-dup" style="margin-bottom:10px;">⚠️ <strong>Media unverified</strong> — Physical tape/disc label text was unreadable, so Discogs was NOT searched using the mismatched packaging clues. Retake a sharp close-up of the media label or explicitly tap <strong>📦 Verify Packaging Instead</strong>.</div>`
+      : '';
 
     el.classList.remove('hidden');
     el.innerHTML = `
       <div class="franken-banner-title">🧟 FRANKEN-COPY DETECTED (${esc(f.mismatchType.replace(/_/g, ' '))})</div>
       <div class="franken-banner-reason">${esc(f.reason || 'Physical media and packaging do not match.')}</div>
+      ${unverifiedWarnHtml}
       <div class="franken-banner-compare">
         <div class="franken-id-box">
           <strong>📼 Physical Media ${f.mode === 'media' ? '(Active)' : ''}</strong>
@@ -3728,25 +3767,49 @@ Return ONLY valid JSON:
   window.switchFrankenVerifyMode = async (mode) => {
     if (!frankenState || !frankenState.active) return;
     frankenState.mode = mode === 'packaging' ? 'packaging' : 'media';
-    const ident = frankenState.mode === 'packaging' ? frankenState.packaging : frankenState.media;
-    applyIdentityToSearchFields(ident, currentExtracted);
+    const isMediaMode = frankenState.mode === 'media';
+    const ident = isMediaMode ? (frankenState.media || {}) : (frankenState.packaging || {});
+
+    // Strictly isolate media mode from packaging evidence (NEVER fall back to packaging catno/label/year/barcode/variants!)
+    applyIdentityToSearchFields(ident, null, true);
+    const idTitle = cleanFrankenField(ident.title);
+    const idArtist = cleanFrankenField(ident.artist);
+    const idCatno = cleanFrankenField(ident.catno);
+    const idLabel = cleanFrankenField(ident.label);
+    const idYear = cleanFrankenField(ident.year);
+    const idFmt = cleanFrankenField(ident.format);
+    const idBarcode = isMediaMode
+      ? String(ident.barcode || '').replace(/\D/g, '')
+      : (String(ident.barcode || '').replace(/\D/g, '') || stagedUpc || String(frankenState.origBarcode || '').replace(/\D/g, ''));
+
+    document.getElementById('fBarcode').value = idBarcode;
+
     if (currentExtracted) {
-      currentExtracted.album_title = ident?.title || currentExtracted.album_title;
-      currentExtracted.artists = ident?.artist ? [ident.artist] : currentExtracted.artists;
-      currentExtracted.raw_catalog_number = ident?.catno || '';
-      currentExtracted.label = ident?.label || '';
-      currentExtracted.year = ident?.year || '';
-      if (ident?.format && !/^unknown$/i.test(String(ident.format))) {
-        currentExtracted.detected_format = CC.normalizeDiscogsFormat(ident.format);
-      }
-      if (frankenState.mode === 'packaging') {
-        document.getElementById('fBarcode').value = stagedUpc || (currentExtracted.barcode || '').replace(/\D/g, '');
-      } else if (frankenState.mismatchType === 'different_album' || frankenState.mismatchType === 'different_format') {
-        // Packaging barcode belongs to the wrong album — don't search Discogs with the mismatched case's UPC!
-        document.getElementById('fBarcode').value = '';
+      currentExtracted.album_title = idTitle;
+      currentExtracted.artists = idArtist ? [idArtist] : [];
+      currentExtracted.raw_catalog_number = idCatno;
+      currentExtracted.cleaned_catalog_variants = isMediaMode
+        ? buildCatalogVariantsFromCatno(idCatno)
+        : (idCatno ? buildCatalogVariantsFromCatno(idCatno) : (frankenState.origCatalogVariants || []));
+      currentExtracted.label = idLabel;
+      currentExtracted.year = idYear;
+      currentExtracted.barcode = idBarcode;
+      if (idFmt && !/^unknown$/i.test(idFmt)) {
+        currentExtracted.detected_format = CC.normalizeDiscogsFormat(idFmt);
+      } else if (!isMediaMode && frankenState.origDetectedFormat) {
+        currentExtracted.detected_format = frankenState.origDetectedFormat;
       }
     }
+
     renderFrankenBanner();
+    if (isMediaMode && frankenState.mediaUnverified) {
+      document.getElementById('inspectorCard').classList.add('hidden');
+      document.getElementById('detectiveCard').classList.add('hidden');
+      document.getElementById('candidatesCard').classList.add('hidden');
+      setStatus('', false);
+      toast('⚠️ Media unverified — retake a close-up of the media label or tap Verify Packaging Instead', 4600);
+      return;
+    }
     await runDiscogsSearch(scanRunId);
   };
 
@@ -3983,7 +4046,7 @@ Return ONLY valid JSON:
       ext.spine_flipped = Boolean(stagedSpineFlipped);
 
       const spineOrigIdx = slotEntries.findIndex(e => e.photo === stagedSlots.spine);
-      const spineAlreadyCropped = Boolean(stagedSlots.spine?.autoCropped && stagedSpineThumbUrl);
+      const spineAlreadyCropped = Boolean(stagedSlots.spine?.spineCropped && stagedSpineThumbUrl);
       if (cfg.autoCropPhotos && !spineAlreadyCropped) {
         const effectiveSpineCrop = (ext.spine_crop && Array.isArray(ext.spine_crop.box_2d))
           ? ext.spine_crop
@@ -4016,6 +4079,7 @@ Return ONLY valid JSON:
                 stagedSlots.spine.rotationDeg = angle;
                 stagedSlots.spine.spineRotation = angle;
                 stagedSlots.spine.autoCropped = true;
+                stagedSlots.spine.spineCropped = true;
               }
               anyPhotoChanged = true;
             }
@@ -4034,6 +4098,7 @@ Return ONLY valid JSON:
             stagedSlots.spine.rotationDeg = exactSpineRot;
             stagedSlots.spine.spineRotation = exactSpineRot;
             stagedSlots.spine.autoCropped = true;
+            stagedSlots.spine.spineCropped = true;
             anyPhotoChanged = true;
           }
         }
@@ -4068,31 +4133,57 @@ Return ONLY valid JSON:
         }
       }
 
+      let frankenMediaUnverified = false;
       if (mismatchType !== 'none') {
         ext.is_franken_copy = true;
         ext.franken_type = mismatchType;
         ext.franken_note = mismatchReason;
         const medId = ext.media_identity && typeof ext.media_identity === 'object' ? ext.media_identity : {};
         const pkgId = ext.packaging_identity && typeof ext.packaging_identity === 'object' ? ext.packaging_identity : {};
+        const mediaReadable = isIdentityReadable(medId);
+        const pkgReadable = isIdentityReadable(pkgId);
+        frankenMediaUnverified = Boolean(!mediaReadable && pkgReadable);
+
         frankenState = {
           active: true,
           mode: 'media',
           mismatchType,
           reason: mismatchReason,
           media: medId,
-          packaging: pkgId
+          packaging: pkgId,
+          mediaUnverified: frankenMediaUnverified,
+          origBarcode: (ext.barcode || '').replace(/\D/g, ''),
+          origCatalogVariants: Array.isArray(ext.cleaned_catalog_variants) ? ext.cleaned_catalog_variants.slice() : [],
+          origDetectedFormat: ext.detected_format || 'Unknown'
         };
-        // Default Discogs search & verification to physical media_identity!
-        if (medId.title || medId.artist || medId.catno) {
-          ext.album_title = medId.title || ext.album_title;
-          if (medId.artist) ext.artists = [medId.artist];
-          ext.raw_catalog_number = medId.catno || ext.raw_catalog_number || '';
-          if (medId.label) ext.label = medId.label;
-          if (medId.year) ext.year = medId.year;
-          if (medId.format && !/^unknown$/i.test(medId.format)) ext.detected_format = CC.normalizeDiscogsFormat(medId.format);
+
+        // STRICT FRANKEN-COPY EVIDENCE ISOLATION in 'media' mode:
+        // Populate search fields & cleaned_catalog_variants STRICTLY from media_identity — NEVER inherit packaging's catno/label/year/barcode!
+        const mTitle = cleanFrankenField(medId.title);
+        const mArtist = cleanFrankenField(medId.artist);
+        const mCatno = cleanFrankenField(medId.catno);
+        const mLabel = cleanFrankenField(medId.label);
+        const mYear = cleanFrankenField(medId.year);
+        const mFmt = cleanFrankenField(medId.format);
+        const mBarcode = String(medId.barcode || '').replace(/\D/g, '');
+
+        ext.album_title = mTitle;
+        ext.artists = mArtist ? [mArtist] : [];
+        ext.raw_catalog_number = mCatno;
+        ext.cleaned_catalog_variants = buildCatalogVariantsFromCatno(mCatno);
+        ext.label = mLabel;
+        ext.year = mYear;
+        ext.barcode = mBarcode;
+        if (mFmt && !/^unknown$/i.test(mFmt)) {
+          ext.detected_format = CC.normalizeDiscogsFormat(mFmt);
         }
+
         renderFrankenBanner();
-        toast(`🧟 Franken-Copy detected (${mismatchType.replace(/_/g, ' ')}) — defaulting to physical media!`, 4600);
+        if (frankenMediaUnverified) {
+          toast('⚠️ Franken-Copy: physical media unreadable — retake close-up or tap Verify Packaging Instead', 5200);
+        } else {
+          toast(`🧟 Franken-Copy detected (${mismatchType.replace(/_/g, ' ')}) — defaulting to physical media!`, 4600);
+        }
       } else {
         ext.is_franken_copy = false;
         ext.franken_type = '';
@@ -4104,9 +4195,9 @@ Return ONLY valid JSON:
       document.getElementById('fTitle').value = ext.album_title || '';
       document.getElementById('fArtist').value = Array.isArray(ext.artists) ? ext.artists.join(', ') : (ext.artists || '');
       document.getElementById('fCatno').value = ext.raw_catalog_number || '';
-      // For different-album/different-format Franken-Copies, don't let the wrong case's UPC hijack the media search!
-      const useBarcode = (mismatchType === 'different_album' || mismatchType === 'different_format')
-        ? ''
+      // In Franken-Copy media mode, NEVER fall back to packaging's scanned UPC or packaging barcode!
+      const useBarcode = (mismatchType !== 'none')
+        ? String(ext.barcode || '').replace(/\D/g, '')
         : (stagedUpc || (ext.barcode || '').replace(/\D/g, ''));
       document.getElementById('fBarcode').value = useBarcode;
       if (ext.detected_format && ext.detected_format !== 'Unknown') {
@@ -4128,6 +4219,11 @@ Return ONLY valid JSON:
         ext.physical_details ? `Clues: ${ext.physical_details}` : ''
       ].filter(Boolean).join(' · ');
       document.getElementById('detectedCluesLine').textContent = clues;
+
+      if (frankenMediaUnverified) {
+        setStatus('', false);
+        return false;
+      }
 
       speakText(`${ext.artists?.[0] || ''} ${ext.album_title || ''}`);
       return true;
@@ -5137,9 +5233,10 @@ Return ONLY valid JSON:
       : `<span class="badge badge-yellow">Unlisted</span>`;
 
     let alerts = '';
-    const visFmt = ['Cassette', 'CD', 'Vinyl'].includes(currentExtracted?.detected_format) ? currentExtracted.detected_format : '';
-    if (activeFormat !== 'Auto' && visFmt && norm(visFmt) !== norm(activeFormat)) {
-      alerts += `<div class="alert-box alert-format-warn">⚠️ Photo shows a ${esc(visFmt)}, but format filter is set to ${esc(activeFormat)}.</div>`;
+    const effFmtFilter = getEffectiveScanFormat();
+    const visFmt = (currentExtracted?.detected_format && currentExtracted.detected_format !== 'Unknown') ? currentExtracted.detected_format : '';
+    if (effFmtFilter !== 'Auto' && visFmt && !CC.matchesMediaFormat(visFmt, effFmtFilter)) {
+      alerts += `<div class="alert-box alert-format-warn">⚠️ Photo shows ${esc(visFmt)}, but format filter is set to ${esc(effFmtFilter)}.</div>`;
     }
     const exactStashDup = !editingStashItem && stashCache.find(s => item.discogs_id && Number(s.discogs_id) === Number(item.discogs_id));
     if (exactStashDup) {
@@ -6101,13 +6198,13 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
   }
 
   // ==================== OPTIONAL SPOTIFY -> TASTE PROFILE AUTO-DRAFTER ====================
-  window.analyzeFullSpotifyDNA = async () => {
-    saveSettings(true);
-    if (!CC.isAiReady()) { toast('Add your Gemini API Key in Settings first'); return; }
-    if (!spotifyProfile || !spotifyProfile.totalArtists) { toast('Sync your Spotify library first'); return; }
+  window.analyzeFullSpotifyDNA = async (opts = {}) => {
+    const { suppressAutoSync = false } = (opts && typeof opts === 'object') ? opts : {};
+    if (!CC.isAiReady()) { toast('Add your Gemini API Key in Settings first'); return false; }
+    if (!spotifyProfile || !spotifyProfile.totalArtists) { toast('Sync your Spotify library first'); return false; }
 
     const btn = document.getElementById('btnAnalyzeDna');
-    btn.disabled = true;
+    if (btn) btn.disabled = true;
 
     try {
       const artistsList = Object.values(spotifyProfile.allArtists || {}).sort((a, b) => (b.count || 0) - (a.count || 0));
@@ -6178,13 +6275,15 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
       updateSpotifyUI();
       setStatus('', false);
       updateCloudUI();
-      scheduleGoogleAutoSync();
+      if (!suppressAutoSync) scheduleGoogleAutoSync();
       toast(`🧠 Taste Profile drafted from ${spotifyProfile.totalArtists} artists & ${spotifyProfile.totalTracks} tracks!`, 4200);
+      return true;
     } catch (err) {
       setStatus('', false);
       if (err.name !== 'AbortError') toast('Taste Profile error: ' + err.message, 4500);
+      return false;
     } finally {
-      btn.disabled = false;
+      if (btn && !rebuildWorkflowActive) btn.disabled = false;
     }
   };
 
@@ -7746,12 +7845,12 @@ Return ONLY valid JSON:
     toast('📥 Saved to Offline Queue (⏳ To Verify) — ready for next scan!', 3400);
   };
 
-  async function hydratePhotoPairFromSavedDataUrl(dataUrl) {
+  async function hydratePhotoPairFromSavedDataUrl(dataUrl, isSpine = false) {
     const s = String(dataUrl || '').trim();
     if (!s || isUnresolvedDriveRef(s) || !s.startsWith('data:image/')) return null;
     const apiB64 = await renderDataUrlToCompactJpegB64(s, 2048, 0.90);
     if (!apiB64) return null;
-    return { apiB64, saveWebp: s, origDataUrl: s, autoCropped: true, cropBox: null, rotationDeg: 0 };
+    return { apiB64, saveWebp: s, origDataUrl: s, autoCropped: true, spineCropped: Boolean(isSpine), cropBox: null, rotationDeg: 0 };
   }
 
   window.startEditStashItem = async (id, opts = {}) => {
@@ -7788,7 +7887,7 @@ Return ONLY valid JSON:
       if (slots.front) stagedSlots.front = await hydratePhotoPairFromSavedDataUrl(slots.front);
       if (slots.back) stagedSlots.back = await hydratePhotoPairFromSavedDataUrl(slots.back);
       if (it.spine_thumb_url) {
-        stagedSlots.spine = await hydratePhotoPairFromSavedDataUrl(it.spine_thumb_url);
+        stagedSlots.spine = await hydratePhotoPairFromSavedDataUrl(it.spine_thumb_url, !isQueued);
         if (stagedSlots.spine) {
           stagedSpineThumbUrl = it.spine_thumb_url;
           stagedSpineSourceUrl = it.spine_source_url || it.spine_thumb_url;
@@ -7898,15 +7997,19 @@ Return ONLY valid JSON:
     const recalBtn = document.getElementById('btnRecalibrateStash');
     if (!recalBtn) return;
     if (recalibratingStash) {
+      recalBtn.classList.remove('hidden');
       recalBtn.disabled = true;
       recalBtn.textContent = recalibrateProgressText || '⏳ Recalibrating...';
       return;
     }
     const staleCount = stashCache.filter(isStashTasteStale).length;
-    recalBtn.disabled = false;
-    recalBtn.textContent = staleCount > 0
-      ? `🔄 Recalibrate Taste (${staleCount} updated)`
-      : '🔄 Recalibrate Taste';
+    if (staleCount === 0) {
+      recalBtn.classList.add('hidden');
+      return;
+    }
+    recalBtn.classList.remove('hidden');
+    recalBtn.disabled = Boolean(rebuildWorkflowActive);
+    recalBtn.textContent = `🔄 Recalibrate All (${staleCount})`;
   }
 
   function getDiscogsFoldersList() {
@@ -8255,7 +8358,7 @@ Return ONLY valid JSON:
         it.discogs_removed ? `<span class="badge badge-yellow">Removed from Discogs</span>` : '',
         it.discogs_link_ambiguous ? `<span class="badge badge-yellow">⚠️ Link Copy</span>` : '',
         (Array.isArray(it.conflicts) && it.conflicts.length) ? `<span class="badge badge-purple">⚠️ Sync Conflict</span>` : '',
-        isStashTasteStale(it) ? `<span class="badge badge-purple">🔄 TASTE</span>` : '',
+        isStashTasteStale(it) ? `<button type="button" class="badge badge-purple" style="border:none; cursor:pointer;" onclick="event.stopPropagation(); recalibrateSingleStashItem(${it.id});" title="Recalibrate taste for this item only">🔄 TASTE</button>` : '',
         it.spine_thumb_url ? `<span class="badge badge-mono">SPINE</span>` : ''
       ].filter(Boolean).join('');
 
@@ -8391,31 +8494,56 @@ Return ONLY valid JSON:
   };
 
   window.recalibrateStashBatch = async (opts = {}) => {
-    const { silentConfirm = false, scope = null } = (opts && typeof opts === 'object') ? opts : {};
-    if (!CC.isAiReady()) { if (!silentConfirm) toast('Add your Gemini API Key in Settings first'); return { updated: 0, skipped: true }; }
-    if (!stashCache.length) { if (!silentConfirm) toast('Your Stash is empty'); return { updated: 0, skipped: true }; }
-    if (recalibratingStash) { if (!silentConfirm) toast('Recalibration already running'); return { updated: 0, skipped: true }; }
+    const { silentConfirm = false, skipConfirm = false, scope = null, suppressAutoSync = false } = (opts && typeof opts === 'object') ? opts : {};
+    const noPrompt = Boolean(silentConfirm || skipConfirm);
+    if (!CC.isAiReady()) { if (!noPrompt) toast('Add your Gemini API Key in Settings first'); return { updated: 0, failed: 0, skipped: true }; }
+    if (!stashCache.length) { if (!noPrompt) toast('Your Stash is empty'); return { updated: 0, failed: 0, skipped: true }; }
+    if (recalibratingStash) { if (!noPrompt) toast('Recalibration already running'); return { updated: 0, failed: 0, skipped: true }; }
 
     const staleItems = stashCache.filter(isStashTasteStale);
     let targets = scope === 'all' ? stashCache.slice() : (scope === 'stale' ? staleItems : staleItems);
-    if (!silentConfirm) {
+    if (!noPrompt) {
       if (staleItems.length > 0 && staleItems.length < stashCache.length) {
-        if (!confirm(`Recalibrate ${staleItems.length} stale Stash item(s) whose Taste Profile / Spotify library changed?`)) return { updated: 0, cancelled: true };
+        if (!confirm(`Recalibrate ${staleItems.length} stale Stash item(s) whose Taste Profile / Spotify library changed?`)) return { updated: 0, failed: 0, cancelled: true };
       } else if (staleItems.length === 0) {
-        if (!confirm(`All ${stashCache.length} Stash items are up to date. Re-score ALL ${stashCache.length} items anyway?`)) return { updated: 0, cancelled: true };
+        if (!confirm(`All ${stashCache.length} Stash items are up to date. Re-score ALL ${stashCache.length} items anyway?`)) return { updated: 0, failed: 0, cancelled: true };
         targets = stashCache.slice();
       } else {
-        if (!confirm(`Recalibrate all ${targets.length} Stash item(s) against your latest Taste Profile & Soft Spots?`)) return { updated: 0, cancelled: true };
+        if (!confirm(`Recalibrate all ${targets.length} Stash item(s) against your latest Taste Profile & Soft Spots?`)) return { updated: 0, failed: 0, cancelled: true };
       }
     }
-    if (!targets.length) return { updated: 0, skipped: true };
+    if (!targets.length) return { updated: 0, failed: 0, skipped: true };
 
-    const BATCH_SIZE = 10;
+    const BATCH_SIZE = 5;
     recalibratingStash = true;
     recalibrateProgressText = `⏳ Recalibrating 1–${Math.min(BATCH_SIZE, targets.length)} of ${targets.length}...`;
     updateRecalibrateStashBtn();
 
     let updatedTotal = 0;
+    let failedTotal = 0;
+
+    const applyScoreToItem = (it, sc, nowTs) => {
+      const score = Math.max(1, Math.min(10, Math.round(Number(sc.score) || 5)));
+      const verdict = ['KEEP', 'LISTEN', 'SELL / SKIP'].includes(sc.verdict)
+        ? sc.verdict
+        : (score >= 7 ? 'KEEP' : score >= 5 ? 'LISTEN' : 'SELL / SKIP');
+      const prev = { ...it };
+      it.taste_score = score;
+      it.taste_verdict = verdict;
+      if (sc.summary) it.taste_summary = String(sc.summary).trim();
+      if (sc.context_note !== undefined) it.context_note = String(sc.context_note || '').trim();
+      if (Array.isArray(sc.notable_songs)) {
+        it.notable_songs = normalizeNotableList(sc.notable_songs, it.artist).slice(0, 4);
+      }
+      if (sc.litmus_track) it.litmus_track = String(sc.litmus_track).trim();
+      else if (!it.litmus_track && it.tracklist?.[0]?.title) it.litmus_track = it.tracklist[0].title;
+      if (sc.litmus_artist !== undefined) it.litmus_artist = String(sc.litmus_artist || '').trim();
+      it.taste_scored_at = nowTs;
+      return CC.stampStashRevision(it, prev, [
+        'taste_score', 'taste_verdict', 'taste_summary', 'context_note',
+        'notable_songs', 'litmus_track', 'litmus_artist', 'taste_scored_at'
+      ]);
+    };
 
     try {
       for (let start = 0; start < targets.length; start += BATCH_SIZE) {
@@ -8431,39 +8559,48 @@ Return ONLY valid JSON:
           it.spotify_matches = lm;
           return { it, lm };
         });
-        const prompt = buildTasteEvaluationPrompt(chunkWithMatches);
-        const batchRes = await CC.callAI([{ text: prompt }], null, { retryLabel: `Recalibrate ${start + 1}-${endNum}`, maxOutputTokens: 8192 });
-        if (!recalibratingStash) break;
 
-        const scoreMap = new Map((batchRes.scores || []).map(s => [s.idx, s]));
-        const now = Date.now();
         const stampedChunk = [];
-        for (let i = 0; i < chunk.length; i++) {
-          const it = chunk[i];
-          const sc = scoreMap.get(i);
-          if (!sc) continue;
-          const score = Math.max(1, Math.min(10, Math.round(Number(sc.score) || 5)));
-          const verdict = ['KEEP', 'LISTEN', 'SELL / SKIP'].includes(sc.verdict)
-            ? sc.verdict
-            : (score >= 7 ? 'KEEP' : score >= 5 ? 'LISTEN' : 'SELL / SKIP');
-          const prev = { ...it };
-          it.taste_score = score;
-          it.taste_verdict = verdict;
-          if (sc.summary) it.taste_summary = String(sc.summary).trim();
-          if (sc.context_note !== undefined) it.context_note = String(sc.context_note || '').trim();
-          if (Array.isArray(sc.notable_songs)) {
-            it.notable_songs = normalizeNotableList(sc.notable_songs, it.artist).slice(0, 4);
+        let batchParseFailed = false;
+        try {
+          const prompt = buildTasteEvaluationPrompt(chunkWithMatches);
+          const batchRes = await CC.callAI([{ text: prompt }], null, { retryLabel: `Recalibrate ${start + 1}-${endNum}`, maxOutputTokens: 8192 });
+          if (!recalibratingStash) break;
+
+          const scoreMap = new Map((batchRes?.scores || []).map(s => [s.idx, s]));
+          const now = Date.now();
+          for (let i = 0; i < chunk.length; i++) {
+            const sc = scoreMap.get(i);
+            if (!sc) { failedTotal++; continue; }
+            stampedChunk.push(applyScoreToItem(chunk[i], sc, now));
+            updatedTotal++;
           }
-          if (sc.litmus_track) it.litmus_track = String(sc.litmus_track).trim();
-          else if (!it.litmus_track && it.tracklist?.[0]?.title) it.litmus_track = it.tracklist[0].title;
-          if (sc.litmus_artist !== undefined) it.litmus_artist = String(sc.litmus_artist || '').trim();
-          it.taste_scored_at = now;
-          const stamped = CC.stampStashRevision(it, prev, [
-            'taste_score', 'taste_verdict', 'taste_summary', 'context_note',
-            'notable_songs', 'litmus_track', 'litmus_artist', 'taste_scored_at'
-          ]);
-          stampedChunk.push(stamped);
-          updatedTotal++;
+        } catch (chunkErr) {
+          if (chunkErr?.name === 'AbortError' || !recalibratingStash) throw chunkErr;
+          if (chunkErr?.code !== 'AI_JSON_PARSE') throw chunkErr;
+          batchParseFailed = true;
+        }
+
+        // Resilient 1-item-at-a-time fallback if the 5-item chunk still failed with AI_JSON_PARSE
+        if (batchParseFailed) {
+          for (let i = 0; i < chunkWithMatches.length; i++) {
+            if (!recalibratingStash) break;
+            const { it, lm } = chunkWithMatches[i];
+            const itemNum = start + i + 1;
+            recalibrateProgressText = `⏳ Fallback ${itemNum}/${targets.length}...`;
+            updateRecalibrateStashBtn();
+            setStatus(`🔄 Recalibrating item ${itemNum}/${targets.length} (1-by-1 fallback)...`, true, { cancellable: true });
+            try {
+              const singlePrompt = buildTasteEvaluationPrompt(it, { localMatch: lm });
+              const singleRes = await CC.callAI([{ text: singlePrompt }], null, { retryLabel: `Recalibrate ${itemNum}/${targets.length}`, maxOutputTokens: 2048 });
+              if (!recalibratingStash) break;
+              stampedChunk.push(applyScoreToItem(it, singleRes, Date.now()));
+              updatedTotal++;
+            } catch (singleErr) {
+              if (singleErr?.name === 'AbortError' || !recalibratingStash) throw singleErr;
+              failedTotal++;
+            }
+          }
         }
 
         if (stampedChunk.length > 0) {
@@ -8478,12 +8615,18 @@ Return ONLY valid JSON:
       setStatus('', false);
       if (updatedTotal > 0) {
         updateCloudUI();
-        scheduleGoogleAutoSync();
+        if (!suppressAutoSync) scheduleGoogleAutoSync();
+      }
+      if (failedTotal > 0) {
+        toast(`⚠️ Recalibrated ${updatedTotal} item(s), ${failedTotal} failed`, 4600);
+      } else if (updatedTotal > 0) {
         toast(`✅ Recalibrated ${updatedTotal} Stash item(s)!`, 3600);
       }
+      return { updated: updatedTotal, failed: failedTotal, total: targets.length, cancelled: !recalibratingStash };
     } catch (err) {
       setStatus('', false);
       if (err.name !== 'AbortError') toast(`Recalibration stopped after ${updatedTotal} item(s): ${err.message}`, 4800);
+      return { updated: updatedTotal, failed: failedTotal + Math.max(0, targets.length - updatedTotal - failedTotal), total: targets.length, error: err?.message || 'Failed', cancelled: err?.name === 'AbortError' };
     } finally {
       recalibratingStash = false;
       recalibrateProgressText = '';
@@ -10222,7 +10365,7 @@ Return ONLY valid JSON:
 
   // 1. Connect Google Drive: sign in -> identify account -> immediately await initial pull in ONE click
   window.googleConnectAndLoad = async () => {
-    saveSettings(true);
+    saveSettings(true, 'cloud');
     try {
       await CC.requestGoogleAccessToken('');
       updateCloudUI();
@@ -10238,7 +10381,7 @@ Return ONLY valid JSON:
 
   // 2. Load from Google Drive: read-only pull & merge (ZERO Drive writes!)
   window.loadFromGoogleDriveUI = async () => {
-    saveSettings(true);
+    saveSettings(true, 'cloud');
     if (!CC.isGoogleSignedIn()) {
       await googleConnectAndLoad();
       return;
@@ -10298,7 +10441,7 @@ Return ONLY valid JSON:
   }
 
   window.syncGoogleDriveNow = async () => {
-    saveSettings(true);
+    saveSettings(true, 'cloud');
     await runGoogleSyncFlow({ interactive: true, quiet: false, publishInitialLocal: true });
   };
 
@@ -10333,6 +10476,7 @@ Return ONLY valid JSON:
   };
 
   function scheduleGoogleAutoSync() {
+    if (rebuildWorkflowActive) return;
     if (!cfg.googleAutoSync || !CC.isGoogleSignedIn()) return;
     if (cloudAccountMismatch || cloudEmptyAwaitingPublish) return;
     if (!cfg.googleBoundEmail || (cfg.googleEmail && cfg.googleBoundEmail !== cfg.googleEmail)) return;
@@ -10342,6 +10486,7 @@ Return ONLY valid JSON:
     }
     clearTimeout(googleAutoSyncTimer);
     googleAutoSyncTimer = setTimeout(() => {
+      if (rebuildWorkflowActive) return;
       if (cfg.googleAutoSync && CC.isGoogleSignedIn() && !cloudAccountMismatch && !cloudEmptyAwaitingPublish) {
         runGoogleSyncFlow({ interactive: false, quiet: true, publishInitialLocal: false });
       }
@@ -10368,8 +10513,9 @@ Return ONLY valid JSON:
   }
 
   // Single-flight per account Discogs collection & folder reconciliation (explicit user-triggered only; Drive-first gated!)
-  window.syncWithDiscogsUI = async (manual = true, quiet = false) => {
-    if (manual) saveSettings(true);
+  window.syncWithDiscogsUI = async (manual = true, quiet = false, opts = {}) => {
+    const { skipDriveGate = false, suppressAutoSync = false } = (opts && typeof opts === 'object') ? opts : {};
+    if (manual && !suppressAutoSync) saveSettings(true, 'discogs');
     const account = (cfg.discogsUser || '').trim();
     if (!cfg.discogsToken || !account) {
       if (manual) toast('Verify your Discogs account in Settings first');
@@ -10379,37 +10525,39 @@ Return ONLY valid JSON:
       return activeDiscogsRefreshPromise;
     }
 
-    // Drive-Before-Discogs Safety Gate:
+    // Drive-Before-Discogs Safety Gate (skipped when called inside Rebuild Workflow, where Drive runs explicitly in Steps 1 & 6):
     // 1) If Google Drive is connected & signed in -> sync Drive FIRST so photos, spines & grades load before checking Discogs.
     // 2) If Google Drive was previously configured but signed out/expired -> block Discogs sync with a clear prompt.
     // 3) If Google Drive was never configured (local-only user) -> proceed normally.
-    const driveConfigured = Boolean(cfg.googleBoundEmail || cfg.googleEmail || cfg.googleLastSyncAt || cfg.googleLastLoadAt);
-    if (CC.isGoogleSignedIn() && !cloudAccountMismatch) {
-      if (!quiet) setStatus('☁️ Syncing Google Drive before Discogs...', true);
-      const driveRes = await runGoogleSyncFlow({ interactive: false, quiet: true, publishInitialLocal: false });
-      const driveIncomplete = Boolean(
-        !driveRes ||
-        !driveRes.ok ||
-        driveRes.status === 'account_mismatch' ||
-        driveRes.status === 'partial' ||
-        (Array.isArray(driveRes.partialErrors) && driveRes.partialErrors.length > 0) ||
-        driveRes.awaitingExplicitPublish
-      );
-      if (driveIncomplete) {
+    if (!skipDriveGate) {
+      const driveConfigured = Boolean(cfg.googleBoundEmail || cfg.googleEmail || cfg.googleLastSyncAt || cfg.googleLastLoadAt);
+      if (CC.isGoogleSignedIn() && !cloudAccountMismatch) {
+        if (!quiet) setStatus('☁️ Syncing Google Drive before Discogs...', true);
+        const driveRes = await runGoogleSyncFlow({ interactive: false, quiet: true, publishInitialLocal: false });
+        const driveIncomplete = Boolean(
+          !driveRes ||
+          !driveRes.ok ||
+          driveRes.status === 'account_mismatch' ||
+          driveRes.status === 'partial' ||
+          (Array.isArray(driveRes.partialErrors) && driveRes.partialErrors.length > 0) ||
+          driveRes.awaitingExplicitPublish
+        );
+        if (driveIncomplete) {
+          if (!quiet) {
+            setStatus('', false);
+            toast(driveRes?.status === 'partial' || driveRes?.partialErrors?.length
+              ? '⚠️ Google Drive pull was incomplete (some cloud files failed to load) — Discogs sync cancelled to protect photos and grades.'
+              : '⚠️ Google Drive sync failed or needs attention — Discogs sync cancelled so photos and grades stay protected.', 5400);
+          }
+          return null;
+        }
+      } else if (driveConfigured) {
         if (!quiet) {
           setStatus('', false);
-          toast(driveRes?.status === 'partial' || driveRes?.partialErrors?.length
-            ? '⚠️ Google Drive pull was incomplete (some cloud files failed to load) — Discogs sync cancelled to protect photos and grades.'
-            : '⚠️ Google Drive sync failed or needs attention — Discogs sync cancelled so photos and grades stay protected.', 5400);
+          toast('Sync Google Drive first so photos and grades load before checking Discogs.', 5200);
         }
         return null;
       }
-    } else if (driveConfigured) {
-      if (!quiet) {
-        setStatus('', false);
-        toast('Sync Google Drive first so photos and grades load before checking Discogs.', 5200);
-      }
-      return null;
     }
 
     const btns = [document.getElementById('btnSyncDiscogsIndex')].filter(Boolean);
@@ -10430,7 +10578,7 @@ Return ONLY valid JSON:
         renderStash();
         if (activeStashItem?.id) openStashDetail(activeStashItem.id, true);
         updateCloudUI();
-        scheduleGoogleAutoSync();
+        if (!suppressAutoSync) scheduleGoogleAutoSync();
 
         // Automatically hydrate tracklists, pressing notes & market values for any Discogs copies not yet hydrated
         const missingDetailCount = stashCache.filter(x => Number(x.discogs_id || 0) > 0 && !Number(x.discogs_details_synced_at || 0)).length;
@@ -10449,7 +10597,7 @@ Return ONLY valid JSON:
             renderStash();
             if (activeStashItem?.id) openStashDetail(activeStashItem.id, true);
             updateCloudUI();
-            scheduleGoogleAutoSync();
+            if (!suppressAutoSync) scheduleGoogleAutoSync();
           }
         }
 
@@ -10530,13 +10678,38 @@ Return ONLY valid JSON:
     if (btnT) btnT.disabled = !tasteDirty;
   };
 
+  function setRebuildLockdown(locked) {
+    const isLocked = Boolean(locked);
+    const settingsView = document.getElementById('view-settings');
+    if (settingsView) {
+      settingsView.querySelectorAll('button, input, select, textarea').forEach(el => {
+        if (el.id === 'btnCancelRebuild') {
+          el.disabled = false;
+          return;
+        }
+        el.disabled = isLocked;
+      });
+    }
+    document.querySelectorAll('.bottom-nav .nav-btn').forEach(b => {
+      const isOtherTab = b.dataset.view !== currentView;
+      b.classList.toggle('nav-locked', isLocked && isOtherTab);
+      if (isLocked && isOtherTab) b.setAttribute('aria-disabled', 'true');
+      else b.removeAttribute('aria-disabled');
+    });
+    const recalBtn = document.getElementById('btnRecalibrateStash');
+    if (recalBtn && isLocked) recalBtn.disabled = true;
+  }
+
   window.updateRebuildWorkflowBtn = () => {
     const ids = ['rbStepDrivePre', 'rbStepSpotify', 'rbStepDraftTaste', 'rbStepDiscogs', 'rbStepRecalibrate', 'rbStepDrivePost'];
     const anyChecked = ids.some(id => Boolean(document.getElementById(id)?.checked));
     const runBtn = document.getElementById('btnRunRebuild');
     const cancelBtn = document.getElementById('btnCancelRebuild');
     if (runBtn) runBtn.disabled = rebuildWorkflowActive || !anyChecked;
-    if (cancelBtn) cancelBtn.classList.toggle('hidden', !rebuildWorkflowActive);
+    if (cancelBtn) {
+      cancelBtn.classList.toggle('hidden', !rebuildWorkflowActive);
+      cancelBtn.disabled = !rebuildWorkflowActive;
+    }
   };
 
   window.cancelMaintenanceWorkflow = () => {
@@ -10560,125 +10733,224 @@ Return ONLY valid JSON:
     if (document.getElementById('rbStepDrivePost')?.checked) steps.push({ key: 'drive_post', label: 'Pushing final updates to Google Drive...' });
     if (!steps.length) return;
 
+    const spMode = document.getElementById('rbSpotifyMode')?.value === 'full' ? 'full' : 'liked';
+    const recalScope = document.getElementById('rbRecalMode')?.value === 'all' ? 'all' : 'stale';
+
     rebuildWorkflowActive = true;
     rebuildWorkflowCancelled = false;
+    clearTimeout(googleAutoSyncTimer);
+    setRebuildLockdown(true);
     updateRebuildWorkflowBtn();
 
     const progWrap = document.getElementById('rebuildProgressWrap');
     const stepLbl = document.getElementById('rebuildStepLabel');
     const pctLbl = document.getElementById('rebuildPctLabel');
     const fillEl = document.getElementById('rebuildProgressFill');
-    const setProg = (idx, label, pct) => {
-      if (progWrap) progWrap.classList.remove('hidden');
+    const setProg = (label, pct, tone = 'running', rightText = null) => {
+      if (progWrap) {
+        progWrap.classList.remove('hidden', 'is-ok', 'is-warn', 'is-err');
+        if (tone === 'ok') progWrap.classList.add('is-ok');
+        else if (tone === 'warn') progWrap.classList.add('is-warn');
+        else if (tone === 'err') progWrap.classList.add('is-err');
+      }
       if (stepLbl) stepLbl.textContent = label;
       const p = Math.max(0, Math.min(100, Math.round(pct)));
-      if (pctLbl) pctLbl.textContent = `${p}%`;
-      if (fillEl) fillEl.style.width = `${p}%`;
+      if (pctLbl) pctLbl.textContent = rightText !== null ? rightText : `${p}%`;
+      if (fillEl) {
+        fillEl.style.width = `${p}%`;
+        fillEl.classList.remove('is-ok', 'is-warn', 'is-err');
+        if (tone === 'ok') fillEl.classList.add('is-ok');
+        else if (tone === 'warn') fillEl.classList.add('is-warn');
+        else if (tone === 'err') fillEl.classList.add('is-err');
+      }
     };
+
+    const stepResults = [];
+    const summarizeCounts = () => {
+      const completed = stepResults.filter(r => r.status === 'completed').length;
+      const skipped = stepResults.filter(r => r.status === 'skipped').length;
+      const failed = stepResults.filter(r => r.status === 'failed').length;
+      const parts = [];
+      if (completed > 0 || (skipped === 0 && failed === 0)) parts.push(`${completed} completed`);
+      if (skipped > 0) parts.push(`${skipped} skipped`);
+      if (failed > 0) parts.push(`${failed} failed`);
+      return { completed, skipped, failed, text: parts.join(' · ') };
+    };
+
+    let stoppedEarly = false;
 
     try {
       for (let i = 0; i < steps.length; i++) {
         if (rebuildWorkflowCancelled) {
-          setProg(i, 'Cancelled by user.', (i / steps.length) * 100);
+          stoppedEarly = true;
+          const cnt = summarizeCounts();
+          setProg(`Cancelled (${cnt.text})`, (cnt.completed / steps.length) * 100, 'warn', `${cnt.completed}/${steps.length}`);
           toast('Maintenance workflow cancelled');
           return;
         }
         const st = steps[i];
-        setProg(i, `Step ${i + 1}/${steps.length}: ${st.label}`, (i / steps.length) * 100);
+        setProg(`Step ${i + 1}/${steps.length}: ${st.label}`, (i / steps.length) * 100, 'running');
+
+        let status = 'completed';
 
         if (st.key === 'drive_pre') {
-          if (CC.isGoogleSignedIn() && !cloudAccountMismatch) {
+          if (!CC.isGoogleSignedIn() || cloudAccountMismatch) {
+            status = 'skipped';
+          } else {
             const dRes = await runGoogleSyncFlow({ interactive: false, quiet: false, publishInitialLocal: false });
             if (!dRes || !dRes.ok || dRes.status === 'account_mismatch' || dRes.status === 'partial') {
-              setProg(i, `Stopped at Step ${i + 1}/${steps.length}: Google Drive sync needs attention.`, (i / steps.length) * 100);
-              toast('Workflow paused — resolve Google Drive sync first', 4500);
+              status = 'failed';
+              stepResults.push({ key: st.key, status });
+              stoppedEarly = true;
+              const cnt = summarizeCounts();
+              setProg(`Stopped at Step ${i + 1}/${steps.length}: Google Drive sync failed (${cnt.text})`, (cnt.completed / steps.length) * 100, 'err', `${cnt.completed}/${steps.length}`);
+              toast('Workflow stopped — resolve Google Drive sync first', 4500);
               return;
             }
           }
         } else if (st.key === 'spotify') {
           if (!cfg.spotifyClientId) {
-            toast('Skipped Spotify step — no Spotify Client ID set', 3200);
-            continue;
-          }
-          const spMode = document.getElementById('rbSpotifyMode')?.value === 'full' ? 'full' : 'liked';
-          const remCd = CC.getSpotifyCooldownRemainingSec();
-          if (remCd > 0) {
-            setProg(i, `Paused at Step ${i + 1}/${steps.length}: Spotify cooling down (${remCd}s). Resume once cooldown finishes.`, (i / steps.length) * 100);
-            ensureSpotifyCooldownTicker();
-            toast(`⏸️ Workflow paused — Spotify cooldown (${remCd}s remaining). Resume cleanly once timer hits 0.`, 5200);
-            return;
-          }
-          const canRunDirect = Boolean(
-            (cfg.spotifyRefreshToken && await CC.refreshSpotifyToken()) ||
-            (cfg.spotifyAccessToken && Date.now() < Number(cfg.spotifyExpiresAt || 0))
-          );
-          if (!canRunDirect) {
-            setProg(i, `Paused at Step ${i + 1}/${steps.length}: Reconnect Spotify in Section 4 first.`, (i / steps.length) * 100);
-            toast('Spotify login expired — reconnect in Section 4 and re-run workflow', 4800);
-            return;
-          }
-          const prevDna = spotifyProfile?.tasteDna || document.getElementById('cfgTasteDna')?.value.trim() || '';
-          const prevSoft = spotifyProfile?.softSpots || document.getElementById('cfgSoftSpots')?.value.trim() || '';
-          const useResume = Boolean(hasActiveSpotifyCheckpoint() && spotifyCheckpoint.mode === spMode);
-          const spRes = await CC.syncSpotifyResumable({
-            mode: useResume ? 'resume' : spMode,
-            resume: useResume,
-            existingDna: prevDna,
-            existingSoftSpots: prevSoft,
-            autoCommitProfile: true
-          });
-          if (spRes?.completed && spRes.profile) {
-            spotifyProfile = spRes.profile;
-            spotifyCheckpoint = null;
-            tasteCache.clear();
-            updateSpotifyUI();
-            updateSettingsDirtyButtons();
-          } else if (spRes?.paused) {
-            spotifyCheckpoint = spRes.checkpoint ? CC.normalizeSpotifyCheckpoint(spRes.checkpoint) : await CC.getSpotifyCheckpoint();
-            updateSpotifyUI();
-            const waitSec = spRes.retryAfterSec || CC.getSpotifyCooldownRemainingSec() || 90;
-            setProg(i, `Paused at Step ${i + 1}/${steps.length}: Spotify HTTP 429 cooldown (${waitSec}s) — progress saved!`, (i / steps.length) * 100);
-            if (spRes.reason === 'rate_limit') ensureSpotifyCooldownTicker();
-            toast(`⏸️ Workflow paused on Spotify rate limit (${waitSec}s). Progress saved — resume safely once timer completes.`, 5600);
-            return;
+            status = 'skipped';
+          } else {
+            const remCd = CC.getSpotifyCooldownRemainingSec();
+            if (remCd > 0) {
+              status = 'skipped';
+              stepResults.push({ key: st.key, status });
+              stoppedEarly = true;
+              const cnt = summarizeCounts();
+              setProg(`Paused at Step ${i + 1}/${steps.length}: Spotify cooling down (${remCd}s) · ${cnt.text}`, (cnt.completed / steps.length) * 100, 'warn', `${cnt.completed}/${steps.length}`);
+              ensureSpotifyCooldownTicker();
+              toast(`⏸️ Workflow paused — Spotify cooldown (${remCd}s remaining). Resume once timer hits 0.`, 5200);
+              return;
+            }
+            const canRunDirect = Boolean(
+              (cfg.spotifyRefreshToken && await CC.refreshSpotifyToken()) ||
+              (cfg.spotifyAccessToken && Date.now() < Number(cfg.spotifyExpiresAt || 0))
+            );
+            if (!canRunDirect) {
+              status = 'skipped';
+              stepResults.push({ key: st.key, status });
+              stoppedEarly = true;
+              const cnt = summarizeCounts();
+              setProg(`Paused at Step ${i + 1}/${steps.length}: Reconnect Spotify in Section 4 · ${cnt.text}`, (cnt.completed / steps.length) * 100, 'warn', `${cnt.completed}/${steps.length}`);
+              toast('Spotify login expired — reconnect in Section 4 and re-run workflow', 4800);
+              return;
+            }
+            const prevDna = spotifyProfile?.tasteDna || document.getElementById('cfgTasteDna')?.value.trim() || '';
+            const prevSoft = spotifyProfile?.softSpots || document.getElementById('cfgSoftSpots')?.value.trim() || '';
+            const useResume = Boolean(hasActiveSpotifyCheckpoint() && spotifyCheckpoint.mode === spMode);
+            const spRes = await CC.syncSpotifyResumable({
+              mode: useResume ? 'resume' : spMode,
+              resume: useResume,
+              existingDna: prevDna,
+              existingSoftSpots: prevSoft,
+              autoCommitProfile: true
+            });
+            if (spRes?.completed && spRes.profile) {
+              spotifyProfile = spRes.profile;
+              spotifyCheckpoint = null;
+              tasteCache.clear();
+              updateSpotifyUI();
+              status = 'completed';
+            } else if (spRes?.paused) {
+              spotifyCheckpoint = spRes.checkpoint ? CC.normalizeSpotifyCheckpoint(spRes.checkpoint) : await CC.getSpotifyCheckpoint();
+              updateSpotifyUI();
+              const waitSec = spRes.retryAfterSec || CC.getSpotifyCooldownRemainingSec() || 90;
+              status = 'failed';
+              stepResults.push({ key: st.key, status });
+              stoppedEarly = true;
+              const cnt = summarizeCounts();
+              setProg(`Paused at Step ${i + 1}/${steps.length}: Spotify cooldown (${waitSec}s) · ${cnt.text}`, (cnt.completed / steps.length) * 100, 'warn', `${cnt.completed}/${steps.length}`);
+              if (spRes.reason === 'rate_limit') ensureSpotifyCooldownTicker();
+              toast(`⏸️ Workflow paused on Spotify rate limit (${waitSec}s). Progress saved — resume safely once timer completes.`, 5600);
+              return;
+            } else {
+              status = 'failed';
+            }
           }
         } else if (st.key === 'draft_taste') {
-          if (CC.isAiReady() && spotifyProfile?.totalArtists > 0) {
-            await analyzeFullSpotifyDNA();
+          if (!CC.isAiReady() || !(spotifyProfile?.totalArtists > 0)) {
+            status = 'skipped';
+          } else {
+            const draftedOk = await analyzeFullSpotifyDNA({ suppressAutoSync: true });
+            status = draftedOk ? 'completed' : 'failed';
           }
         } else if (st.key === 'discogs') {
-          if (cfg.discogsToken && cfg.discogsUser) {
-            await syncWithDiscogsUI(true, false);
+          if (!cfg.discogsToken || !cfg.discogsUser) {
+            status = 'skipped';
+          } else {
+            const dRec = await syncWithDiscogsUI(true, false, { skipDriveGate: true, suppressAutoSync: true });
+            status = dRec ? 'completed' : 'failed';
           }
         } else if (st.key === 'recalibrate') {
-          if (CC.isAiReady() && stashCache.length > 0) {
-            const scope = document.getElementById('rbRecalMode')?.value === 'all' ? 'all' : 'stale';
-            await recalibrateStashBatch({ silentConfirm: true, scope });
+          if (!CC.isAiReady() || !stashCache.length) {
+            status = 'skipped';
+          } else {
+            const rRes = await recalibrateStashBatch({ skipConfirm: true, silentConfirm: true, scope: recalScope, suppressAutoSync: true });
+            if (rRes?.cancelled) {
+              rebuildWorkflowCancelled = true;
+              status = 'failed';
+            } else if (rRes?.skipped) {
+              status = 'skipped';
+            } else if (rRes?.error || Number(rRes?.failed || 0) > 0) {
+              status = 'failed';
+            } else {
+              status = 'completed';
+            }
           }
         } else if (st.key === 'drive_post') {
-          if (CC.isGoogleSignedIn() && !cloudAccountMismatch) {
-            await runGoogleSyncFlow({ interactive: false, quiet: false, publishInitialLocal: true });
+          if (!CC.isGoogleSignedIn() || cloudAccountMismatch) {
+            status = 'skipped';
+          } else {
+            const pRes = await runGoogleSyncFlow({ interactive: false, quiet: false, publishInitialLocal: true });
+            status = (pRes && pRes.ok && pRes.status !== 'partial' && pRes.status !== 'account_mismatch') ? 'completed' : 'failed';
           }
         }
-        setProg(i + 1, `Completed Step ${i + 1}/${steps.length}`, ((i + 1) / steps.length) * 100);
+
+        stepResults.push({ key: st.key, status });
+        if (rebuildWorkflowCancelled) {
+          stoppedEarly = true;
+          const cnt = summarizeCounts();
+          setProg(`Cancelled (${cnt.text})`, (cnt.completed / steps.length) * 100, 'warn', `${cnt.completed}/${steps.length}`);
+          toast('Maintenance workflow cancelled');
+          return;
+        }
+        setProg(`Step ${i + 1}/${steps.length} ${status}`, ((i + 1) / steps.length) * 100, status === 'failed' ? 'err' : (status === 'skipped' ? 'warn' : 'running'));
       }
-      setProg(steps.length, `✅ Completed all ${steps.length} step(s)!`, 100);
-      toast(`✅ Maintenance workflow complete (${steps.length}/${steps.length} steps)!`, 4200);
+
+      if (!stoppedEarly) {
+        const cnt = summarizeCounts();
+        const allClean = cnt.failed === 0 && cnt.skipped === 0 && cnt.completed === steps.length;
+        const tone = cnt.failed > 0 ? 'err' : (cnt.skipped > 0 ? 'warn' : 'ok');
+        const finalPct = allClean ? 100 : (cnt.completed / steps.length) * 100;
+        const rightText = allClean ? '100%' : `${cnt.completed}/${steps.length}`;
+        const finalMsg = allClean
+          ? `✅ Done: ${cnt.completed} completed`
+          : `Done: ${cnt.text}`;
+        setProg(finalMsg, finalPct, tone, rightText);
+        toast(allClean ? `✅ Rebuild complete (${cnt.completed}/${steps.length})` : `⚠️ Rebuild finished — ${cnt.text}`, 4600);
+      }
     } catch (err) {
       if (err?.name !== 'AbortError') {
-        setProg(0, `Error: ${err?.message || 'Failed'}`, 0);
+        const cnt = summarizeCounts();
+        setProg(`Error: ${err?.message || 'Failed'} (${cnt.text})`, (cnt.completed / steps.length) * 100, 'err', `${cnt.completed}/${steps.length}`);
         toast('Workflow error: ' + (err?.message || 'Failed'), 4800);
       }
     } finally {
       rebuildWorkflowActive = false;
       rebuildWorkflowCancelled = false;
       setStatus('', false);
+      setRebuildLockdown(false);
       updateRebuildWorkflowBtn();
       updateSettingsDirtyButtons();
+      updateSpotifyUI();
+      updateCloudUI();
+      updateRecalibrateStashBtn();
     }
   };
 
-  window.saveSettings = (silent = false) => {
+  window.saveSettings = (silent = false, scope = 'all') => {
+    const sc = scope || 'all';
     // Snapshot prior values of all synced preferences & secrets BEFORE mutating cfg so
     // clicking Sync or saving unchanged settings NEVER advances cfgUpdatedAt and overwrites newer cloud prefs!
     const prefKeys = CC.PREF_KEYS || [
@@ -10694,31 +10966,39 @@ Return ONLY valid JSON:
     prefKeys.forEach(k => { prevVals[k] = JSON.stringify(cfg[k]); });
     secretKeys.forEach(k => { prevVals[k] = JSON.stringify(cfg[k]); });
 
-    cfg.googleClientId = (document.getElementById('cfgGoogleClientId')?.value || '').trim();
-    cfg.googleAutoSync = document.getElementById('cfgGoogleAutoSync')?.checked !== false;
-    cfg.googleSyncSecrets = Boolean(document.getElementById('cfgGoogleSyncSecrets')?.checked);
-    cfg.geminiKey = document.getElementById('cfgGeminiKey').value.trim();
-    cfg.geminiModel = document.getElementById('cfgGeminiModel').value;
-    cfg.autoPlayHighlight = document.getElementById('cfgAutoPlay').checked;
-    cfg.autoDetective = document.getElementById('cfgAutoDetective').checked;
-    cfg.autoGradeOnScan = Boolean(document.getElementById('cfgAutoGradeOnScan')?.checked);
-    const scanChk = document.getElementById('scanAutoGradeChk');
-    if (scanChk) scanChk.checked = cfg.autoGradeOnScan;
-    const acEl = document.getElementById('cfgAutoCropPhotos');
-    if (acEl) cfg.autoCropPhotos = Boolean(acEl.checked);
-    const pqEl = document.getElementById('cfgPhotoQuality');
-    if (pqEl) cfg.photoQuality = pqEl.value || 'medium';
-    cfg.discogsToken = document.getElementById('cfgDiscogsToken').value.trim();
-    cfg.discogsFolderId = document.getElementById('cfgDiscogsFolder').value || '1';
-    cfg.homeCountry = document.getElementById('cfgHomeCountry').value;
-    cfg.fetchVgSuggestions = document.getElementById('cfgFetchVg').checked;
-    cfg.threshold = Number(document.getElementById('cfgThreshold').value) || 20;
-    cfg.voice = document.getElementById('cfgVoice').checked;
-    cfg.spotifyClientId = document.getElementById('cfgSpotifyClientId').value.trim();
-    cfg.showSpotify = document.getElementById('cfgShowSpotify').checked;
-    cfg.showApple = document.getElementById('cfgShowApple').checked;
-    cfg.showDeezer = document.getElementById('cfgShowDeezer').checked;
-    cfg.showYoutube = document.getElementById('cfgShowYoutube').checked;
+    if (sc === 'all' || sc === 'cloud') {
+      cfg.googleClientId = (document.getElementById('cfgGoogleClientId')?.value || '').trim();
+      cfg.googleAutoSync = document.getElementById('cfgGoogleAutoSync')?.checked !== false;
+      cfg.googleSyncSecrets = Boolean(document.getElementById('cfgGoogleSyncSecrets')?.checked);
+    }
+    if (sc === 'all' || sc === 'gemini') {
+      cfg.geminiKey = document.getElementById('cfgGeminiKey').value.trim();
+      cfg.geminiModel = document.getElementById('cfgGeminiModel').value;
+      cfg.autoPlayHighlight = document.getElementById('cfgAutoPlay').checked;
+      cfg.autoDetective = document.getElementById('cfgAutoDetective').checked;
+      cfg.autoGradeOnScan = Boolean(document.getElementById('cfgAutoGradeOnScan')?.checked);
+      const scanChk = document.getElementById('scanAutoGradeChk');
+      if (scanChk) scanChk.checked = cfg.autoGradeOnScan;
+      const acEl = document.getElementById('cfgAutoCropPhotos');
+      if (acEl) cfg.autoCropPhotos = Boolean(acEl.checked);
+      const pqEl = document.getElementById('cfgPhotoQuality');
+      if (pqEl) cfg.photoQuality = pqEl.value || 'medium';
+    }
+    if (sc === 'all' || sc === 'discogs') {
+      cfg.discogsToken = document.getElementById('cfgDiscogsToken').value.trim();
+      cfg.discogsFolderId = document.getElementById('cfgDiscogsFolder').value || '1';
+      cfg.homeCountry = document.getElementById('cfgHomeCountry').value;
+      cfg.fetchVgSuggestions = document.getElementById('cfgFetchVg').checked;
+      cfg.threshold = Number(document.getElementById('cfgThreshold').value) || 20;
+      cfg.voice = document.getElementById('cfgVoice').checked;
+    }
+    if (sc === 'all' || sc === 'music') {
+      cfg.spotifyClientId = document.getElementById('cfgSpotifyClientId').value.trim();
+      cfg.showSpotify = document.getElementById('cfgShowSpotify').checked;
+      cfg.showApple = document.getElementById('cfgShowApple').checked;
+      cfg.showDeezer = document.getElementById('cfgShowDeezer').checked;
+      cfg.showYoutube = document.getElementById('cfgShowYoutube').checked;
+    }
 
     const prefsChanged = prefKeys.some(k => JSON.stringify(cfg[k]) !== prevVals[k]);
     const secretsChanged = Boolean(cfg.googleSyncSecrets) && secretKeys.some(k => JSON.stringify(cfg[k]) !== prevVals[k]);
@@ -10743,7 +11023,7 @@ Return ONLY valid JSON:
   };
 
   window.testAiConnection = async () => {
-    saveSettings(true);
+    saveSettings(true, 'gemini');
     const badge = document.getElementById('aiStatusBadge');
     if (!CC.isAiReady()) {
       badge.style.color = 'var(--red)';
@@ -10768,7 +11048,7 @@ Return ONLY valid JSON:
   };
 
   window.verifyDiscogsAccount = async () => {
-    saveSettings(true);
+    saveSettings(true, 'discogs');
     if (!cfg.discogsToken) { toast('Paste your Discogs Token first'); return; }
     setStatus('Verifying Discogs, folders & grading fields...', true);
     try {
@@ -10797,11 +11077,15 @@ Return ONLY valid JSON:
 
   function populateFolders() {
     const sel = document.getElementById('cfgDiscogsFolder');
+    if (!sel) return;
     const folders = getDiscogsFoldersList();
     sel.innerHTML = `<option value="auto">✨ Auto-Match by Format</option>` +
       folders.map(f => `<option value="${f.id}">${esc(f.name)} (${f.count ?? 0})</option>`).join('');
-    sel.value = cfg.discogsFolderId || '1';
-    if (!sel.value && sel.options.length) sel.selectedIndex = 0;
+    const desired = String(cfg.discogsFolderId || '1');
+    sel.value = desired;
+    if (sel.value !== desired) {
+      sel.value = desired === 'auto' ? 'auto' : (sel.querySelector('option[value="1"]') ? '1' : (sel.options[0]?.value || 'auto'));
+    }
     document.getElementById('discogsUserBadge').textContent = cfg.discogsUser ? `Connected: @${cfg.discogsUser}` : '';
     updateSettingsDirtyButtons();
   }
@@ -10825,7 +11109,7 @@ Return ONLY valid JSON:
   }
 
   window.startSpotifyAuth = async (mode = 'liked') => {
-    saveSettings(true);
+    saveSettings(true, 'music');
     if (spotifySyncActive || CC.isSpotifySyncRunning()) {
       toast('Spotify sync is already running');
       return;
@@ -10859,7 +11143,7 @@ Return ONLY valid JSON:
   };
 
   window.resumeSpotifySyncUI = async () => {
-    saveSettings(true);
+    saveSettings(true, 'music');
     if (spotifySyncActive || CC.isSpotifySyncRunning()) {
       toast('Spotify sync is already running');
       return;
@@ -11282,4 +11566,7 @@ Return ONLY valid JSON:
   }
 
   init();
+  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  }
 })();

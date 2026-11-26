@@ -1079,6 +1079,9 @@ body.has-audio .global-status-banner { bottom: calc(144px + var(--safe-bottom));
   background: var(--card);
   border-radius: 0px;
 }
+.rebuild-progress-wrap.is-ok { box-shadow: inset 3px 0 0 var(--green); }
+.rebuild-progress-wrap.is-warn { box-shadow: inset 3px 0 0 var(--yellow); }
+.rebuild-progress-wrap.is-err { box-shadow: inset 3px 0 0 var(--red); }
 .rebuild-progress-track {
   width: 100%;
   height: 6px;
@@ -1091,7 +1094,19 @@ body.has-audio .global-status-banner { bottom: calc(144px + var(--safe-bottom));
   height: 100%;
   width: 0%;
   background: var(--accent);
-  transition: width 0.2s ease;
+  transition: width 0.2s ease, background 0.2s ease;
+}
+.rebuild-progress-fill.is-ok { background: var(--green); }
+.rebuild-progress-fill.is-warn { background: var(--yellow); }
+.rebuild-progress-fill.is-err { background: var(--red); }
+.rebuild-action-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+}
+.rebuild-action-row .btn {
+  flex: 1;
+  min-height: 40px;
 }
 
 /* Uniform Settings btn-row alignment */
@@ -1131,6 +1146,7 @@ nav.bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; z-index: 60; bac
 .nav-btn:hover { background: var(--card-2); color: var(--text); }
 .nav-btn span.ico { font-size: 1.15rem; line-height: 1; }
 .nav-btn.active { color: var(--text); background: var(--card-2); box-shadow: inset 0 -2px 0 var(--accent); }
+.nav-btn.nav-locked { opacity: 0.42; }
 
 .toast {
   position: fixed; left: 50%; bottom: calc(148px + var(--safe-bottom));
