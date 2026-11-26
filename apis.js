@@ -793,17 +793,18 @@
     return { size: s, drawW, drawH, dx, dy };
   };
 
-  CC.resolveSpineTransform = (srcW, srcH, rotationHint = '') => {
+  CC.resolveSpineTransform = (srcW, srcH, rotationHint = '', opts = {}) => {
+    const { exactAngle = false } = opts || {};
     const w = Math.max(1, Number(srcW) || 1);
     const h = Math.max(1, Number(srcH) || 1);
-    const hint = String(rotationHint || '').trim().toLowerCase();
+    const hint = String(rotationHint ?? '').trim().toLowerCase();
     let angleDeg = 0;
     if (hint === '90cw' || hint === '90') angleDeg = 90;
     else if (hint === '90ccw' || hint === '270' || hint === '-90') angleDeg = 270;
     else if (hint === '180') angleDeg = 180;
-    else if (hint === '0') angleDeg = h > w ? 90 : 0;
+    else if (hint === '0') angleDeg = exactAngle ? 0 : (h > w ? 90 : 0);
     else angleDeg = h > w ? 90 : 0;
-    if (h > w && (angleDeg === 0 || angleDeg === 180)) angleDeg = 90;
+    if (!exactAngle && h > w && (angleDeg === 0 || angleDeg === 180)) angleDeg = 90;
     return { angleDeg, swapDims: angleDeg === 90 || angleDeg === 270 };
   };
 
@@ -1496,20 +1497,40 @@
       if (runOutboxOpsBySync.size > 0) {
         try {
           await withLocalCommitLock(async () => {
-            const outboxBefore = await CC.getCloudOutbox();
-            const nextQueue = outboxBefore.slice();
-            nextQueue.push({
-              batchId: CC.newBatchId(),
-              accountEmail: CC.cfg.googleBoundEmail || CC.cfg.googleEmail || '',
-              createdAt: Date.now(),
-              deviceId: CC.getDeviceId(),
-              status: 'queued',
-              ops: Array.from(runOutboxOpsBySync.values())
-            });
-            await CC.idbAtomicWrite(({ metaStore }) => {
-              metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: nextQueue } });
-            });
-            CC.setPendingCloudChanges(nextQueue.length);
+            // Re-read LIVE IndexedDB state & tombstones so items deleted/edited mid-hydration are never resurrected or clobbered!
+            const liveStash = await CC.idbGetAll('stash');
+            const liveDeleted = (await CC.idbGet('meta', 'deleted_sync_ids'))?.value || {};
+            const liveBySync = new Map();
+            liveStash.forEach(x => { if (x?.sync_id) liveBySync.set(x.sync_id, x); });
+
+            const freshOps = [];
+            for (const [sid] of runOutboxOpsBySync.entries()) {
+              const liveRec = liveBySync.get(sid);
+              if (!liveRec) continue; // Deleted locally while Discogs was hydrating -> skip!
+              const delTs = normTombstoneTs(liveDeleted[sid]);
+              const recTs = Number(liveRec.updated_at || liveRec.created_at || 0);
+              if (delTs > 0 && delTs >= recTs) continue;
+              const opCopy = { ...liveRec };
+              delete opCopy.id;
+              freshOps.push({ type: 'upsert_stash', sync_id: sid, record: opCopy });
+            }
+
+            if (freshOps.length > 0) {
+              const outboxBefore = await CC.getCloudOutbox();
+              const nextQueue = outboxBefore.slice();
+              nextQueue.push({
+                batchId: CC.newBatchId(),
+                accountEmail: CC.cfg.googleBoundEmail || CC.cfg.googleEmail || '',
+                createdAt: Date.now(),
+                deviceId: CC.getDeviceId(),
+                status: 'queued',
+                ops: freshOps
+              });
+              await CC.idbAtomicWrite(({ metaStore }) => {
+                metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: nextQueue } });
+              });
+              CC.setPendingCloudChanges(nextQueue.length);
+            }
           });
         } catch (_) {}
       }
@@ -2347,7 +2368,7 @@
     authUrl.searchParams.set('redirect_uri', CC.REDIRECT_URI);
     authUrl.searchParams.set('code_challenge_method', 'S256');
     authUrl.searchParams.set('code_challenge', challenge);
-    authUrl.searchParams.set('scope', 'user-library-read user-top-read playlist-read-private playlist-read-collaborative user-read-private');
+    authUrl.searchParams.set('scope', 'user-library-read user-top-read user-follow-read playlist-read-private playlist-read-collaborative user-read-private');
     authUrl.searchParams.set('state', state);
     location.href = authUrl.toString();
   };
@@ -2442,12 +2463,14 @@
           name,
           count: 0,
           isTopArtist: false,
+          isFollowed: false,
           tracks: new Set(),
           likedTracks: new Set(),
           topTracks: new Set(),
           albumTracks: new Set(),
           playlistTracks: new Set(),
-          playlists: new Set()
+          playlists: new Set(),
+          playlistTrackMap: {}
         };
       }
       return artistMap[n];
@@ -2523,7 +2546,12 @@
         else if (sourceType === 'album') rec.albumTracks.add(cleanTitle);
         else if (sourceType === 'playlist') {
           rec.playlistTracks.add(cleanTitle);
-          if (plName) rec.playlists.add(plName);
+          if (plName) {
+            rec.playlists.add(plName);
+            if (!rec.playlistTrackMap) rec.playlistTrackMap = {};
+            if (!rec.playlistTrackMap[plName]) rec.playlistTrackMap[plName] = new Set();
+            rec.playlistTrackMap[plName].add(cleanTitle);
+          }
         }
 
         const na = CC.norm(a.name);
@@ -2547,16 +2575,22 @@
     const serializeAccumulated = () => {
       const allArtists = {};
       Object.entries(artistMap).forEach(([k, v]) => {
+        const plTrackMapOut = {};
+        Object.entries(v.playlistTrackMap || {}).forEach(([pl, setOrArr]) => {
+          plTrackMapOut[pl] = Array.from(setOrArr || []);
+        });
         allArtists[k] = {
           name: v.name,
           count: v.count,
           isTopArtist: Boolean(v.isTopArtist),
+          isFollowed: Boolean(v.isFollowed),
           tracks: Array.from(v.tracks),
           likedTracks: Array.from(v.likedTracks),
           topTracks: Array.from(v.topTracks),
           albumTracks: Array.from(v.albumTracks),
           playlistTracks: Array.from(v.playlistTracks),
-          playlists: Array.from(v.playlists)
+          playlists: Array.from(v.playlists),
+          playlistTrackMap: plTrackMapOut
         };
       });
       const trackSources = {};
@@ -2595,16 +2629,22 @@
       if (!acc) return;
       artistMap = {};
       Object.entries(acc.allArtists || {}).forEach(([k, v]) => {
+        const plTrackMapHydrated = {};
+        Object.entries(v.playlistTrackMap || {}).forEach(([pl, arr]) => {
+          plTrackMapHydrated[pl] = new Set(Array.isArray(arr) ? arr : []);
+        });
         artistMap[k] = {
           name: v.name,
           count: Number(v.count || 0),
           isTopArtist: Boolean(v.isTopArtist),
+          isFollowed: Boolean(v.isFollowed),
           tracks: new Set(v.tracks || []),
           likedTracks: new Set(v.likedTracks || []),
           topTracks: new Set(v.topTracks || []),
           albumTracks: new Set(v.albumTracks || []),
           playlistTracks: new Set(v.playlistTracks || []),
-          playlists: new Set(v.playlists || [])
+          playlists: new Set(v.playlists || []),
+          playlistTrackMap: plTrackMapHydrated
         };
       });
       trackSourcesMap = {};
@@ -2736,6 +2776,29 @@
           cp.topRangeIdx++;
           cp.retryAttempt = 0;
           await saveCheckpoint();
+        }
+        // Optional graceful fetch of Followed Artists (skips cleanly on 403 if older token lacks user-follow-read)
+        try {
+          let folUrl = 'https://api.spotify.com/v1/me/following?type=artist&limit=50';
+          let folPages = 0;
+          while (folUrl && folPages < 10) {
+            const folRes = await spFetchStage(folUrl, 'top', 'Followed Artists');
+            const items = folRes?.artists?.items || [];
+            items.forEach(a => {
+              const rec = ensureArtist(a.name);
+              if (rec) {
+                rec.isFollowed = true;
+                rec.count += 6;
+              }
+            });
+            folUrl = folRes?.artists?.next || '';
+            folPages++;
+          }
+        } catch (folErr) {
+          if (folErr?.code === 'SPOTIFY_RATE_LIMIT' || folErr?.code === 'SPOTIFY_AUTH_EXPIRED' || folErr?.name === 'AbortError') {
+            throw folErr;
+          }
+          // Ignore 403 scope-missing gracefully so existing tokens never break
         }
         cp.topDone = true;
         cp.stage = 'liked';
@@ -3112,14 +3175,20 @@
     if (!rec.created_at) rec.created_at = prevRecord?.created_at || now;
 
     const fRevs = Object.assign({}, prevRecord?.field_revs || rec.field_revs || {});
+    const fMeta = Object.assign({}, prevRecord?._fieldMeta || rec._fieldMeta || {});
     const fieldsToStamp = Array.isArray(changedFields)
       ? changedFields
       : STASH_MERGE_FIELDS.filter(f => {
-          if (!prevRecord) return rec[f] !== undefined;
+          if (!prevRecord) return rec[f] !== undefined && !isMergeValueEmpty(f, rec[f]);
           return JSON.stringify(rec[f]) !== JSON.stringify(prevRecord[f]);
         });
-    fieldsToStamp.forEach(f => { fRevs[f] = { ts: now, rev, deviceId }; });
+    fieldsToStamp.forEach(f => {
+      const entry = { ts: now, rev, deviceId };
+      fRevs[f] = entry;
+      fMeta[f] = entry;
+    });
     rec.field_revs = fRevs;
+    rec._fieldMeta = fMeta;
     return rec;
   };
 
@@ -3404,6 +3473,7 @@
   async function listAppDataFiles() {
     const map = new Map();
     const v2Batches = new Map();     // batchId -> file
+    const allV2BatchFiles = [];      // every ss_v2_batch_*.json file (including any duplicates) for full compaction cleanup
     const v2Secrets = new Map();     // batchId -> file
     const legacyDeltas = [];
     let pageToken = '';
@@ -3427,8 +3497,11 @@
           map.set(f.name, f);
         }
         const mBatch = f.name.match(GDRIVE_V2_BATCH_RX);
-        if (mBatch && !v2Batches.has(mBatch[1])) {
-          v2Batches.set(mBatch[1], { ...f, batchId: mBatch[1] });
+        if (mBatch) {
+          allV2BatchFiles.push({ ...f, batchId: mBatch[1] });
+          if (!v2Batches.has(mBatch[1])) {
+            v2Batches.set(mBatch[1], { ...f, batchId: mBatch[1] });
+          }
         }
         const mSec = f.name.match(GDRIVE_V2_SECRETS_RX);
         if (mSec && !v2Secrets.has(mSec[1])) {
@@ -3446,12 +3519,12 @@
       pageToken = data.nextPageToken;
     }
 
-    return { map, v2Batches, v2Secrets, legacyDeltas };
+    return { map, v2Batches, allV2BatchFiles, v2Secrets, legacyDeltas };
   }
 
-  async function uploadAppDataMultipart(name, contentBlob, mimeType) {
+  async function uploadAppDataMultipart(name, contentBlob, mimeType, existingFileId = null) {
     const boundary = 'ss_v2_' + Math.random().toString(36).slice(2, 12);
-    const meta = { name, parents: ['appDataFolder'] };
+    const meta = existingFileId ? { name } : { name, parents: ['appDataFolder'] };
     const head =
       `--${boundary}\r\n` +
       `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
@@ -3461,12 +3534,26 @@
     const tail = `\r\n--${boundary}--`;
     const body = new Blob([head, contentBlob, tail], { type: `multipart/related; boundary=${boundary}` });
 
-    const res = await gdriveFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
-      method: 'POST',
+    const endpoint = existingFileId
+      ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(existingFileId)}?uploadType=multipart`
+      : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
+    const res = await gdriveFetch(endpoint, {
+      method: existingFileId ? 'PATCH' : 'POST',
       headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
       body
     });
     return res.json();
+  }
+
+  async function deleteAppDataFile(fileId) {
+    if (!fileId) return false;
+    try {
+      await gdriveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, { method: 'DELETE' });
+      return true;
+    } catch (err) {
+      if (err?.status === 404) return true;
+      return false;
+    }
   }
 
   function normTombstoneTs(entry) {
@@ -3626,26 +3713,29 @@
 
       const lEmpty = isMergeValueEmpty(f, lv);
       const rEmpty = isMergeValueEmpty(f, rv);
-      const lMeta = locFRevs[f] || null;
-      const rMeta = remFRevs[f] || null;
+      const lMeta = locFRevs[f] || localRec._fieldMeta?.[f] || null;
+      const rMeta = remFRevs[f] || remoteRec._fieldMeta?.[f] || null;
+      const lHasTs = Number(lMeta?.ts || 0) > 0;
+      const rHasTs = Number(rMeta?.ts || 0) > 0;
 
-      // Populated value ALWAYS wins silently over empty/ungraded (zero false conflicts!)
-      if (lEmpty && !rEmpty) {
+      // ONLY allow populated value to beat an empty/reset value ("", [], 'Not Graded') automatically when the empty side has NO edit timestamp!
+      // If the user intentionally cleared condition_note to "" or reset a grade to 'Not Graded', its timestamp is respected cleanly.
+      if (lEmpty && !rEmpty && !lHasTs) {
         merged[f] = rv;
         if (rMeta) mergedFieldRevs[f] = rMeta;
         continue;
       }
-      if (rEmpty && !lEmpty) {
+      if (rEmpty && !lEmpty && !rHasTs) {
         continue;
       }
 
       // If only one side has explicit field_revs entry for this field (unrelated field edits on two devices!), take that side cleanly
-      if (rMeta && !lMeta) {
+      if (rHasTs && !lHasTs) {
         merged[f] = rv;
         mergedFieldRevs[f] = rMeta;
         continue;
       }
-      if (lMeta && !rMeta) {
+      if (lHasTs && !rHasTs) {
         continue;
       }
 
@@ -3748,7 +3838,9 @@
     return { purgedCount, updatedItems: toUpdate.length };
   });
 
-  // Coalesce queued cloud outbox batches per accountEmail into ONE compact batch (keeping latest op per sync_id / singleton key)
+  // Coalesce queued cloud outbox batches per accountEmail into ONE compact batch:
+  // - Tracks timestamps per op so an older upsert_stash NEVER cancels a newer delete_stash tombstone
+  // - Merges two upsert_stash ops for the same sync_id field-by-field via mergeStashRecordsDeterministic!
   CC.coalesceCloudOutbox = async () => withLocalCommitLock(async () => {
     const rawQueue = await CC.getCloudOutbox();
     if (rawQueue.length <= 1) {
@@ -3763,17 +3855,24 @@
       byAccount.get(acctKey).push(batch);
     }
 
+    const opTimestamp = (op, batchCreatedAt) => {
+      if (!op) return Number(batchCreatedAt || 0);
+      if (op.type === 'delete_stash') return Math.max(normTombstoneTs(op.deleted), Number(batchCreatedAt || 0));
+      if (op.type === 'upsert_stash') return Number(op.record?.updated_at || op.record?.created_at || batchCreatedAt || 0);
+      return Number(batchCreatedAt || 0);
+    };
+
     const compacted = [];
     for (const [, group] of byAccount.entries()) {
       if (group.length === 1) {
         compacted.push(group[0]);
         continue;
       }
-      const opByKey = new Map();
+      const opEntryByKey = new Map(); // key -> { op, ts }
       const orderedKeys = [];
-      const setOp = (key, op) => {
-        if (!opByKey.has(key)) orderedKeys.push(key);
-        opByKey.set(key, op);
+      const putEntry = (key, op, ts) => {
+        if (!opEntryByKey.has(key)) orderedKeys.push(key);
+        opEntryByKey.set(key, { op, ts });
       };
       let isFullSeed = false;
       let latestCreatedAt = 0;
@@ -3782,25 +3881,47 @@
       let idxCounter = 0;
 
       for (const b of group) {
+        const bTs = Number(b.createdAt || 0);
         if (b.isFullSeed) isFullSeed = true;
-        if (Number(b.createdAt || 0) > latestCreatedAt) latestCreatedAt = Number(b.createdAt || 0);
+        if (bTs > latestCreatedAt) latestCreatedAt = bTs;
         if (b.accountEmail) accountEmail = b.accountEmail;
         if (b.deviceId) deviceId = b.deviceId;
         for (const op of (b.ops || [])) {
           if (!op || !op.type) continue;
+          const ts = opTimestamp(op, bTs);
           if ((op.type === 'upsert_stash' || op.type === 'delete_stash') && op.sync_id) {
-            setOp(`stash:${op.sync_id}`, op);
+            const key = `stash:${op.sync_id}`;
+            const prev = opEntryByKey.get(key);
+            if (!prev) {
+              putEntry(key, op, ts);
+            } else if (prev.op.type === 'delete_stash' && op.type === 'upsert_stash') {
+              // NEVER let an older upsert_stash cancel a newer delete_stash tombstone!
+              if (ts > prev.ts) putEntry(key, op, ts);
+            } else if (prev.op.type === 'upsert_stash' && op.type === 'delete_stash') {
+              // Newer or equal delete_stash supersedes upsert_stash
+              if (ts >= prev.ts) putEntry(key, op, ts);
+            } else if (prev.op.type === 'delete_stash' && op.type === 'delete_stash') {
+              if (ts >= prev.ts) putEntry(key, op, ts);
+            } else if (prev.op.type === 'upsert_stash' && op.type === 'upsert_stash') {
+              // Field-by-field merge so concurrent user edits & Discogs hydrations NEVER clobber each other!
+              const mergedRes = CC.mergeStashRecordsDeterministic(prev.op.record, op.record);
+              const cleanRec = { ...mergedRes.merged };
+              delete cleanRec.id;
+              putEntry(key, { type: 'upsert_stash', sync_id: op.sync_id, record: cleanRec }, Math.max(prev.ts, ts));
+            }
           } else if (op.type === 'retire_sync_id' && op.retired_sync_id) {
-            setOp(`retire:${op.retired_sync_id}`, op);
+            putEntry(`retire:${op.retired_sync_id}`, op, ts);
           } else if (['prefs', 'discogs_index', 'spotify_profile', 'taste_profile'].includes(op.type)) {
-            setOp(`single:${op.type}`, op);
+            const key = `single:${op.type}`;
+            const prev = opEntryByKey.get(key);
+            if (!prev || ts >= prev.ts) putEntry(key, op, ts);
           } else {
-            setOp(`other:${idxCounter++}`, op);
+            putEntry(`other:${idxCounter++}`, op, ts);
           }
         }
       }
 
-      const ops = orderedKeys.map(k => opByKey.get(k)).filter(Boolean);
+      const ops = orderedKeys.map(k => opEntryByKey.get(k)?.op).filter(Boolean);
       if (ops.length > 0) {
         const mergedBatch = {
           batchId: CC.newBatchId(),
@@ -3904,11 +4025,32 @@
       }
     }
 
-    // Step 2: Group verified physical Discogs copies by (normalized discogs_account, discogs_id, discogs_instance_id)
+    // Step 2: Group verified physical Discogs copies by canonical copy key OR shared discogs_instance_id (when accounts don't conflict)
     const copyGroups = new Map();
     const ungrouped = [];
+    const instanceToGroupKey = new Map();
     for (const rec of byCanonSync.values()) {
-      const ck = CC.getDiscogsCopyKey(rec);
+      let ck = CC.getDiscogsCopyKey(rec);
+      const instId = Number(rec.discogs_instance_id || 0);
+      const relId = Number(rec.discogs_id || 0);
+      if (!ck && !rec.discogs_removed && instId > 0 && relId > 0) {
+        const existingKey = instanceToGroupKey.get(`${relId}|${instId}`);
+        if (existingKey) {
+          ck = existingKey;
+        } else {
+          ck = `_inst|${relId}|${instId}`;
+        }
+      } else if (ck && instId > 0 && relId > 0) {
+        const fallbackKey = `_inst|${relId}|${instId}`;
+        if (copyGroups.has(fallbackKey)) {
+          // Promote fallback group into verified canonical key
+          const prevItems = copyGroups.get(fallbackKey);
+          copyGroups.delete(fallbackKey);
+          if (!copyGroups.has(ck)) copyGroups.set(ck, []);
+          copyGroups.get(ck).push(...prevItems);
+        }
+        instanceToGroupKey.set(`${relId}|${instId}`, ck);
+      }
       if (!ck) {
         ungrouped.push(rec);
       } else {
@@ -4153,18 +4295,23 @@
       cloudSpotify = base;
     };
 
-    // A. Legacy snapshot migration input (softspot_state.json or cratecheck_state.json)
+    // A. Primary compacted snapshot (softspot_state.json, or legacy cratecheck_state.json)
+    const compactedBatchIdSet = new Set();
     if (legacySnapshotFile?.id) {
-      report(`☁️ Reading cloud snapshot (${legacySnapshotFile.name})...`);
+      report(`☁️ Reading cloud state (${legacySnapshotFile.name})...`);
       const res = await gdriveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(legacySnapshotFile.id)}?alt=media`);
       const snap = await res.json();
       if (!snap || typeof snap !== 'object') throw new Error('Malformed cloud snapshot JSON');
       (snap.stash || []).forEach(it => { if (it?.sync_id) cloudRawItems.push(it); });
-      Object.entries(snap.deleted_sync_ids || {}).forEach(([sid, ts]) => foldRemoteTombstone(sid, ts));
-      if (snap.spotifyProfile) foldRemoteSpotify(snap.spotifyProfile);
-      if (snap.discogsCollectionIndex) cloudDiscogsIdx = snap.discogsCollectionIndex;
+      Object.entries(snap.tombstones || snap.deleted_sync_ids || {}).forEach(([sid, ts]) => foldRemoteTombstone(sid, ts));
+      Object.entries(snap.sync_id_aliases || {}).forEach(([retiredSid, entry]) => {
+        if (entry?.targetSyncId) foldRemoteAlias(retiredSid, entry.targetSyncId, entry.copyKey || '', entry.retiredAt || 0, entry.rev || '');
+      });
+      if (snap.spotify_profile || snap.spotifyProfile) foldRemoteSpotify(snap.spotify_profile || snap.spotifyProfile);
+      if (snap.discogs_index || snap.discogsCollectionIndex) cloudDiscogsIdx = snap.discogs_index || snap.discogsCollectionIndex;
       if (snap.prefs) cloudPrefs = snap.prefs;
       if (CC.cfg.googleSyncSecrets && snap.secrets) cloudSecrets = snap.secrets;
+      if (Array.isArray(snap.compactedBatchIds)) snap.compactedBatchIds.forEach(bid => compactedBatchIdSet.add(bid));
     }
 
     // B. Legacy delta_*.json migration inputs
@@ -4179,10 +4326,12 @@
       }
     }
 
-    // C. Immutable v2 batches (deduplicated by batchId, applied in deterministic timestamp order)
-    const sortedV2 = Array.from(v2Batches.values()).sort((a, b) =>
-      String(a.modifiedTime || '').localeCompare(String(b.modifiedTime || '')) || a.batchId.localeCompare(b.batchId)
-    );
+    // C. Backwards-compatible uncompacted v2 batches (skip any already absorbed into softspot_state.json)
+    const sortedV2 = Array.from(v2Batches.values())
+      .filter(bf => !compactedBatchIdSet.has(bf.batchId))
+      .sort((a, b) =>
+        String(a.modifiedTime || '').localeCompare(String(b.modifiedTime || '')) || a.batchId.localeCompare(b.batchId)
+      );
     const loadedBatches = [];
     for (let i = 0; i < sortedV2.length; i++) {
       const bf = sortedV2[i];
@@ -4636,6 +4785,8 @@
     const email = pullRes.email;
     const fileMap = pullRes.listing.map;
     const existingV2Batches = pullRes.listing.v2Batches;
+    const allRemoteBatchFiles = Array.isArray(pullRes.listing.allV2BatchFiles) ? pullRes.listing.allV2BatchFiles : Array.from(existingV2Batches.values());
+    const legacyDeltaFiles = Array.isArray(pullRes.listing.legacyDeltas) ? pullRes.listing.legacyDeltas : [];
 
     if (pullRes.emptyCloud) {
       if (!publishInitialLocal && pullRes.hasLocalData && !CC.cfg.googleBoundEmail) {
@@ -4649,7 +4800,7 @@
 
     // 2. Coalesce redundant queued outbox batches, then atomically snapshot & mark 'uploading' under commit lock BEFORE network writes
     await CC.coalesceCloudOutbox();
-    const batchesToUpload = await withLocalCommitLock(async () => {
+    const { batchesToUpload, snapshotState } = await withLocalCommitLock(async () => {
       const currentOutbox = await CC.getCloudOutbox();
       const marked = currentOutbox.map(b => ({ ...b, status: 'uploading' }));
       if (marked.length > 0) {
@@ -4657,11 +4808,20 @@
           metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: marked } });
         });
       }
-      return marked;
+      const localStash = await CC.idbGetAll('stash');
+      const localDeleted = (await CC.idbGet('meta', 'deleted_sync_ids'))?.value || {};
+      const localAliases = await CC.getSyncIdAliases();
+      const localSpotify = (await CC.idbGet('meta', 'spotify_profile'))?.value || null;
+      const localDiscogsIdx = (await CC.idbGet('meta', 'discogs_collection_index'))?.value || null;
+      return {
+        batchesToUpload: marked,
+        snapshotState: { localStash, localDeleted, localAliases, localSpotify, localDiscogsIdx }
+      };
     });
 
     let uploadedPhotos = 0;
     let uploadedBatches = 0;
+    let compactedBatches = 0;
     const uploadedPhotoSet = new Set();
 
     const uploadPhotoIfMissing = async (val) => {
@@ -4696,41 +4856,88 @@
     };
 
     const acknowledgedBatchIds = new Set();
+    const shouldCompact = Boolean(
+      batchesToUpload.length > 0 ||
+      allRemoteBatchFiles.length > 0 ||
+      legacyDeltaFiles.length > 0 ||
+      publishInitialLocal ||
+      !fileMap.has('softspot_state.json')
+    );
 
-    for (let i = 0; i < batchesToUpload.length; i++) {
-      const batch = batchesToUpload[i];
-      if (existingV2Batches.has(batch.batchId)) {
-        acknowledgedBatchIds.add(batch.batchId);
-        continue;
+    if (shouldCompact) {
+      // Dehydrate all merged stash photos into Drive .webp assets
+      const dehydratedStash = [];
+      for (const rec of (snapshotState.localStash || [])) {
+        dehydratedStash.push(await dehydrateRecord(rec));
       }
 
-      const dehydratedOps = [];
-      for (const op of (batch.ops || [])) {
-        if (op.type === 'upsert_stash' && op.record) {
-          dehydratedOps.push({ ...op, record: await dehydrateRecord(op.record) });
-        } else {
-          dehydratedOps.push(op);
+      const outPrefs = { cfgUpdatedAt: Number(CC.cfg.cfgUpdatedAt || Date.now()) };
+      PREF_KEYS.forEach(k => { outPrefs[k] = CC.cfg[k]; });
+
+      const absorbedIds = new Set();
+      allRemoteBatchFiles.forEach(bf => { if (bf.batchId) absorbedIds.add(bf.batchId); });
+      batchesToUpload.forEach(b => { if (b.batchId) absorbedIds.add(b.batchId); });
+
+      const compactedPayload = {
+        formatVersion: 3,
+        compactedAt: Date.now(),
+        deviceId: CC.getDeviceId(),
+        stash: dehydratedStash,
+        tombstones: snapshotState.localDeleted || {},
+        deleted_sync_ids: snapshotState.localDeleted || {},
+        sync_id_aliases: snapshotState.localAliases || {},
+        spotify_profile: snapshotState.localSpotify || null,
+        spotifyProfile: snapshotState.localSpotify || null,
+        discogs_index: snapshotState.localDiscogsIdx || null,
+        discogsCollectionIndex: snapshotState.localDiscogsIdx || null,
+        prefs: outPrefs,
+        compactedBatchIds: Array.from(absorbedIds)
+      };
+
+      // Upload ONE compacted softspot_state.json FIRST!
+      report('☁️ Saving compacted softspot_state.json...');
+      const existingSnap = fileMap.get('softspot_state.json');
+      const uploadedSnap = await uploadAppDataMultipart(
+        'softspot_state.json',
+        new Blob([JSON.stringify(compactedPayload)], { type: 'application/json' }),
+        'application/json',
+        existingSnap?.id || null
+      );
+      if (!uploadedSnap?.id) {
+        throw new Error('Failed to confirm softspot_state.json upload — keeping existing batch files safely');
+      }
+      fileMap.set('softspot_state.json', { id: uploadedSnap.id, name: 'softspot_state.json' });
+      batchesToUpload.forEach(b => acknowledgedBatchIds.add(b.batchId));
+      uploadedBatches = Math.max(1, batchesToUpload.length);
+
+      // ONLY AFTER softspot_state.json upload succeeds: delete all absorbed ss_v2_batch_*.json & legacy delta files!
+      const filesToDelete = [];
+      const seenDelIds = new Set();
+      for (const bf of allRemoteBatchFiles) {
+        if (bf?.id && bf.id !== uploadedSnap.id && !seenDelIds.has(bf.id)) {
+          seenDelIds.add(bf.id);
+          filesToDelete.push(bf);
         }
       }
+      for (const df of legacyDeltaFiles) {
+        if (df?.id && df.id !== uploadedSnap.id && !seenDelIds.has(df.id)) {
+          seenDelIds.add(df.id);
+          filesToDelete.push(df);
+        }
+      }
+      const legacyOldSnap = fileMap.get('cratecheck_state.json');
+      if (legacyOldSnap?.id && legacyOldSnap.id !== uploadedSnap.id && !seenDelIds.has(legacyOldSnap.id)) {
+        seenDelIds.add(legacyOldSnap.id);
+        filesToDelete.push(legacyOldSnap);
+      }
 
-      // Upload immutable v2 batch (NEVER includes credentials or Spotify OAuth tokens!)
-      report(`☁️ Uploading sync batch ${i + 1}/${batchesToUpload.length}...`);
-      const batchPayload = {
-        formatVersion: 2,
-        batchId: batch.batchId,
-        createdAt: batch.createdAt,
-        deviceId: batch.deviceId || CC.getDeviceId(),
-        ops: dehydratedOps
-      };
-      const fname = `ss_v2_batch_${batch.batchId}.json`;
-      const created = await uploadAppDataMultipart(
-        fname,
-        new Blob([JSON.stringify(batchPayload)], { type: 'application/json' }),
-        'application/json'
-      );
-      existingV2Batches.set(batch.batchId, { id: created.id, name: fname, batchId: batch.batchId });
-      acknowledgedBatchIds.add(batch.batchId);
-      uploadedBatches++;
+      if (filesToDelete.length > 0) {
+        report(`☁️ Cleaning up ${filesToDelete.length} old sync batch file(s)...`);
+        for (const f of filesToDelete) {
+          const ok = await deleteAppDataFile(f.id);
+          if (ok) compactedBatches++;
+        }
+      }
     }
 
     // Optional separate secrets batch ONLY when user explicitly opted in
@@ -4776,6 +4983,7 @@
       repairSummary: pullRes.repairSummary || '',
       appliedBatches: pullRes.appliedBatches || 0,
       uploadedBatches,
+      compactedBatches,
       uploadedPhotos,
       downloadedPhotos: pullRes.downloadedPhotos || 0,
       remainingPending: remainingQueue.length,

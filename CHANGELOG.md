@@ -1,22 +1,39 @@
-# Soft Spot v2.1.1 Changelog
+# Soft Spot v2.1.5 Changelog
 
-## Critical Discogs Reliability & Safety Fixes
-- **Discogs Account Guard on Delete:** `CC.deleteDiscogsAndStashCopy` now verifies `stashItem.discogs_account` against the active Discogs account before querying live instances and re-verifies before sending `DELETE`. In Stash Detail, synced copies belonging to a different Discogs account render **🗑️ Delete from Stash (Local Only)**.
-- **Stopped Stash Detail Auto-Hydration Loop:** `needsDiscogsDetailHydration` no longer re-triggers on releases already stamped with `discogs_details_synced_at > 0` (including legitimately empty tracklists), and `openStashDetail` tracks per-session silent attempts (`autoHydrateAttemptedIds`) and avoids re-rendering on failed silent refreshes.
-- **Last-Known Price Preservation:** `CC.hydrateDiscogsReleaseDetails` tracks `stats_ok` and `suggestions_ok` explicitly instead of swallowing `/marketplace/stats` failures. When marketplace stats fail, `CC.enrichSyncedDiscogsStashItems` preserves all previously saved price/value/scarcity fields untouched and surfaces a clear warning on manual Refresh.
+Built from `./v2.1.1/` while strictly preserving `DESIGN.md` (`0px` sharp monochrome corners, achromatic neutral dark surfaces `#0a0a0a`–`#242424`, borderless tonal elevation, dark PC scrollbars), IndexedDB (`CrateCheckDB`), and all `cratecheck_*` storage keys.
 
-## Google Drive Conflict & Outbox Cleanup
-- **Genuine Cross-Device Conflicts Only:** Restricted conflict retention in `CC.mergeStashRecordsDeterministic` strictly to `CC.USER_CONFLICT_FIELDS` (`media_condition`, `sleeve_condition`, `condition_note`, `title`, `artist`, `catno`, `discogs_id`), silently preferring populated values over empty/ungraded values and ignoring same-device edits. All derived/hydrated/AI fields converge silently.
-- **Startup False-Conflict Purge & Readable Formatting:** Added `CC.purgeFalseConflicts()` on startup to clear legacy false conflicts from Stash and `cloud_sync_meta_v2`, plus `formatConflictValue()` so arrays/objects never display `[object Object]`.
-- **Outbox Coalescing:** Added `CC.coalesceCloudOutbox()` (runs on startup and before Drive upload) to compact queued batches per account into a single batch keeping only the latest op per `sync_id`/singleton key. `CC.enrichSyncedDiscogsStashItems` and `recalibrateStashBatch` now enqueue one combined batch per run/chunk instead of one per item.
+## What's New & Fixed
 
-## Photo Manager & Interactive Crop / 90° Rotate Modal
-- **Simplified 4-Button Stash Photo Manager:** Replaced the 7 separate Camera/Upload buttons with 4 clean native file picker buttons (`Front`, `Back`, `Spine`, `Extra Photo`) without `capture` so Android offers Camera or Gallery and Desktop opens File Explorer cleanly.
-- **Offline Interactive Crop & 90° Rotate (`#cropModal`):** Added a sharp-corner monochrome pure-Canvas cropper (touch & mouse drag/corner-resize, `↻ Rotate 90°`, `Reset`, `Apply Crop`) that opens automatically on manual Spine uploads (removing blind 90° auto-rotation) and via `✂️ Crop` on any Front/Back/Extra/Spine photo. Saves crisp WebP (`max 1200px` covers with no black padding bars; `max 960px` wide spines).
-- **One-Tap `↻ 90°` Spine Rotation & Clean Copy-Paste:** Switched spine quick-rotate buttons from `↻ Flip 180°` to `↻ 90°` and set `alt=""` on `.photo-tile img`.
+1. **Single-File Google Drive Compaction & Sync Race Fixes (`apis.js`)**
+   - **One-file `softspot_state.json` compaction:** `syncNowWithGoogleDrive` uploads ONE compacted `softspot_state.json` snapshot containing merged `stash` (dehydrated `gdrive:` photo refs), `tombstones`/`deleted_sync_ids`, `sync_id_aliases`, `spotify_profile`, `discogs_index`, and `prefs`. Only **after** the new snapshot upload succeeds are absorbed `ss_v2_batch_*.json` and legacy `delta_*.json`/`cratecheck_state.json` files deleted from `appDataFolder`.
+   - **Outbox race fix:** `coalesceCloudOutbox` preserves newer `delete_stash` tombstones against older `upsert_stash` entries and merges multiple upserts for the same `sync_id` field-by-field; `enrichSyncedDiscogsStashItems` re-reads live IndexedDB state & tombstones before queuing updates.
+   - **Intentional clear / `Not Graded` reset preservation:** `mergeStashRecordsDeterministic` respects explicit edit timestamps (`_fieldMeta` / `field_revs`) so clearing notes or resetting a grade to `Not Graded` is no longer overwritten by older populated values.
 
-## Richer Batch Taste Recalibration & UI Polish
-- **Full Taste Metadata in Batch Recalibration:** Lowered `BATCH_SIZE` to `10` (with up to 24 sample tracks per release) and populated `context_note`, `litmus_track`, `litmus_artist`, and up to 4 `notable_songs` alongside score/verdict/summary in a single atomic batch commit per chunk.
-- **Audio Mini-Player Polish:** Overlaid `#audioPlayBtn` directly onto `#audioArt` inside a single `44px × 44px` sharp square and anchored `#openInMenu` inside `#audioBar` directly above `▲` on both desktop and mobile.
-- **Live Gemini Retry Countdown & Smooth Spinner:** `runGeminiRequest` now counts down `5s → 4s → 3s → 2s → 1s` on network/5xx retries, and `renderBanner` updates text in place without resetting `.spinner`.
-- Bumped cache-busters (`?v=2.1.1`), header badge (`v2.1.1`), and taste cache namespace (`v211`).
+2. **Drive-Before-Discogs Sync Order, Stash `☁️ Sync with Cloud`, & No Auto Discogs Imports (`index.html`, `app.js`, `apis.js`)**
+   - Replaced Stash's `Sync with Discogs` button with **`☁️ Sync with Cloud`** (`#btnStashSyncCloud`), keeping **`🔄 Sync with Discogs`** exclusively in **Settings → 3. Discogs Account & Preferences**.
+   - Added a **Drive-first safety gate** on `syncWithDiscogsUI`: when signed into Google Drive, Drive syncs first before Discogs runs (aborting Discogs if Drive fails); if Drive was configured but signed out/expired, Discogs sync is blocked with a clear prompt; local-only users proceed normally.
+   - Removed all automatic background Discogs imports (`switchView('stash')`, `visibilitychange`, `focus`, and post-verify auto-sync) so Discogs only syncs when explicitly triggered by the user.
+   - Added a `discogs_instance_id` deduplication safeguard in `dedupeAndMergeStashRecords` so duplicate copies merge while preserving photos, spines, grades, and taste data.
+
+3. **All-Photo AI Grading + Verbatim Stamps & Spine Inspection (`app.js`)**
+   - `runVisionOCR` (when grading), `gradeCurrentPhotosOnDemand`, and `regradeWithAI` now send **every** labeled photo (`[Front]`, `[Back]`, `[Spine]`, `[Extra ...]`) via `buildLabeledGradingImageParts`.
+   - Prompts explicitly require inspecting `[Spine]` for punch holes, drill holes, saw cuts/notches, cracked hinges, and fading/creases, plus **verbatim transcription** of notable ink stamps, radio/club property stamps, stickers, and handwritten markings.
+
+4. **Auto-Cropped `1600px` Scan Photos, Upright Spines & No Duplicate `Extra 1` Spine (`app.js`, `apis.js`)**
+   - `runVisionOCR` requests normalized `photo_crops` bounding boxes (`[ymin, xmin, ymax, xmax]`, `0–1000`) and exact upright `spine_rotation` (`0 | 90 | 180 | 270`) to auto-crop all staged covers to `1600px` WebP (quality `0.85`) and upright spines to `1200px` wide (with manual `✂️` tweak still available on staged thumbnails).
+   - Dedicated Spine slot (index `2`) is stored strictly in `spine_thumb_url` / `spine_source_url` and never duplicated into `thumbs` (`Extra 1`).
+
+5. **Main 1x Rear Camera Locking & Clear UPC Button (`style.css`, `app.js`)**
+   - Camera startup picks the primary 1x rear lens (excluding ultrawide/wide/0.5x/0.6x/macro/tele/depth/IR/ToF devices, preferring `camera2 0, facing back`), requests `3840×2160` ideal resolution, and resets `zoom: 1.0` when `caps.zoom.min < 1`.
+   - Added a direct **`✕`** button on `#camUpcBadge` in the live camera HUD to clear a mis-scanned barcode without closing the camera.
+
+6. **Clean Stash Detail Photo Manager (`app.js`, `style.css`)**
+   - Normal Stash Detail view displays crisp, uncluttered cover tiles and spine strip with zero floating edit/crop/rotate buttons.
+   - Removed the bulky `.sd-photo-panel` dropdown; **`📷 Manage Photos`** toggles Manage Mode, revealing **`➕ Add Photo`** (inline `Front / Back / Spine / Extra` menu) right next to **`✓ Done`** and compact sharp-corner **`🔄` / `✂️` / `↻` / `✕`** overlay actions directly on every tile and spine.
+
+7. **Fullscreen Lightbox Scroll-Wheel Zoom & Pan (`index.html`, `style.css`, `app.js`)**
+   - Added smooth `1x–6x` mouse scroll-wheel zoom toward cursor, click-and-drag pan when zoomed, touch pinch-zoom & drag, double-click / double-tap `1x ↔ 2.5x` toggle, and automatic transform reset on slide switch or close.
+
+8. **Spotify `🎧 HOW YOU KNOW THEM` Narrative Card (`apis.js`, `app.js`, `style.css`)**
+   - Spotify sync now records followed artists (`user-follow-read`, graceful fallback) and per-playlist track lists (`playlistTrackMap`).
+   - Replaced cryptic Spotify pills in Scan Results and Stash Detail with a clear **`🎧 HOW YOU KNOW THEM`** paragraph card covering 1–3 liked songs (naming every song), 4+ liked songs (count + examples + followed/playlists), playlist-only (0 liked songs explicitly stated), exact album-track hits, Various Artists compilations, and no-match fallback.

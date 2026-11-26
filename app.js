@@ -50,8 +50,9 @@
   let stagedSpineThumbUrl = '';
   let stagedSpineSourceUrl = '';
   let stagedSpineFlipped = false;
-  let stagedUpc = '';
   let stashPhotoManagerOpen = false;
+  let stashAddPhotoMenuOpen = false;
+  let stagedUpc = '';
   let activeFolderMoveConflict = null;
   let currentExtracted = null;
   let currentCandidates = [];
@@ -365,7 +366,7 @@
 
   function hideLightboxUI() {
     document.getElementById('lightboxModal').classList.add('hidden');
-    document.getElementById('lbImg').classList.remove('zoomed');
+    resetLightboxTransform();
   }
 
   function hideCropModalUI() {
@@ -404,7 +405,6 @@
     if (viewChanged) {
       if (name === 'stash') {
         renderStash();
-        maybeAutoRefreshDiscogs();
       }
       window.scrollTo({ top: 0, behavior: 'instant' });
     }
@@ -432,6 +432,11 @@
     const btn = document.getElementById('audioOpenInBtn');
     if (!menu.classList.contains('hidden') && !menu.contains(e.target) && !btn.contains(e.target)) {
       closeOpenInMenu();
+    }
+    const addMenu = document.getElementById('sdAddSlotMenu');
+    if (addMenu && !addMenu.classList.contains('hidden') && !addMenu.contains(e.target)) {
+      stashAddPhotoMenuOpen = false;
+      addMenu.classList.add('hidden');
     }
   });
 
@@ -470,7 +475,89 @@
     await inspectUnlistedItem();
   };
 
-  // ==================== FULLSCREEN ZOOMABLE PHOTO LIGHTBOX ====================
+  // ==================== FULLSCREEN ZOOMABLE / PANNABLE PHOTO LIGHTBOX ====================
+  const lbZoomState = {
+    scale: 1,
+    tx: 0,
+    ty: 0,
+    pointers: new Map(),
+    panStartX: 0,
+    panStartY: 0,
+    panOriginTx: 0,
+    panOriginTy: 0,
+    pinchStartDist: 0,
+    pinchStartScale: 1,
+    pinchMidX: 0,
+    pinchMidY: 0,
+    pinchOriginTx: 0,
+    pinchOriginTy: 0,
+    hadMultiTouch: false,
+    swipeStartX: 0,
+    swipeMoved: false,
+    lastTapAt: 0,
+    lastTapX: 0,
+    lastTapY: 0
+  };
+
+  function applyLightboxTransform() {
+    const img = document.getElementById('lbImg');
+    const wrap = document.getElementById('lbImgWrap');
+    const zoomBtn = document.getElementById('lbZoomBtn');
+    if (!img || !wrap) return;
+
+    lbZoomState.scale = Math.max(1, Math.min(6, lbZoomState.scale));
+    if (lbZoomState.scale <= 1.01) {
+      lbZoomState.scale = 1;
+      lbZoomState.tx = 0;
+      lbZoomState.ty = 0;
+    } else {
+      const rect = wrap.getBoundingClientRect();
+      const maxTx = Math.max(80, ((img.clientWidth || rect.width) * lbZoomState.scale - rect.width) / 2 + 80);
+      const maxTy = Math.max(80, ((img.clientHeight || rect.height) * lbZoomState.scale - rect.height) / 2 + 80);
+      lbZoomState.tx = Math.max(-maxTx, Math.min(maxTx, lbZoomState.tx));
+      lbZoomState.ty = Math.max(-maxTy, Math.min(maxTy, lbZoomState.ty));
+    }
+
+    img.style.transform = `translate3d(${lbZoomState.tx.toFixed(1)}px, ${lbZoomState.ty.toFixed(1)}px, 0) scale(${lbZoomState.scale.toFixed(3)})`;
+    wrap.classList.toggle('is-zoomed', lbZoomState.scale > 1.01);
+    if (zoomBtn) {
+      zoomBtn.textContent = lbZoomState.scale > 1.01 ? `🔎 ${lbZoomState.scale.toFixed(1)}x` : '🔍 Zoom';
+    }
+  }
+
+  function resetLightboxTransform() {
+    lbZoomState.scale = 1;
+    lbZoomState.tx = 0;
+    lbZoomState.ty = 0;
+    lbZoomState.pointers.clear();
+    lbZoomState.hadMultiTouch = false;
+    document.getElementById('lbImgWrap')?.classList.remove('is-panning', 'is-zoomed');
+    applyLightboxTransform();
+  }
+
+  function zoomLightboxTowardPoint(nextScale, clientX, clientY) {
+    const wrap = document.getElementById('lbImgWrap');
+    if (!wrap) return;
+    const clamped = Math.max(1, Math.min(6, nextScale));
+    const prevScale = lbZoomState.scale;
+    if (Math.abs(clamped - prevScale) < 0.001) return;
+    if (clamped <= 1.01) {
+      lbZoomState.scale = 1;
+      lbZoomState.tx = 0;
+      lbZoomState.ty = 0;
+      applyLightboxTransform();
+      return;
+    }
+    const r = wrap.getBoundingClientRect();
+    const rx = clientX - (r.left + r.width / 2);
+    const ry = clientY - (r.top + r.height / 2);
+    const ratio = clamped / prevScale;
+    lbZoomState.tx = rx - ratio * (rx - lbZoomState.tx);
+    lbZoomState.ty = ry - ratio * (ry - lbZoomState.ty);
+    lbZoomState.scale = clamped;
+    applyLightboxTransform();
+  }
+
   window.openLightbox = (photos, startIdx = 0) => {
     if (!Array.isArray(photos) || !photos.length) return;
     lbPhotos = photos;
@@ -483,8 +570,7 @@
   function renderLightboxFrame() {
     const img = document.getElementById('lbImg');
     img.src = lbPhotos[lbIdx] || '';
-    img.classList.remove('zoomed');
-    document.getElementById('lbZoomBtn').textContent = '🔍 Zoom';
+    resetLightboxTransform();
     document.getElementById('lbCounter').textContent = `${lbIdx + 1} / ${lbPhotos.length}`;
     document.getElementById('lbPrevBtn').disabled = lbIdx <= 0;
     document.getElementById('lbNextBtn').disabled = lbIdx >= lbPhotos.length - 1;
@@ -498,9 +584,14 @@
   };
 
   window.toggleLightboxZoom = () => {
-    const img = document.getElementById('lbImg');
-    const z = img.classList.toggle('zoomed');
-    document.getElementById('lbZoomBtn').textContent = z ? '🔎 Fit' : '🔍 Zoom';
+    if (lbZoomState.scale > 1.05) {
+      resetLightboxTransform();
+    } else {
+      lbZoomState.scale = 2.5;
+      lbZoomState.tx = 0;
+      lbZoomState.ty = 0;
+      applyLightboxTransform();
+    }
   };
 
   window.closeLightbox = () => {
@@ -510,15 +601,119 @@
     }
   };
 
-  document.getElementById('lbImg').addEventListener('click', () => toggleLightboxZoom());
-  document.getElementById('lbImgWrap').addEventListener('touchstart', (e) => {
-    if (e.touches.length === 1) lbTouchX = e.touches[0].clientX;
-  }, { passive: true });
-  document.getElementById('lbImgWrap').addEventListener('touchend', (e) => {
-    if (document.getElementById('lbImg').classList.contains('zoomed')) return;
-    const dx = (e.changedTouches?.[0]?.clientX || 0) - lbTouchX;
-    if (Math.abs(dx) > 55) stepLightbox(dx < 0 ? 1 : -1);
-  }, { passive: true });
+  (function bindLightboxInteractions() {
+    const wrap = document.getElementById('lbImgWrap');
+    if (!wrap) return;
+
+    // Smooth mouse scroll-wheel zoom (1x to 6x toward cursor)
+    wrap.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.22 : (1 / 1.22);
+      zoomLightboxTowardPoint(lbZoomState.scale * factor, e.clientX, e.clientY);
+    }, { passive: false });
+
+    // Double-click desktop toggle 1x <-> 2.5x toward cursor
+    wrap.addEventListener('dblclick', (e) => {
+      e.preventDefault();
+      if (lbZoomState.scale > 1.05) resetLightboxTransform();
+      else zoomLightboxTowardPoint(2.5, e.clientX, e.clientY);
+    });
+
+    const beginPinch = () => {
+      const pts = Array.from(lbZoomState.pointers.values());
+      if (pts.length < 2) return;
+      const r = wrap.getBoundingClientRect();
+      lbZoomState.pinchStartDist = Math.max(10, Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y));
+      lbZoomState.pinchStartScale = lbZoomState.scale;
+      lbZoomState.pinchMidX = (pts[0].x + pts[1].x) / 2 - (r.left + r.width / 2);
+      lbZoomState.pinchMidY = (pts[0].y + pts[1].y) / 2 - (r.top + r.height / 2);
+      lbZoomState.pinchOriginTx = lbZoomState.tx;
+      lbZoomState.pinchOriginTy = lbZoomState.ty;
+      lbZoomState.hadMultiTouch = true;
+    };
+
+    wrap.addEventListener('pointerdown', (e) => {
+      if (e.button && e.button !== 0) return;
+      wrap.setPointerCapture(e.pointerId);
+      lbZoomState.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (lbZoomState.pointers.size === 1) {
+        lbZoomState.hadMultiTouch = false;
+        lbZoomState.swipeMoved = false;
+        lbZoomState.swipeStartX = e.clientX;
+        lbZoomState.panStartX = e.clientX;
+        lbZoomState.panStartY = e.clientY;
+        lbZoomState.panOriginTx = lbZoomState.tx;
+        lbZoomState.panOriginTy = lbZoomState.ty;
+        if (lbZoomState.scale > 1.01) wrap.classList.add('is-panning');
+      } else if (lbZoomState.pointers.size === 2) {
+        wrap.classList.remove('is-panning');
+        beginPinch();
+      }
+    });
+
+    wrap.addEventListener('pointermove', (e) => {
+      if (!lbZoomState.pointers.has(e.pointerId)) return;
+      lbZoomState.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (lbZoomState.pointers.size >= 2) {
+        const pts = Array.from(lbZoomState.pointers.values());
+        const dist = Math.max(10, Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y));
+        const nextScale = Math.max(1, Math.min(6, lbZoomState.pinchStartScale * (dist / lbZoomState.pinchStartDist)));
+        const r = wrap.getBoundingClientRect();
+        const curMidX = (pts[0].x + pts[1].x) / 2 - (r.left + r.width / 2);
+        const curMidY = (pts[0].y + pts[1].y) / 2 - (r.top + r.height / 2);
+        const ratio = nextScale / Math.max(0.01, lbZoomState.pinchStartScale);
+        lbZoomState.scale = nextScale;
+        lbZoomState.tx = curMidX - ratio * (lbZoomState.pinchMidX - lbZoomState.pinchOriginTx);
+        lbZoomState.ty = curMidY - ratio * (lbZoomState.pinchMidY - lbZoomState.pinchOriginTy);
+        applyLightboxTransform();
+      } else if (lbZoomState.pointers.size === 1) {
+        const dx = e.clientX - lbZoomState.panStartX;
+        const dy = e.clientY - lbZoomState.panStartY;
+        if (Math.hypot(dx, dy) > 8) lbZoomState.swipeMoved = true;
+        if (lbZoomState.scale > 1.01) {
+          lbZoomState.tx = lbZoomState.panOriginTx + dx;
+          lbZoomState.ty = lbZoomState.panOriginTy + dy;
+          applyLightboxTransform();
+        }
+      }
+    });
+
+    const releasePtr = (e, isUp) => {
+      if (!lbZoomState.pointers.has(e.pointerId)) return;
+      const wasSingle = lbZoomState.pointers.size === 1 && !lbZoomState.hadMultiTouch;
+      lbZoomState.pointers.delete(e.pointerId);
+      wrap.classList.remove('is-panning');
+      if (lbZoomState.pointers.size === 1) {
+        const rem = Array.from(lbZoomState.pointers.values())[0];
+        lbZoomState.panStartX = rem.x;
+        lbZoomState.panStartY = rem.y;
+        lbZoomState.panOriginTx = lbZoomState.tx;
+        lbZoomState.panOriginTy = lbZoomState.ty;
+      } else if (lbZoomState.pointers.size === 0 && isUp && wasSingle) {
+        const dx = e.clientX - lbZoomState.swipeStartX;
+        if (lbZoomState.scale <= 1.01 && Math.abs(dx) > 55) {
+          stepLightbox(dx < 0 ? 1 : -1);
+          return;
+        }
+        // Touch double-tap toggle 1x <-> 2.5x
+        if (e.pointerType === 'touch' && !lbZoomState.swipeMoved) {
+          const now = Date.now();
+          if (now - lbZoomState.lastTapAt < 320 && Math.hypot(e.clientX - lbZoomState.lastTapX, e.clientY - lbZoomState.lastTapY) < 42) {
+            lbZoomState.lastTapAt = 0;
+            if (lbZoomState.scale > 1.05) resetLightboxTransform();
+            else zoomLightboxTowardPoint(2.5, e.clientX, e.clientY);
+          } else {
+            lbZoomState.lastTapAt = now;
+            lbZoomState.lastTapX = e.clientX;
+            lbZoomState.lastTapY = e.clientY;
+          }
+        }
+      }
+    };
+
+    wrap.addEventListener('pointerup', (e) => releasePtr(e, true));
+    wrap.addEventListener('pointercancel', (e) => releasePtr(e, false));
+  })();
 
   // ==================== INTERACTIVE MONOCHROME CROP & 90° ROTATE MODAL ====================
   const cropState = {
@@ -1292,19 +1487,62 @@
     }
   };
 
-  async function bindStreamToViewfinder(stream) {
+  function isSecondaryRearLensLabel(lbl) {
+    return /ultra|wide|0\.5|0\.6|macro|tele|depth|ir\b|tof\b/i.test(String(lbl || ''));
+  }
+
+  function pickPrimaryRearCameraId(devices) {
+    const vids = (Array.isArray(devices) ? devices : []).filter(d => d && d.kind === 'videoinput' && d.deviceId);
+    if (!vids.length) return '';
+    const rear = vids.filter(d => {
+      const l = String(d.label || '').toLowerCase();
+      if (/\b(front|user|selfie|facetime)\b/.test(l)) return false;
+      return /back|rear|environment|camera2\s*0/i.test(l) || !l;
+    });
+    const pool = rear.length ? rear : vids;
+    const mainCandidates = pool.filter(d => !isSecondaryRearLensLabel(d.label));
+    const cam0 = mainCandidates.find(d => /camera2\s*0\b|facing back/i.test(d.label || '') && /\b0\b/.test(d.label || ''));
+    if (cam0) return cam0.deviceId;
+    if (mainCandidates.length) return mainCandidates[0].deviceId;
+    return pool[0]?.deviceId || '';
+  }
+
+  async function bindStreamToViewfinder(stream, allowPrimaryLensSwitch = true) {
     const video = document.getElementById('camVideo');
     camStream = stream;
     video.srcObject = stream;
     await video.play();
 
-    const track = camStream.getVideoTracks()[0];
-    const caps = track?.getCapabilities ? track.getCapabilities() : {};
+    let track = camStream.getVideoTracks()[0];
+    let caps = track?.getCapabilities ? track.getCapabilities() : {};
+
+    // Force main 1x rear camera if Android auto-picked an ultrawide/macro/tele lens and user hasn't picked a custom lens
+    if (allowPrimaryLensSwitch && !cfg.preferredCameraId && track) {
+      try {
+        const allDevs = await navigator.mediaDevices.enumerateDevices();
+        const curLabel = track.label || '';
+        const primaryId = pickPrimaryRearCameraId(allDevs);
+        const curDevId = track.getSettings?.()?.deviceId || '';
+        if (primaryId && primaryId !== curDevId && isSecondaryRearLensLabel(curLabel)) {
+          camStream.getTracks().forEach(t => t.stop());
+          const mainStream = await openHighResCameraStream(primaryId);
+          return bindStreamToViewfinder(mainStream, false);
+        }
+      } catch (_) {}
+    }
+
     camTorchOn = false;
     const torchBtn = document.getElementById('camTorchBtn');
     if (torchBtn) {
       torchBtn.style.visibility = caps.torch ? 'visible' : 'hidden';
       torchBtn.textContent = '🔦';
+    }
+
+    // Explicitly lock zoom to 1.0x when sensor exposes ultrawide < 1.0 so Android never drops to blurry 0.5x
+    if (track && caps?.zoom && typeof caps.zoom.min === 'number' && caps.zoom.min < 0.99 && (caps.zoom.max ?? 1) >= 1) {
+      try {
+        await track.applyConstraints({ advanced: [{ zoom: 1.0 }] });
+      } catch (_) {}
     }
 
     if (track && Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) {
@@ -1403,9 +1641,12 @@
     `).join('');
 
     if (stagedUpc) {
-      upcBadge.textContent = `║▌ UPC Locked: ${stagedUpc}`;
+      upcBadge.innerHTML = `<span>║▌ UPC Locked: ${esc(stagedUpc)}</span><button type="button" class="cam-upc-clear" onclick="clearStagedUpc(event)" title="Clear scanned UPC">✕</button>`;
       upcBadge.classList.remove('hidden');
-    } else upcBadge.classList.add('hidden');
+    } else {
+      upcBadge.innerHTML = '';
+      upcBadge.classList.add('hidden');
+    }
   }
 
   window.openCameraShotLightbox = (idx) => {
@@ -1438,18 +1679,26 @@
   };
 
   async function openHighResCameraStream(preferredId = '') {
-    const devId = preferredId || cfg.preferredCameraId || '';
+    let devId = preferredId || cfg.preferredCameraId || '';
+    if (!devId && navigator.mediaDevices?.enumerateDevices) {
+      try {
+        const devs = await navigator.mediaDevices.enumerateDevices();
+        const labeled = devs.filter(d => d.kind === 'videoinput' && d.label);
+        if (labeled.length) devId = pickPrimaryRearCameraId(labeled);
+      } catch (_) {}
+    }
     const attempts = [];
-    // Request 1920x1080 ideal for responsive live viewfinder & Focus Peaking;
-    // ImageCapture.takePhoto() independently captures full native sensor resolution.
+    // Prefer crisp 4K / high-res main 1x rear sensor (graceful fallback to 1080p -> 720p -> default)
     if (devId) {
       attempts.push(
+        { video: { deviceId: { exact: devId }, width: { ideal: 3840 }, height: { ideal: 2160 }, focusMode: { ideal: 'continuous' } }, audio: false },
         { video: { deviceId: { exact: devId }, width: { ideal: 1920 }, height: { ideal: 1080 }, focusMode: { ideal: 'continuous' } }, audio: false },
         { video: { deviceId: { exact: devId }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
         { video: { deviceId: { exact: devId } }, audio: false }
       );
     }
     attempts.push(
+      { video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 }, focusMode: { ideal: 'continuous' } }, audio: false },
       { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 }, focusMode: { ideal: 'continuous' } }, audio: false },
       { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
       { video: { facingMode: { ideal: 'environment' } }, audio: false }
@@ -1575,10 +1824,9 @@
     flash.classList.add('flash');
     setTimeout(() => flash.classList.remove('flash'), 160);
 
-    const isSingleCoverSlot = camMode === 'single' && stagedPhotos.length < 2;
     const decodeOpts = camMode === 'pile'
       ? { aiMaxDim: 3072, aiQuality: 0.92, saveMaxDim: 2048, saveQuality: 0.82, squarePreview: false }
-      : { aiMaxDim: 2048, aiQuality: 0.90, saveMaxDim: 1600, saveQuality: 0.84, squarePreview: isSingleCoverSlot };
+      : { aiMaxDim: 2048, aiQuality: 0.90, saveMaxDim: 1600, saveQuality: 0.85, squarePreview: false };
 
     try {
       let pair = null;
@@ -1608,11 +1856,11 @@
           toast(`Shot ${pilePhotos.length} captured — tap thumb to check sharpness, or Finish & Analyze`);
         } else {
           const slotIdx = stagedPhotos.length;
+          pair.origDataUrl = pair.apiB64 ? `data:image/jpeg;base64,${pair.apiB64}` : pair.saveWebp;
           stagedPhotos.push(pair);
           if (slotIdx === 2) {
-            // Normalize uploaded/captured spine immediately without requiring AI
-            stagedSpineSourceUrl = pair.saveWebp;
-            stagedSpineThumbUrl = await normalizeSpineDataUrl(pair.saveWebp, '');
+            stagedSpineSourceUrl = pair.origDataUrl || pair.saveWebp;
+            stagedSpineThumbUrl = pair.saveWebp;
             stagedSpineFlipped = false;
           }
           updateStageUI();
@@ -1670,18 +1918,18 @@
       for (const file of files) {
         if (stagedPhotos.length >= 4) { toast('Max 4 photos per scan'); break; }
         const slotIdx = stagedPhotos.length;
-        const isCover = slotIdx < 2;
         const pair = await decodeBlobToPhotoPair(file, {
           aiMaxDim: 2048,
           aiQuality: 0.90,
           saveMaxDim: 1600,
-          saveQuality: 0.84,
-          squarePreview: isCover
+          saveQuality: 0.85,
+          squarePreview: false
         });
+        pair.origDataUrl = pair.apiB64 ? `data:image/jpeg;base64,${pair.apiB64}` : pair.saveWebp;
         stagedPhotos.push(pair);
         if (slotIdx === 2) {
-          stagedSpineSourceUrl = pair.saveWebp;
-          stagedSpineThumbUrl = await normalizeSpineDataUrl(pair.saveWebp, '');
+          stagedSpineSourceUrl = pair.origDataUrl || pair.saveWebp;
+          stagedSpineThumbUrl = pair.saveWebp;
           stagedSpineFlipped = false;
         }
       }
@@ -1735,10 +1983,14 @@
     if (src) openLightbox([src], 0);
   };
 
-  window.clearStagedUpc = () => {
+  window.clearStagedUpc = (ev) => {
+    if (ev) ev.stopPropagation();
     stagedUpc = '';
-    document.getElementById('fBarcode').value = '';
+    const fBar = document.getElementById('fBarcode');
+    if (fBar) fBar.value = '';
     updateStageUI();
+    updateCameraOverlayUI();
+    toast('UPC cleared — ready to scan', 1600);
   };
 
   window.updateStageUI = () => {
@@ -1781,6 +2033,7 @@
           <img src="${stagedPhotos[c.idx].saveWebp}" alt="" />
           <span class="photo-tile-label">${c.label}</span>
           <div class="photo-tile-actions">
+            <button type="button" class="photo-tile-btn" onclick="openStagedPhotoCrop(${c.idx}, event)" title="Crop or rotate ${c.label}">✂️</button>
             <button type="button" class="photo-tile-btn danger" onclick="removeStagedPhoto(${c.idx}, event)" title="Remove ${c.label}">×</button>
           </div>
         </div>
@@ -1794,6 +2047,7 @@
           <div class="photo-gallery-spine-bar">
             <span style="font-size:0.7rem; font-weight:800; letter-spacing:0.06em; color:var(--muted);">SPINE</span>
             <div class="inline-actions" style="gap:4px;">
+              <button type="button" class="photo-tile-btn" onclick="openStagedPhotoCrop(2, event)" title="Crop & rotate spine">✂️</button>
               <button type="button" class="photo-tile-btn" onclick="rotateStagedSpine90(event)" title="Rotate spine 90°">↻ 90°</button>
               ${stagedPhotos[2] ? `<button type="button" class="photo-tile-btn danger" onclick="removeStagedPhoto(2, event)" title="Remove spine">×</button>` : ''}
             </div>
@@ -1808,9 +2062,84 @@
     document.getElementById('previewStrip').innerHTML = galleryHtml;
   };
 
+  window.openStagedPhotoCrop = (idx, ev) => {
+    if (ev) ev.stopPropagation();
+    const isSpine = idx === 2;
+    const photo = stagedPhotos[idx];
+    const src = isSpine
+      ? (stagedSpineSourceUrl || photo?.origDataUrl || stagedSpineThumbUrl || photo?.saveWebp || '')
+      : (photo?.origDataUrl || (photo?.apiB64 ? `data:image/jpeg;base64,${photo.apiB64}` : photo?.saveWebp) || '');
+    if (!src) return;
+    const lbl = idx === 0 ? 'Front' : (idx === 1 ? 'Back' : (idx === 2 ? 'Spine' : 'Extra'));
+    openCropModal({
+      dataUrl: src,
+      title: `✂️ Crop & Rotate ${lbl}`,
+      mode: isSpine ? 'spine' : 'cover',
+      onApply: async (croppedWebp, workingSourceWebp) => {
+        if (isSpine) {
+          stagedSpineThumbUrl = croppedWebp;
+          stagedSpineSourceUrl = workingSourceWebp || src;
+          stagedSpineFlipped = false;
+          if (currentExtracted) {
+            currentExtracted.spine_thumb_url = croppedWebp;
+            currentExtracted.spine_source_url = stagedSpineSourceUrl;
+            currentExtracted.spine_flipped = false;
+          }
+          if (currentInspected) {
+            currentInspected.spine_thumb_url = croppedWebp;
+            currentInspected.spine_source_url = stagedSpineSourceUrl;
+            currentInspected.spine_flipped = false;
+          }
+        } else if (stagedPhotos[idx]) {
+          stagedPhotos[idx].saveWebp = croppedWebp;
+        }
+        updateStageUI();
+        toast(`✂️ ${lbl} crop applied`);
+      }
+    });
+  };
+
   window.openStagedLightbox = (idx) => openLightbox(stagedPhotos.map(p => p.saveWebp), idx);
 
-  // ==================== CONTINUOUS VOICE RE-GRADE (MANUAL STOP ONLY) ====================
+  // Build labeled image parts for AI Grading / Voice Re-Grade: sends Front, Back, Spine, and all Extra photos!
+  function buildLabeledGradingImageParts(source, item) {
+    const parts = [];
+    const pushDataUrl = (label, dataUrl) => {
+      const m = String(dataUrl || '').match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+      if (m) {
+        parts.push({ text: label });
+        parts.push({ inline_data: { mime_type: m[1], data: m[2] } });
+      }
+    };
+
+    if (source !== 'stash') {
+      const slotNames = ['[Front]', '[Back]', '[Spine]', '[Extra 1]'];
+      let hasSpinePart = false;
+      stagedPhotos.forEach((p, idx) => {
+        if (!p?.apiB64) return;
+        const lbl = slotNames[idx] || `[Extra ${idx - 2}]`;
+        if (idx === 2) hasSpinePart = true;
+        parts.push({ text: lbl });
+        parts.push({ inline_data: { mime_type: 'image/jpeg', data: p.apiB64 } });
+      });
+      const extraSpine = stagedSpineThumbUrl || item?.spine_thumb_url || '';
+      if (!hasSpinePart && extraSpine) {
+        pushDataUrl('[Spine]', extraSpine);
+      }
+      return parts;
+    }
+
+    const thumbs = getStashCoverPhotos(item);
+    thumbs.forEach((src, i) => {
+      const lbl = i === 0 ? '[Front]' : (i === 1 ? '[Back]' : `[Extra ${i - 1}]`);
+      pushDataUrl(lbl, src);
+    });
+    const spineSrc = item?.spine_thumb_url || item?.spine_source_url || '';
+    if (spineSrc) {
+      pushDataUrl('[Spine]', spineSrc);
+    }
+    return parts;
+  }
   window.voiceRegrade = (source, btnId) => {
     if (!CC.isAiReady()) { toast('Add your Gemini API Key in Settings first'); return; }
     const btn = document.getElementById(btnId);
@@ -1934,25 +2263,19 @@ STRICT DISCOGS GOLDMINE RULES:
   * "Very Good (VG)" = creases, sticker residue, moderate case scuffs/small crack.
   * "Good Plus (G+)" = paint/ink/water stains, heavy creases, ripped flap, heavily scratched/cracked case.
   * "Good (G)" / "Fair (F)" / "Poor (P)" = severe stains obscuring art, torn/missing pieces, heavy water/mold damage.
+- SPINE & VERBATIM MARKINGS RULE (CRITICAL):
+  * Inspect EVERY attached image including [Spine] for promo punch holes, drill holes, saw cuts / cut-out notches, cracked hinges, spine fading/creases, and shell defects.
+  * TRANSCRIBE VERBATIM any notable ink stamps, radio/library/club property stamps (e.g. "Property of ... Milwaukee"), promo stamps, price/hype stickers, or handwritten markings in "polished_note" instead of summarizing them generically.
 - CONSERVATIVE RULE: When between two grades, ALWAYS choose the LOWER grade. NEVER use the word "mint" unless factory sealed.
 
 Return ONLY valid JSON:
 {
   "media_condition": "exact Discogs media grade from list",
   "sleeve_condition": "exact Discogs sleeve grade from list",
-  "polished_note": "clean, factual, buyer-ready Discogs listing note incorporating every flaw reported by the seller and visible in photos (1-3 short sentences, no fluff)"
+  "polished_note": "clean, factual, buyer-ready Discogs listing note incorporating every flaw reported by the seller and visible in photos including verbatim stamps/markings (1-3 short sentences, no fluff)"
 }`;
 
-    const parts = [{ text: prompt }];
-    if (!isStash && stagedPhotos.length) {
-      stagedPhotos.forEach(p => parts.push({ inline_data: { mime_type: 'image/jpeg', data: p.apiB64 } }));
-    } else if (isStash) {
-      const thumbs = (Array.isArray(item.thumbs) && item.thumbs.length) ? item.thumbs : (item.thumb_data_url ? [item.thumb_data_url] : []);
-      thumbs.forEach(src => {
-        const m = String(src || '').match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
-        if (m) parts.push({ inline_data: { mime_type: m[1], data: m[2] } });
-      });
-    }
+    const parts = [{ text: prompt }, ...buildLabeledGradingImageParts(source, item)];
 
     try {
       const res = await CC.callAI(parts, 'MEDIUM', { retryLabel: 'Voice Re-Grade' });
@@ -2417,7 +2740,84 @@ Return ONLY valid JSON:
     if (cfgChk) cfgChk.checked = cfg.autoGradeOnScan;
   };
 
-  async function cropSpineFromStagedPhoto(spineCrop) {
+  async function cropImageByBox(sourceDataUrl, box2d, opts = {}) {
+    const {
+      minBoxSpan = 150,
+      padFrac = 0.025,
+      maxLongEdge = 1600,
+      maxWidthOnly = false,
+      rotationDeg = 0,
+      quality = 0.85
+    } = opts || {};
+    if (!sourceDataUrl || !Array.isArray(box2d) || box2d.length !== 4) return null;
+    const nums = box2d.map(Number);
+    if (!nums.every(Number.isFinite)) return null;
+    const isUnit = Math.max(...nums) > 0 && Math.max(...nums) <= 1.01;
+    let [y1, x1, y2, x2] = nums.map(v => Math.max(0, Math.min(1000, isUnit ? v * 1000 : v)));
+    if (y1 > y2) [y1, y2] = [y2, y1];
+    if (x1 > x2) [x1, x2] = [x2, x1];
+    const boxW = x2 - x1;
+    const boxH = y2 - y1;
+    if (boxW < minBoxSpan || boxH < minBoxSpan) return null;
+
+    // Expand by ~2.5% safety margin clamped cleanly to [0..1000]
+    const padX = Math.max(8, boxW * padFrac);
+    const padY = Math.max(8, boxH * padFrac);
+    x1 = Math.max(0, x1 - padX);
+    x2 = Math.min(1000, x2 + padX);
+    y1 = Math.max(0, y1 - padY);
+    y2 = Math.min(1000, y2 + padY);
+
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const nw = img.naturalWidth || img.width;
+          const nh = img.naturalHeight || img.height;
+          if (!nw || !nh) { resolve(null); return; }
+          const sx = Math.max(0, Math.floor((x1 / 1000) * nw));
+          const sy = Math.max(0, Math.floor((y1 / 1000) * nh));
+          const sw = Math.max(16, Math.min(nw - sx, Math.ceil(((x2 - x1) / 1000) * nw)));
+          const sh = Math.max(16, Math.min(nh - sy, Math.ceil(((y2 - y1) / 1000) * nh)));
+
+          const normDeg = ((Number(rotationDeg) % 360) + 360) % 360;
+          const swap = normDeg === 90 || normDeg === 270;
+          const rawW = swap ? sh : sw;
+          const rawH = swap ? sw : sh;
+          let dstW = rawW, dstH = rawH;
+          if (maxWidthOnly) {
+            if (rawW > maxLongEdge) {
+              const s = maxLongEdge / rawW;
+              dstW = maxLongEdge;
+              dstH = Math.max(1, Math.round(rawH * s));
+            }
+          } else {
+            const fitted = fitDims(rawW, rawH, maxLongEdge);
+            dstW = fitted.width;
+            dstH = fitted.height;
+          }
+
+          const c = document.createElement('canvas');
+          c.width = dstW;
+          c.height = dstH;
+          const ctx = c.getContext('2d');
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
+          ctx.translate(dstW / 2, dstH / 2);
+          ctx.rotate((normDeg * Math.PI) / 180);
+          if (swap) ctx.drawImage(img, sx, sy, sw, sh, -dstH / 2, -dstW / 2, dstH, dstW);
+          else ctx.drawImage(img, sx, sy, sw, sh, -dstW / 2, -dstH / 2, dstW, dstH);
+          resolve(canvasToDataUrl(c, 'image/webp', quality));
+        } catch (_) {
+          resolve(null);
+        }
+      };
+      img.onerror = () => resolve(null);
+      img.src = sourceDataUrl;
+    });
+  }
+
+  async function cropSpineFromStagedPhoto(spineCrop, explicitSpineRotation = null) {
     if (!spineCrop || typeof spineCrop !== 'object' || !Array.isArray(spineCrop.box_2d) || spineCrop.box_2d.length !== 4) {
       return { sourceUrl: '', thumbUrl: '', flipped: false };
     }
@@ -2428,69 +2828,40 @@ Return ONLY valid JSON:
     const photo = stagedPhotos[pIdx];
     if (!photo) return { sourceUrl: '', thumbUrl: '', flipped: false };
 
-    const nums = spineCrop.box_2d.map(Number);
-    if (!nums.every(Number.isFinite)) return { sourceUrl: '', thumbUrl: '', flipped: false };
-    const isUnit = Math.max(...nums) > 0 && Math.max(...nums) <= 1.01;
-    let [y1, x1, y2, x2] = nums.map(v => Math.max(0, Math.min(1000, isUnit ? v * 1000 : v)));
-    if (y1 > y2) [y1, y2] = [y2, y1];
-    if (x1 > x2) [x1, x2] = [x2, x1];
-    if ((y2 - y1) < 15 || (x2 - x1) < 15) return { sourceUrl: '', thumbUrl: '', flipped: false };
+    const srcImgUrl = photo.origDataUrl || (photo.apiB64 ? `data:image/jpeg;base64,${photo.apiB64}` : photo.saveWebp);
+    const hasExactRot = explicitSpineRotation !== null && explicitSpineRotation !== undefined && [0, 90, 180, 270].includes(Number(explicitSpineRotation));
+    const exactDeg = hasExactRot ? Number(explicitSpineRotation) : null;
 
-    const rotationHint = String(spineCrop.rotation_hint || '').trim();
-
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.onload = () => {
-        try {
-          const nw = img.naturalWidth || img.width;
-          const nh = img.naturalHeight || img.height;
-          if (!nw || !nh) { resolve({ sourceUrl: '', thumbUrl: '', flipped: false }); return; }
-          const sx = Math.max(0, Math.floor((x1 / 1000) * nw));
-          const sy = Math.max(0, Math.floor((y1 / 1000) * nh));
-          const sw = Math.max(10, Math.min(nw - sx, Math.ceil(((x2 - x1) / 1000) * nw)));
-          const sh = Math.max(10, Math.min(nh - sy, Math.ceil(((y2 - y1) / 1000) * nh)));
-
-          // Keep unrotated tight crop as spine_source_url so Flip 180° / re-orientation never loses quality
-          const srcScale = Math.max(sw, sh) > 1200 ? (1200 / Math.max(sw, sh)) : 1;
-          const srcCanvas = document.createElement('canvas');
-          srcCanvas.width = Math.max(1, Math.round(sw * srcScale));
-          srcCanvas.height = Math.max(1, Math.round(sh * srcScale));
-          const sctx = srcCanvas.getContext('2d');
-          sctx.imageSmoothingEnabled = true;
-          sctx.imageSmoothingQuality = 'high';
-          sctx.drawImage(img, sx, sy, sw, sh, 0, 0, srcCanvas.width, srcCanvas.height);
-          const sourceUrl = canvasToDataUrl(srcCanvas, 'image/webp', 0.86);
-
-          // Normalize to upright horizontal landscape using rotation_hint when confident
-          const tr = CC.resolveSpineTransform(sw, sh, rotationHint);
-          const rawDstW = tr.swapDims ? sh : sw;
-          const rawDstH = tr.swapDims ? sw : sh;
-          const maxW = 1200;
-          const scale = rawDstW > maxW ? (maxW / rawDstW) : 1;
-          const dstW = Math.max(1, Math.round(rawDstW * scale));
-          const dstH = Math.max(1, Math.round(rawDstH * scale));
-
-          const c = document.createElement('canvas');
-          c.width = dstW;
-          c.height = dstH;
-          const ctx = c.getContext('2d');
-          ctx.imageSmoothingEnabled = true;
-          ctx.imageSmoothingQuality = 'high';
-          ctx.translate(dstW / 2, dstH / 2);
-          ctx.rotate((tr.angleDeg * Math.PI) / 180);
-          if (tr.swapDims) {
-            ctx.drawImage(img, sx, sy, sw, sh, -dstH / 2, -dstW / 2, dstH, dstW);
-          } else {
-            ctx.drawImage(img, sx, sy, sw, sh, -dstW / 2, -dstH / 2, dstW, dstH);
-          }
-          resolve({ sourceUrl, thumbUrl: canvasToDataUrl(c, 'image/webp', 0.84), flipped: false });
-        } catch (_) {
-          resolve({ sourceUrl: '', thumbUrl: '', flipped: false });
-        }
-      };
-      img.onerror = () => resolve({ sourceUrl: '', thumbUrl: '', flipped: false });
-      img.src = photo.apiB64 ? `data:image/jpeg;base64,${photo.apiB64}` : photo.saveWebp;
+    const unrotatedCrop = await cropImageByBox(srcImgUrl, spineCrop.box_2d, {
+      minBoxSpan: 25,
+      padFrac: 0.025,
+      maxLongEdge: 1200,
+      maxWidthOnly: false,
+      rotationDeg: 0,
+      quality: 0.85
     });
+    if (!unrotatedCrop) return { sourceUrl: '', thumbUrl: '', flipped: false };
+
+    let finalAngle = exactDeg;
+    if (finalAngle === null) {
+      const nums = spineCrop.box_2d.map(Number);
+      const tr = CC.resolveSpineTransform(Math.abs(nums[3] - nums[1]), Math.abs(nums[2] - nums[0]), spineCrop.rotation_hint || '');
+      finalAngle = tr.angleDeg;
+    }
+
+    const rotatedThumb = await cropImageByBox(srcImgUrl, spineCrop.box_2d, {
+      minBoxSpan: 25,
+      padFrac: 0.025,
+      maxLongEdge: 1200,
+      maxWidthOnly: true,
+      rotationDeg: finalAngle,
+      quality: 0.85
+    });
+    return {
+      sourceUrl: unrotatedCrop,
+      thumbUrl: rotatedThumb || unrotatedCrop,
+      flipped: finalAngle === 180
+    };
   }
 
   async function runVisionOCR(myRunId) {
@@ -2544,6 +2915,11 @@ STRICT DISCOGS SELLER GRADING RULES (Be brutally honest and conservative — nev
    * "Good Plus (G+)" = paint/ink/water stains, heavy creases, ripped flap, heavily scratched/cracked case.
    * "Good (G)" / "Fair (F)" / "Poor (P)" = severe stains obscuring art, torn/missing pieces, heavy water damage.
 4. When between two grades, ALWAYS pick the LOWER grade. NEVER say "mint" in "condition_note" unless sealed.
+5. SPINE & VERBATIM MARKINGS: Inspect EVERY photo including the Spine for promo punch holes, drill holes, saw cuts / cut-out notches, cracked hinges, spine fading/creases, and shell defects. TRANSCRIBE VERBATIM any notable ink stamps, radio/library/club property stamps (e.g. "Property of ... Milwaukee"), promo stamps, stickers, or handwritten markings in "condition_note" instead of summarizing them generically.
+
+AUTO-CROP & SPINE ORIENTATION RULES:
+- Return "photo_crops": an array of length ${stagedPhotos.length} matching the submitted photos in exact order, where each entry is [ymin, xmin, ymax, xmax] (0-1000 normalized) tightly framing the physical media/case/sleeve to remove dead table/hand/background whitespace (or null if already tightly framed).
+- Return "spine_rotation": integer 0 | 90 | 180 | 270 — exact clockwise rotation needed so spine text reads cleanly HORIZONTALLY left-to-right, right-side-up (explicitly check if the letters are upside-down and return 180 when inverted!).
 
 Return ONLY valid JSON:
 {
@@ -2559,13 +2935,15 @@ Return ONLY valid JSON:
   "country_clues": "country printed (e.g. 'Printed in U.S.A.', 'Turkey') or 'Not visible'",
   "club_edition": "None" | "CRC" | "BMG" | "Unknown",
   "club_evidence": "exact quoted club text visible in photo (e.g. 'CRC', 'BMG Direct', 'Columbia House'), or empty string",
-  "physical_details": "detailed plain-English list of EVERY visible physical pressing identifier (mention loose media if no case/insert; shell color, window markings, plant codes, paper label vs direct print, barcode presence, spine cut-out saw cuts/hole punches/notches, promo stamps)",
-  "spine_crop": null or { "photo_index": 0-based photo index containing the clearest spine, "box_2d": [ymin, xmin, ymax, xmax] on 0-1000 scale tightly hugging the spine, "rotation_hint": "0" | "90cw" | "90ccw" | "180" (rotation needed to make spine text read horizontally upright left-to-right) },
+  "physical_details": "detailed plain-English list of EVERY visible physical pressing identifier (mention loose media if no case/insert; shell color, window markings, plant codes, paper label vs direct print, barcode presence, spine cut-out saw cuts/hole punches/notches, verbatim promo/radio stamps)",
+  "photo_crops": [[ymin, xmin, ymax, xmax] or null for each submitted photo in order],
+  "spine_rotation": 0 | 90 | 180 | 270,
+  "spine_crop": null or { "photo_index": 0-based photo index containing the clearest spine, "box_2d": [ymin, xmin, ymax, xmax] on 0-1000 scale tightly hugging the spine, "rotation_hint": "0" | "90cw" | "90ccw" | "180" },
   "media_defects": ["list every flaw on cassette/disc, or empty array if spotless"],
-  "sleeve_defects": ["list every flaw on case/insert/spine including cut-out holes/saw cuts, or empty array if spotless or no cover"],
+  "sleeve_defects": ["list every flaw on case/insert/spine including cut-out holes/saw cuts and verbatim stamps/stickers, or empty array if spotless or no cover"],
   "media_condition": "exact Discogs media grade",
   "sleeve_condition": "exact Discogs sleeve grade",
-  "condition_note": "blunt factual seller note listing visible flaws (NEVER say 'mint' unless sealed)",
+  "condition_note": "blunt factual seller note listing visible flaws and transcribing notable stamps/stickers/handwriting verbatim (NEVER say 'mint' unless sealed)",
   "visible_tracks": ["every song title clearly visible on shell/insert"]
 }`
       : `You are a fast, meticulous physical music media OCR and Discogs pressing-ID expert. Inspect ALL attached photos carefully. ${upcHint}
@@ -2586,6 +2964,10 @@ OCR RULES:
 - Read exact physical shell/window/spine/pressing clues: shell color, timing window markings (e.g. "100-50-0" vs "0-50-0" vs blank vs dots), plant codes (e.g. "SR", "AR", "CR"), screws vs welded, paper label vs direct print, club stamps ("CRC", "BMG"), country/address text, copyright years, and any spine cut-out markings (hole punches, saw cuts, notched corners, promo stamps).
 - ANTI-HALLUCINATION CLUB RULE: NEVER guess "CRC" or "BMG" for "club_edition" unless you can quote the EXACT legible club text visibly printed in the photo inside "club_evidence". Otherwise set "club_evidence": "" and "club_edition": "None" or "Unknown".
 
+AUTO-CROP & SPINE ORIENTATION RULES:
+- Return "photo_crops": an array of length ${stagedPhotos.length} matching the submitted photos in exact order, where each entry is [ymin, xmin, ymax, xmax] (0-1000 normalized) tightly framing the physical media/case/sleeve to remove dead table/hand/background whitespace (or null if already tightly framed).
+- Return "spine_rotation": integer 0 | 90 | 180 | 270 — exact clockwise rotation needed so spine text reads cleanly HORIZONTALLY left-to-right, right-side-up (explicitly check if the letters are upside-down and return 180 when inverted!).
+
 Return ONLY valid JSON:
 {
   "detected_format": "Cassette" | "CD" | "Vinyl" | "8-Track Cartridge" | "Reel-To-Reel" | "MiniDisc" | "DAT" | "DVD" | "VHS" | "LaserDisc" | "Blu-ray" | "Betamax" | "UMD" | "Shellac" | "SACD" | "File" | "Box Set" | "Unknown",
@@ -2601,11 +2983,18 @@ Return ONLY valid JSON:
   "club_edition": "None" | "CRC" | "BMG" | "Unknown",
   "club_evidence": "exact quoted club text visible in photo (e.g. 'CRC', 'BMG Direct', 'Columbia House'), or empty string",
   "physical_details": "detailed plain-English list of EVERY visible physical pressing identifier (mention loose media if no case/insert; shell color, window markings, plant codes, paper label vs direct print, barcode presence, spine cut-out saw cuts/hole punches/notches, promo stamps)",
-  "spine_crop": null or { "photo_index": 0-based photo index containing the clearest spine, "box_2d": [ymin, xmin, ymax, xmax] on 0-1000 scale tightly hugging the spine, "rotation_hint": "0" | "90cw" | "90ccw" | "180" (rotation needed to make spine text read horizontally upright left-to-right) },
+  "photo_crops": [[ymin, xmin, ymax, xmax] or null for each submitted photo in order],
+  "spine_rotation": 0 | 90 | 180 | 270,
+  "spine_crop": null or { "photo_index": 0-based photo index containing the clearest spine, "box_2d": [ymin, xmin, ymax, xmax] on 0-1000 scale tightly hugging the spine, "rotation_hint": "0" | "90cw" | "90ccw" | "180" },
   "visible_tracks": ["every song title clearly visible on shell/insert"]
 }`;
 
-    const parts = [{ text: prompt }, ...stagedPhotos.map(p => ({ inline_data: { mime_type: 'image/jpeg', data: p.apiB64 } }))];
+    const slotLabelsForOcr = ['[Front]', '[Back]', '[Spine]', '[Extra 1]'];
+    const parts = [{ text: prompt }];
+    stagedPhotos.forEach((p, idx) => {
+      parts.push({ text: slotLabelsForOcr[idx] || `[Extra ${idx - 2}]` });
+      parts.push({ inline_data: { mime_type: 'image/jpeg', data: p.apiB64 } });
+    });
 
     try {
       const ext = await CC.callAI(parts, 'MEDIUM', { retryLabel: 'Photo Vision' });
@@ -2634,22 +3023,66 @@ Return ONLY valid JSON:
         ext.graded_by_ai = true;
       }
 
-      // Auto-crop & upright-normalize spine if Gemini returned a valid spine_crop box
+      // Auto-crop ALL scan photos (Front, Back, Extras to 1600px WebP q0.85; Spine to 1200px wide + exact upright spine_rotation!)
+      const rawPhotoCrops = Array.isArray(ext.photo_crops) ? ext.photo_crops : [];
+      const exactSpineRot = [0, 90, 180, 270].includes(Number(ext.spine_rotation)) ? Number(ext.spine_rotation) : null;
+      let anyPhotoCropped = false;
+
+      for (let i = 0; i < stagedPhotos.length; i++) {
+        if (i === 2) continue; // Spine handled below with spine_rotation
+        const box = rawPhotoCrops[i];
+        if (!Array.isArray(box) || box.length !== 4) continue;
+        const p = stagedPhotos[i];
+        const origUrl = p.origDataUrl || (p.apiB64 ? `data:image/jpeg;base64,${p.apiB64}` : p.saveWebp);
+        const cropped = await cropImageByBox(origUrl, box, {
+          minBoxSpan: 150,
+          padFrac: 0.025,
+          maxLongEdge: 1600,
+          maxWidthOnly: false,
+          rotationDeg: 0,
+          quality: 0.85
+        });
+        if (cropped) {
+          p.saveWebp = cropped;
+          anyPhotoCropped = true;
+        }
+      }
+
       ext.spine_thumb_url = stagedSpineThumbUrl || '';
       ext.spine_source_url = stagedSpineSourceUrl || '';
       ext.spine_flipped = Boolean(stagedSpineFlipped);
-      if (ext.spine_crop) {
-        const cropRes = await cropSpineFromStagedPhoto(ext.spine_crop);
+
+      // Prefer explicit spine_crop, falling back to photo_crops[2] if a dedicated Spine shot (index 2) was provided
+      const effectiveSpineCrop = (ext.spine_crop && Array.isArray(ext.spine_crop.box_2d))
+        ? ext.spine_crop
+        : (stagedPhotos[2] && Array.isArray(rawPhotoCrops[2]) ? { photo_index: 2, box_2d: rawPhotoCrops[2] } : null);
+
+      if (effectiveSpineCrop) {
+        const cropRes = await cropSpineFromStagedPhoto(effectiveSpineCrop, exactSpineRot);
         if (cropRes.thumbUrl) {
           ext.spine_thumb_url = cropRes.thumbUrl;
           ext.spine_source_url = cropRes.sourceUrl;
-          ext.spine_flipped = false;
+          ext.spine_flipped = Boolean(cropRes.flipped);
           stagedSpineThumbUrl = cropRes.thumbUrl;
           stagedSpineSourceUrl = cropRes.sourceUrl;
-          stagedSpineFlipped = false;
-          updateStageUI();
+          stagedSpineFlipped = Boolean(cropRes.flipped);
+          anyPhotoCropped = true;
+        }
+      } else if (stagedPhotos[2] && exactSpineRot !== null) {
+        // Apply exact upright spine_rotation even if full spine shot was already tightly framed
+        const spOrig = stagedPhotos[2].origDataUrl || stagedPhotos[2].saveWebp;
+        const rotThumb = exactSpineRot === 0 ? stagedPhotos[2].saveWebp : await rotateDataUrlByDeg(spOrig, exactSpineRot, 'image/webp', 0.85, 1200);
+        if (rotThumb) {
+          ext.spine_thumb_url = rotThumb;
+          ext.spine_source_url = spOrig;
+          ext.spine_flipped = exactSpineRot === 180;
+          stagedSpineThumbUrl = rotThumb;
+          stagedSpineSourceUrl = spOrig;
+          stagedSpineFlipped = exactSpineRot === 180;
+          anyPhotoCropped = true;
         }
       }
+      if (anyPhotoCropped) updateStageUI();
 
       currentExtracted = ext;
 
@@ -3773,7 +4206,7 @@ Return ONLY valid JSON:
     document.getElementById('inspTracklist').innerHTML = buildTracklistHtml(item.tracklist, localMatch.matchedTracks, 'scan', item.artist);
     syncTrackPlayButtons();
 
-    document.getElementById('tasteLocalBadges').innerHTML = buildSpotifyBadgesHtml(localMatch, true);
+    document.getElementById('tasteLocalBadges').innerHTML = buildSpotifyHowYouKnowHtml(item, localMatch, true);
 
     document.getElementById('tasteScore').textContent = '...';
     document.getElementById('tasteBody').textContent = `Analyzing against your Taste Profile & Soft Spots on ${aiEngineLabel()}...`;
@@ -3781,34 +4214,145 @@ Return ONLY valid JSON:
     document.getElementById('tasteHits').innerHTML = '';
   }
 
+  function joinHumanList(items) {
+    const arr = (items || []).filter(Boolean);
+    if (!arr.length) return '';
+    if (arr.length === 1) return arr[0];
+    if (arr.length === 2) return `${arr[0]} and ${arr[1]}`;
+    return `${arr.slice(0, -1).join(', ')}, and ${arr[arr.length - 1]}`;
+  }
+
+  function dedupeStringsCI(list) {
+    const out = [];
+    const seen = new Set();
+    (list || []).forEach(v => {
+      const s = String(v || '').trim();
+      const k = norm(s);
+      if (s && k && !seen.has(k)) {
+        seen.add(k);
+        out.push(s);
+      }
+    });
+    return out;
+  }
+
+  function buildSpotifyHowYouKnowHtml(item, localMatch, includeSetupHint = false) {
+    const wrap = (bodyHtml) => `<div class="spotify-know-card"><div class="spotify-know-title">🎧 HOW YOU KNOW THEM</div><div class="spotify-know-body">${bodyHtml}</div></div>`;
+    if (!spotifyProfile) {
+      const hasDna = Boolean(document.getElementById('cfgTasteDna')?.value?.trim());
+      if (includeSetupHint && !hasDna) {
+        return wrap('Connect Spotify or add a Taste Profile in Settings to see how this release connects to your library.');
+      }
+      return wrap('Not synced with Spotify yet — score is based on your Taste Profile, genre, and era.');
+    }
+
+    const lm = localMatch || {};
+    const artistMatches = Array.isArray(lm.artistMatches) ? lm.artistMatches : [];
+    const albumHits = Array.isArray(lm.albumTrackHits) ? lm.albumTrackHits : [];
+
+    if (!artistMatches.length && !albumHits.length) {
+      return wrap('Not in your Spotify library yet — score is based on genre and era match.');
+    }
+
+    const q = (s) => `&ldquo;${esc(s)}&rdquo;`;
+    const isCompilation = Boolean(lm.isVarious || (artistMatches.length > 1 && /^various/i.test(String(item?.artist || '').trim())));
+
+    // Various Artists / Compilation narrative
+    if (isCompilation) {
+      const sentences = [];
+      if (albumHits.length) {
+        const hitStrs = albumHits.slice(0, 4).map(h => h.artist ? `${esc(h.artist)} &mdash; ${q(h.title)}` : q(h.title));
+        const more = albumHits.length > 4 ? ` (+${albumHits.length - 4} more)` : '';
+        sentences.push(`You already have <strong>${albumHits.length}</strong> track${albumHits.length === 1 ? '' : 's'} from this compilation in your Spotify: ${joinHumanList(hitStrs)}${more}.`);
+      }
+      const likedArts = artistMatches.filter(a => a.likedSongs.length > 0 || a.isFollowed || a.isTopArtist);
+      const plOnlyArts = artistMatches.filter(a => !likedArts.includes(a));
+      if (likedArts.length) {
+        const names = likedArts.slice(0, 4).map(a => `<strong>${esc(a.name)}</strong>${a.likedSongs.length ? ` (${a.likedSongs.length} liked)` : ''}`);
+        const extra = likedArts.length > 4 ? ` and ${likedArts.length - 4} more` : '';
+        sentences.push(`Featured artists you have liked songs from: ${joinHumanList(names)}${extra}.`);
+      }
+      if (plOnlyArts.length) {
+        const names = plOnlyArts.slice(0, 4).map(a => esc(a.name));
+        const extra = plOnlyArts.length > 4 ? ` +${plOnlyArts.length - 4} more` : '';
+        sentences.push(`Playlist-only appearances (0 liked songs): ${joinHumanList(names)}${extra}.`);
+      }
+      return wrap(sentences.join(' '));
+    }
+
+    // Standard single/primary artist narrative
+    const sentences = [];
+    const primary = artistMatches[0];
+    if (primary) {
+      const nameHtml = `<strong>${esc(primary.name)}</strong>`;
+      const liked = primary.likedSongs || [];
+      const pls = primary.playlists || [];
+      const plMap = primary.playlistTrackMap || {};
+      const followParts = [];
+      if (primary.isFollowed) followParts.push('you follow them');
+      if (primary.isTopArtist) followParts.push('one of your Top Artists');
+
+      if (liked.length >= 1 && liked.length <= 3) {
+        // 1–3 liked songs: explicitly name EVERY song title + playlists (never claim user likes the whole artist from 1 song)
+        const songList = joinHumanList(liked.map(q));
+        let s = `You have <strong>${liked.length}</strong> liked song${liked.length === 1 ? '' : 's'} by ${nameHtml}: ${songList}`;
+        if (pls.length) {
+          s += `, and they appear on ${joinHumanList(pls.slice(0, 3).map(p => `<em>${esc(p)}</em>`))}`;
+        }
+        if (followParts.length) {
+          s += ` (${followParts.join(', ')})`;
+        }
+        sentences.push(s + '.');
+      } else if (liked.length >= 4) {
+        // 4+ liked songs: exact count, 2–3 examples, followed status / playlists
+        const examples = joinHumanList(liked.slice(0, 3).map(q));
+        let s = `You have <strong>${liked.length}</strong> liked songs by ${nameHtml} (including ${examples})`;
+        if (followParts.length) s += ` and ${followParts.join(' — ')}`;
+        if (pls.length) s += `, across ${joinHumanList(pls.slice(0, 3).map(p => `<em>${esc(p)}</em>`))}`;
+        sentences.push(s + '.');
+      } else {
+        // Playlist-only (0 liked songs): explicitly state 0 liked songs + playlist names (and song titles when available)
+        const plEntries = [];
+        Object.entries(plMap).slice(0, 3).forEach(([plName, trs]) => {
+          const uniqTrs = dedupeStringsCI(trs).slice(0, 3);
+          if (uniqTrs.length) plEntries.push(`${joinHumanList(uniqTrs.map(q))} on <em>${esc(plName)}</em>`);
+          else plEntries.push(`<em>${esc(plName)}</em>`);
+        });
+        let s = `You have <strong>0 liked songs</strong> by ${nameHtml}`;
+        if (plEntries.length) {
+          s += `, though you have ${joinHumanList(plEntries)}`;
+        } else if (pls.length) {
+          const sampleTrs = dedupeStringsCI(primary.tracks).slice(0, 3);
+          s += sampleTrs.length
+            ? `, though ${joinHumanList(sampleTrs.map(q))} appear${sampleTrs.length === 1 ? 's' : ''} on ${joinHumanList(pls.slice(0, 3).map(p => `<em>${esc(p)}</em>`))}`
+            : `, though they appear on ${joinHumanList(pls.slice(0, 3).map(p => `<em>${esc(p)}</em>`))}`;
+        } else if (primary.isFollowed) {
+          s += `, though you follow them on Spotify`;
+        } else {
+          s += ` (playlist-only familiarity)`;
+        }
+        sentences.push(s + '.');
+      }
+    }
+
+    // Exact album-track hits called out by name
+    if (albumHits.length) {
+      const hitNames = albumHits.slice(0, 4).map(h => q(h.title));
+      const extra = albumHits.length > 4 ? ` (+${albumHits.length - 4} more)` : '';
+      const singleAlreadyNamed = primary && primary.likedSongs.length === 1 && albumHits.length === 1
+        && norm(primary.likedSongs[0]) === norm(albumHits[0].title);
+      if (singleAlreadyNamed) {
+        sentences.push(`That song is right on this release.`);
+      } else {
+        sentences.push(`On this release, you already know ${joinHumanList(hitNames)}${extra}.`);
+      }
+    }
+
+    return wrap(sentences.join(' '));
+  }
+
   function buildSpotifyBadgesHtml(localMatch, includeSetupHint = false) {
-    let badges = '';
-    if (localMatch.hasProvenance) {
-      if (localMatch.likedTrackMatches.length) {
-        badges += `<span class="badge badge-green">💚 ${localMatch.likedTrackMatches.length} Liked Song${localMatch.likedTrackMatches.length > 1 ? 's' : ''}</span>`;
-      }
-      if (localMatch.likedArtistDetails.length) {
-        badges += `<span class="badge badge-green">🎸 Artist Liked in Spotify</span>`;
-      }
-      if (localMatch.playlistOnlyTrackMatches.length) {
-        badges += `<span class="badge badge-blue">📂 Playlist Only (${localMatch.playlistOnlyTrackMatches.length} track${localMatch.playlistOnlyTrackMatches.length > 1 ? 's' : ''})</span>`;
-      } else if (localMatch.playlistOnlyArtistDetails.length && !localMatch.likedArtistDetails.length) {
-        badges += `<span class="badge badge-blue">📂 Playlist Only (${esc(localMatch.playlistOnlyArtistDetails[0])})</span>`;
-      }
-    } else {
-      if (localMatch.artistHit) {
-        badges += localMatch.matchedArtists.length > 1
-          ? `<span class="badge badge-green">🎸 ${localMatch.matchedArtists.length} Artists in Your Spotify</span>`
-          : `<span class="badge badge-green">🎸 Artist in Your Spotify</span>`;
-      }
-      if (localMatch.matchedTracks.length) {
-        badges += `<span class="badge badge-green">🎵 ${localMatch.matchedTracks.length} Track(s) in Your Library</span>`;
-      }
-    }
-    if (includeSetupHint && !spotifyProfile && !document.getElementById('cfgTasteDna').value.trim()) {
-      badges += `<span class="badge badge-yellow">Add Taste Profile or sync Spotify in Settings</span>`;
-    }
-    return badges;
+    return buildSpotifyHowYouKnowHtml(currentInspected || activeStashItem || {}, localMatch, includeSetupHint);
   }
 
   const spLookupCache = new WeakMap();
@@ -3866,8 +4410,10 @@ Return ONLY valid JSON:
   }
 
   function checkLocalSpotify(item) {
+    const isItemVarious = !item?.artist || /^various(\s+artists)?$/i.test(String(item.artist).trim());
     const empty = {
       hasProvenance: false,
+      isVarious: isItemVarious,
       artistHit: false,
       matchedArtists: [],
       matchedTracks: [],
@@ -3875,6 +4421,8 @@ Return ONLY valid JSON:
       playlistOnlyTrackMatches: [],
       likedArtistDetails: [],
       playlistOnlyArtistDetails: [],
+      artistMatches: [],
+      albumTrackHits: [],
       details: ''
     };
     const lookup = getSpotifyLookup(spotifyProfile);
@@ -3884,6 +4432,7 @@ Return ONLY valid JSON:
     const matchedArtists = [];
     const likedArtistDetails = [];
     const playlistOnlyArtistDetails = [];
+    const artistMatches = [];
     const seenArt = new Set();
 
     const checkStr = (str) => {
@@ -3895,23 +4444,45 @@ Return ONLY valid JSON:
           seenArt.add(key);
           const displayName = rec.name || part.trim();
           const trCount = Array.isArray(rec.tracks) ? rec.tracks.length : (rec.count || 0);
-          const pls = Array.isArray(rec.playlists) && rec.playlists.length ? rec.playlists.slice(0, 3) : [];
-          const plsTag = pls.length ? ` [in: ${pls.join(', ')}]` : '';
+          const pls = Array.isArray(rec.playlists) && rec.playlists.length ? rec.playlists.slice(0, 6) : [];
+          const plsTag = pls.length ? ` [in: ${pls.slice(0, 3).join(', ')}]` : '';
           matchedArtists.push(`${displayName} (${trCount} songs${plsTag})`);
 
+          const likedArr = Array.isArray(rec.likedTracks) ? rec.likedTracks : [];
+          const topArr = Array.isArray(rec.topTracks) ? rec.topTracks : [];
+          const albArr = Array.isArray(rec.albumTracks) ? rec.albumTracks : [];
+          const likedSongs = hasProvenance
+            ? dedupeStringsCI([...likedArr, ...topArr, ...albArr])
+            : dedupeStringsCI(rec.tracks || []);
+
+          artistMatches.push({
+            name: displayName,
+            isFollowed: Boolean(rec.isFollowed),
+            isTopArtist: Boolean(rec.isTopArtist),
+            likedSongs,
+            likedTracks: likedArr,
+            topTracks: topArr,
+            albumTracks: albArr,
+            playlists: pls,
+            playlistTrackMap: (rec.playlistTrackMap && typeof rec.playlistTrackMap === 'object') ? rec.playlistTrackMap : {},
+            tracks: Array.isArray(rec.tracks) ? rec.tracks : [],
+            totalCount: trCount
+          });
+
           if (hasProvenance) {
-            const likedCnt = Array.isArray(rec.likedTracks) ? rec.likedTracks.length : 0;
-            const topCnt = Array.isArray(rec.topTracks) ? rec.topTracks.length : 0;
-            const albCnt = Array.isArray(rec.albumTracks) ? rec.albumTracks.length : 0;
-            const isCore = Boolean(rec.isTopArtist || likedCnt > 0 || topCnt > 0 || albCnt > 0);
+            const likedCnt = likedArr.length;
+            const topCnt = topArr.length;
+            const albCnt = albArr.length;
+            const isCore = Boolean(rec.isTopArtist || rec.isFollowed || likedCnt > 0 || topCnt > 0 || albCnt > 0);
             if (isCore) {
               const tags = [];
               if (rec.isTopArtist) tags.push('Top Artist');
+              if (rec.isFollowed) tags.push('Followed');
               if (likedCnt > 0) tags.push(`${likedCnt} liked`);
               if (albCnt > 0) tags.push(`${albCnt} saved-album`);
               likedArtistDetails.push(`${displayName} (${tags.join(', ') || `${trCount} tracks`})`);
             } else {
-              playlistOnlyArtistDetails.push(`${displayName} (0 liked; playlists: ${pls.join(', ') || 'playlist only'})`);
+              playlistOnlyArtistDetails.push(`${displayName} (0 liked; playlists: ${pls.slice(0, 3).join(', ') || 'playlist only'})`);
             }
           }
         }
@@ -3931,8 +4502,8 @@ Return ONLY valid JSON:
     const matchedTracks = [];
     const likedTrackMatches = [];
     const playlistOnlyTrackMatches = [];
+    const albumTrackHits = [];
     const seenTrackKey = new Set();
-    const isItemVarious = !item.artist || /^various(\s+artists)?$/i.test(String(item.artist).trim());
 
     (item.tracklist || []).forEach(t => {
       const rawTitle = String(t.title || '').trim();
@@ -3949,6 +4520,7 @@ Return ONLY valid JSON:
       }
 
       let matchedPairKey = '';
+      let matchedCand = null;
       for (const c of candidates) {
         const nt = norm(c.titleStr);
         if (!nt) continue;
@@ -3959,6 +4531,7 @@ Return ONLY valid JSON:
         const hitArt = artParts.find(na => pairSet.has(`${na}|${nt}`));
         if (hitArt) {
           matchedPairKey = `${hitArt}|${nt}`;
+          matchedCand = c;
           break;
         }
       }
@@ -3969,9 +4542,17 @@ Return ONLY valid JSON:
         if (!seenTrackKey.has(dedup)) {
           seenTrackKey.add(dedup);
           matchedTracks.push(label);
+          const src = trackSourceByPair.get(matchedPairKey) || null;
+          albumTrackHits.push({
+            title: matchedCand?.titleStr || rawTitle,
+            artist: t.artist || (isItemVarious ? (matchedCand?.artStr || '') : ''),
+            liked: Boolean(src?.liked),
+            top: Boolean(src?.top),
+            album: Boolean(src?.album),
+            playlists: Array.isArray(src?.playlists) ? src.playlists : []
+          });
 
           if (hasProvenance) {
-            const src = trackSourceByPair.get(matchedPairKey);
             if (src && (src.liked || src.top || src.album)) {
               const tag = src.top ? 'Top Track' : (src.liked ? 'Liked' : 'Saved Album');
               likedTrackMatches.push(`${label} (${tag})`);
@@ -3986,6 +4567,7 @@ Return ONLY valid JSON:
 
     return {
       hasProvenance,
+      isVarious: isItemVarious,
       artistHit: matchedArtists.length > 0,
       matchedArtists,
       matchedTracks,
@@ -3993,6 +4575,8 @@ Return ONLY valid JSON:
       playlistOnlyTrackMatches,
       likedArtistDetails,
       playlistOnlyArtistDetails,
+      artistMatches,
+      albumTrackHits,
       details: matchedArtists.join('; ') || 'None'
     };
   }
@@ -4083,17 +4667,21 @@ Return ONLY valid JSON:
       btn.disabled = true;
       btn.textContent = '⏳ Grading photos...';
     }
-    setStatus(`✨ AI grading ${stagedPhotos.length} photo(s) on ${aiEngineLabel()}...`, true, { cancellable: true });
+    const labeledImgParts = buildLabeledGradingImageParts('scan', targetItem);
+    const photoCount = labeledImgParts.filter(p => p.inline_data).length || stagedPhotos.length;
+    setStatus(`✨ AI grading ${photoCount} labeled photo(s) on ${aiEngineLabel()}...`, true, { cancellable: true });
 
-    const prompt = `You are a strict, conservative Discogs/Goldmine visual grading expert. Inspect ALL attached photos closely for every physical flaw on the media and case/sleeve/insert.
+    const prompt = `You are a strict, conservative Discogs/Goldmine visual grading expert. Inspect EVERY attached labeled photo ([Front], [Back], [Spine], [Extra ...]) closely for every physical flaw on the media, case, sleeve, insert, and spine.
 
 Item: "${targetItem.artist} - ${targetItem.title}" (${targetItem.format || 'Cassette'})
 
-PHOTO-SCOPE & LOOSE-MEDIA AWARENESS:
+PHOTO-SCOPE, SPINE & VERBATIM MARKING RULES:
 - If ONLY the bare cassette shell or bare disc is shown (no case, no J-card, no cover insert), set "sleeve_condition": "No Cover" and note loose media in "condition_note".
+- ALWAYS inspect [Spine] (and all edges) for punch holes, drill holes, saw cuts / cut-out notches, cracked hinges, edge splitting, spine fading, or creases, and report them explicitly.
+- VERBATIM TRANSCRIPTION: Whenever you see notable ink stamps, radio/station/club/library property stamps (e.g., "Property of ... Milwaukee"), promo stamps, price/hype stickers, or handwritten names/dates/markings on the insert, case, shell, or label, TRANSCRIBE the exact readable text verbatim in "condition_note" (and list it in "sleeve_defects" or "media_defects").
 
 STRICT DISCOGS SELLER GRADING RULES (Be brutally honest and conservative — never over-grade!):
-1. List every flaw first in "media_defects" and "sleeve_defects" (including spine cut-out markings: hole punches, saw cuts, notched corners, or promo stamps).
+1. List every flaw first in "media_defects" and "sleeve_defects" (including spine cut-out markings: hole punches, drill holes, saw cuts, notched corners, cracked hinges, or stamps).
 2. Media Condition MUST be one of: ${JSON.stringify(MEDIA_GRADES.filter(g => g !== 'Not Graded'))}
    * "Mint (M)" ONLY if factory sealed. "Near Mint (NM or M-)" = spotless, zero visible wear.
    * "Very Good Plus (VG+)" = very clean, only tiny handling scuffs, crisp flat label.
@@ -4103,7 +4691,7 @@ STRICT DISCOGS SELLER GRADING RULES (Be brutally honest and conservative — nev
 3. Sleeve Condition MUST be one of: ${JSON.stringify(SLEEVE_GRADES)}
    * No case/cover shown = "No Cover". Plain blank = "Generic".
    * "Very Good Plus (VG+)" = clean insert, minimal edge wear, no case cracks.
-   * "Very Good (VG)" = creases, sticker residue, cut-out saw cut/notch, moderate case scuffs or small crack.
+   * "Very Good (VG)" = creases, sticker residue, cut-out saw cut/punch/notch, moderate case scuffs or small crack.
    * "Good Plus (G+)" = paint/ink/water stains, heavy creases, ripped flap, heavily scratched/cracked case.
    * "Good (G)" / "Fair (F)" / "Poor (P)" = severe stains obscuring art, torn/missing pieces, heavy water damage.
 4. When between two grades, ALWAYS pick the LOWER grade. NEVER say "mint" in "condition_note" unless factory sealed.
@@ -4111,13 +4699,13 @@ STRICT DISCOGS SELLER GRADING RULES (Be brutally honest and conservative — nev
 Return ONLY valid JSON:
 {
   "media_defects": ["list every flaw on cassette/disc, or empty array if spotless"],
-  "sleeve_defects": ["list every flaw on case/insert/spine including cut-out holes/saw cuts, or empty array if spotless or no cover"],
+  "sleeve_defects": ["list every flaw on case/insert/spine including cut-out holes/saw cuts/hinge cracks/stamps, or empty array if spotless or no cover"],
   "media_condition": "exact Discogs media grade from list",
   "sleeve_condition": "exact Discogs sleeve grade from list",
-  "condition_note": "blunt, factual, buyer-ready Discogs seller note listing visible flaws (1-3 short sentences, NEVER say 'mint' unless sealed)"
+  "condition_note": "blunt, factual, buyer-ready Discogs seller note listing visible flaws across all photos + verbatim text of any notable stamps/stickers/handwriting (1-3 short sentences, NEVER say 'mint' unless sealed)"
 }`;
 
-    const parts = [{ text: prompt }, ...stagedPhotos.map(p => ({ inline_data: { mime_type: 'image/jpeg', data: p.apiB64 } }))];
+    const parts = [{ text: prompt }, ...labeledImgParts];
     try {
       const res = await CC.callAI(parts, 'MEDIUM', { retryLabel: 'AI Visual Grade' });
       if (myRun !== scanRunId || currentInspected !== targetItem) return;
@@ -4173,7 +4761,7 @@ Return ONLY valid JSON:
       return;
     }
 
-    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v211`;
+    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v215`;
     if (tasteCache.has(cacheKey)) { applyTasteUI(item, tasteCache.get(cacheKey), myRunId); return; }
 
     const tracksStr = (item.tracklist || []).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title).join('; ');
@@ -5523,7 +6111,9 @@ Return ONLY valid JSON:
       syncToDiscogs: Boolean(syncToDiscogs),
       inspected: JSON.parse(JSON.stringify(currentInspected)),
       editingItem: editingStashItem ? JSON.parse(JSON.stringify(editingStashItem)) : null,
-      stagedWebps: stagedPhotos.map(p => p.saveWebp),
+      // Slot index 2 is dedicated strictly to Spine — NEVER duplicate it into cover/extra thumbs
+      stagedWebps: stagedPhotos.filter((_, idx) => idx !== 2).map(p => p.saveWebp),
+      stagedSpineWebp: stagedPhotos[2]?.saveWebp || '',
       mediaCond: document.getElementById('gMediaCond').value || 'Not Graded',
       sleeveCond: document.getElementById('gSleeveCond').value || 'Not Graded',
       condNote: document.getElementById('gNotes').value.trim(),
@@ -5597,8 +6187,8 @@ Return ONLY valid JSON:
           discogs_instance_id: synced ? instanceId : null,
           thumbs: finalThumbs,
           thumb_data_url: finalThumbs[0] || snap.inspected.discogs_thumb || '',
-          spine_thumb_url: snap.inspected.spine_thumb_url || (isEditing ? (oldItem.spine_thumb_url || '') : ''),
-          spine_source_url: snap.inspected.spine_source_url || (isEditing ? (oldItem.spine_source_url || '') : ''),
+          spine_thumb_url: snap.inspected.spine_thumb_url || snap.stagedSpineWebp || (isEditing ? (oldItem.spine_thumb_url || '') : ''),
+          spine_source_url: snap.inspected.spine_source_url || snap.stagedSpineWebp || (isEditing ? (oldItem.spine_source_url || '') : ''),
           spine_flipped: Boolean(snap.inspected.spine_flipped ?? (isEditing ? oldItem.spine_flipped : false)),
           created_at: isEditing ? (oldItem.created_at || now) : now,
           updated_at: now
@@ -5979,12 +6569,13 @@ Return ONLY valid JSON:
 
     const list = document.getElementById('stashList');
     if (!filtered.length) {
-      const emptyAction = cfg.discogsUser
-        ? `<button type="button" class="btn btn-green btn-sm" style="margin-top:8px;" onclick="syncWithDiscogsUI(true)">🔄 Sync with Discogs</button>`
-        : `<button type="button" class="btn btn-secondary btn-sm" style="margin-top:8px;" onclick="switchView('settings')">⚙️ Connect Discogs or Google Drive</button>`;
+      const hasDriveCfg = Boolean(CC.isGoogleSignedIn() || cfg.googleBoundEmail || cfg.googleEmail || cfg.googleLastSyncAt || cfg.googleLastLoadAt);
+      const emptyAction = hasDriveCfg
+        ? `<button type="button" class="btn btn-green btn-sm" style="margin-top:8px;" onclick="syncStashWithCloudUI()">☁️ Sync with Cloud</button>`
+        : `<button type="button" class="btn btn-secondary btn-sm" style="margin-top:8px;" onclick="switchView('settings')">⚙️ Connect Google Drive or Discogs</button>`;
       const emptyMsg = activeDiscogsFolderFilter !== null
         ? `No copies in folder "${esc(getFolderNameById(activeDiscogsFolderFilter))}" yet.`
-        : (stashCache.length ? 'No matching items in this filter.' : 'Your Stash is empty. Scan an item, connect Google Drive, or sync your Discogs collection.');
+        : (stashCache.length ? 'No matching items in this filter.' : 'Your Stash is empty. Scan an item, sync Google Drive, or pull your Discogs collection in Settings.');
       list.innerHTML = `<div class="card"><p>${emptyMsg}</p>${!stashCache.length ? emptyAction : ''}</div>`;
       return;
     }
@@ -6150,7 +6741,7 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
         'notable_songs', 'litmus_track', 'litmus_artist', 'taste_scored_at'
       ]);
 
-      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v211`);
+      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v215`);
       await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
       await loadStashCache();
       renderStash();
@@ -6334,9 +6925,40 @@ Return ONLY valid JSON:
     openLightbox([activeStashItem.spine_thumb_url], 0);
   };
 
+  let stashReplaceThumbIdx = -1;
+
   window.toggleStashPhotoManager = (id) => {
     stashPhotoManagerOpen = !stashPhotoManagerOpen;
+    stashAddPhotoMenuOpen = false;
     if (activeStashItem?.id === id) openStashDetail(id, true);
+  };
+
+  window.toggleStashAddPhotoMenu = (ev) => {
+    if (ev) ev.stopPropagation();
+    stashAddPhotoMenuOpen = !stashAddPhotoMenuOpen;
+    const m = document.getElementById('sdAddSlotMenu');
+    if (m) m.classList.toggle('hidden', !stashAddPhotoMenuOpen);
+  };
+
+  window.triggerStashPhotoAdd = (slot, ev) => {
+    if (ev) ev.stopPropagation();
+    stashAddPhotoMenuOpen = false;
+    const m = document.getElementById('sdAddSlotMenu');
+    if (m) m.classList.add('hidden');
+    stashReplaceThumbIdx = -1;
+    const map = { front: 'sdPhotoFront', back: 'sdPhotoBack', spine: 'sdPhotoSpine', extra: 'sdPhotoExtra' };
+    document.getElementById(map[slot])?.click();
+  };
+
+  window.triggerStashPhotoReplace = (idx, ev) => {
+    if (ev) ev.stopPropagation();
+    stashAddPhotoMenuOpen = false;
+    const m = document.getElementById('sdAddSlotMenu');
+    if (m) m.classList.add('hidden');
+    stashReplaceThumbIdx = Number(idx);
+    if (idx === 0) document.getElementById('sdPhotoFront')?.click();
+    else if (idx === 1) document.getElementById('sdPhotoBack')?.click();
+    else document.getElementById('sdPhotoReplaceExtra')?.click();
   };
 
   // Direct Stash Detail photo add/replace/remove — works offline, zero Gemini/Discogs calls, zero grade changes!
@@ -6354,7 +6976,7 @@ Return ONLY valid JSON:
           aiMaxDim: 1600,
           aiQuality: 0.88,
           saveMaxDim: 1600,
-          saveQuality: 0.84,
+          saveQuality: 0.85,
           squarePreview: false
         });
         setStatus('', false);
@@ -6392,6 +7014,8 @@ Return ONLY valid JSON:
     const prev = { ...it };
     const nextThumbs = getStashCoverPhotos(it).slice();
     const changed = [];
+    const replaceIdx = stashReplaceThumbIdx;
+    stashReplaceThumbIdx = -1;
 
     setStatus(`Processing ${files.length} photo(s) locally...`, true);
     try {
@@ -6399,11 +7023,14 @@ Return ONLY valid JSON:
         const pair = await decodeBlobToPhotoPair(file, {
           aiMaxDim: 1600,
           aiQuality: 0.88,
-          saveMaxDim: 1200,
-          saveQuality: 0.82,
+          saveMaxDim: 1600,
+          saveQuality: 0.85,
           squarePreview: false
         });
-        if (slot === 'front') {
+        if (slot === 'replace_idx' && replaceIdx >= 0 && replaceIdx < nextThumbs.length) {
+          nextThumbs[replaceIdx] = pair.saveWebp;
+          changed.push('thumbs', 'thumb_data_url');
+        } else if (slot === 'front') {
           if (nextThumbs.length === 0) nextThumbs.push(pair.saveWebp);
           else nextThumbs[0] = pair.saveWebp;
           changed.push('thumbs', 'thumb_data_url');
@@ -6763,6 +7390,7 @@ Return ONLY valid JSON:
     if (!it) return;
     if (activeStashItem?.id !== id) {
       stashPhotoManagerOpen = false;
+      stashAddPhotoMenuOpen = false;
       if (activeFolderMoveConflict?.stashId !== id) activeFolderMoveConflict = null;
     }
     activeStashItem = it;
@@ -6837,21 +7465,28 @@ Return ONLY valid JSON:
 
     const needsStashTiebreakConfirm = Boolean(!it.synced_to_discogs && it.discogs_id && it.is_conservative_tiebreak && !it.tiebreak_confirmed);
 
-    let localBadges = buildSpotifyBadgesHtml(localMatch, false);
-    if (isStashTasteStale(it)) localBadges += `<span class="badge badge-purple">🔄 Taste updated</span>`;
+    const staleBadgeHtml = isStashTasteStale(it) ? `<div style="margin-bottom:6px;"><span class="badge badge-purple">🔄 Taste updated</span></div>` : '';
+    const localBadges = `${staleBadgeHtml}${buildSpotifyHowYouKnowHtml(it, localMatch, false)}`;
 
     const contextTxt = it.context_note || it.cultural_reason || '';
 
-    // Build responsive Stash Detail Photo Gallery (Front + Back side-by-side tiles, Spine strip below with Crop & 90° Rotate)
+    // Build responsive Stash Detail Photo Gallery (clean in normal view; compact overlay controls + inline Add Photo menu in Manage Mode)
     const slotLabels = ['FRONT', 'BACK'];
     let galleryHtml = '<div class="photo-gallery" style="margin-bottom:12px;">';
+    galleryHtml += `
+      <input id="sdPhotoFront" class="hidden-file" type="file" accept="image/*" onchange="handleStashPhotoFiles(${it.id}, 'front', this.files); this.value='';" />
+      <input id="sdPhotoBack" class="hidden-file" type="file" accept="image/*" onchange="handleStashPhotoFiles(${it.id}, 'back', this.files); this.value='';" />
+      <input id="sdPhotoSpine" class="hidden-file" type="file" accept="image/*" onchange="handleStashPhotoFiles(${it.id}, 'spine', this.files); this.value='';" />
+      <input id="sdPhotoExtra" class="hidden-file" type="file" accept="image/*" multiple onchange="handleStashPhotoFiles(${it.id}, 'extra', this.files); this.value='';" />
+      <input id="sdPhotoReplaceExtra" class="hidden-file" type="file" accept="image/*" onchange="handleStashPhotoFiles(${it.id}, 'replace_idx', this.files); this.value='';" />
+    `;
     if (photos.length) {
       const singleCls = photos.length === 1 ? 'single-cover' : '';
       galleryHtml += `<div class="photo-gallery-covers ${singleCls}">${photos.map((src, i) => `
         <div class="photo-tile" onclick="openStashLightbox(${i})" title="Tap to zoom fullscreen">
           <img src="${esc(src)}" alt="" />
           <span class="photo-tile-label">${slotLabels[i] || `EXTRA ${i - 1}`}</span>
-          ${stashPhotoManagerOpen ? `<div class="photo-tile-actions"><button type="button" class="photo-tile-btn" onclick="openStashPhotoCrop(${it.id}, 'cover', ${i}, event)" title="Crop or rotate photo">✂️ Crop</button><button type="button" class="photo-tile-btn danger" onclick="removeStashPhotoSlot(${it.id}, ${i}, event)" title="Remove photo">×</button></div>` : ''}
+          ${stashPhotoManagerOpen ? `<div class="photo-tile-actions"><button type="button" class="photo-tile-btn" onclick="triggerStashPhotoReplace(${i}, event)" title="Replace photo">🔄</button><button type="button" class="photo-tile-btn" onclick="openStashPhotoCrop(${it.id}, 'cover', ${i}, event)" title="Crop or rotate photo">✂️</button><button type="button" class="photo-tile-btn danger" onclick="removeStashPhotoSlot(${it.id}, ${i}, event)" title="Delete photo">✕</button></div>` : ''}
         </div>
       `).join('')}</div>`;
     }
@@ -6860,11 +7495,14 @@ Return ONLY valid JSON:
         <div class="photo-gallery-spine">
           <div class="photo-gallery-spine-bar">
             <span style="font-size:0.7rem; font-weight:800; letter-spacing:0.06em; color:var(--muted);">SPINE</span>
-            <div class="inline-actions" style="gap:4px;">
-              <button type="button" class="photo-tile-btn" onclick="openStashPhotoCrop(${it.id}, 'spine', 0, event)" title="Crop & rotate spine">✂️ Crop</button>
-              <button type="button" class="photo-tile-btn" onclick="rotateStashSpine90(${it.id}, event)" title="Rotate spine 90°">↻ 90°</button>
-              ${stashPhotoManagerOpen ? `<button type="button" class="photo-tile-btn danger" onclick="removeStashSpine(${it.id}, event)" title="Remove spine">×</button>` : ''}
-            </div>
+            ${stashPhotoManagerOpen ? `
+              <div class="inline-actions" style="gap:4px;">
+                <button type="button" class="photo-tile-btn" onclick="triggerStashPhotoAdd('spine', event)" title="Replace spine photo">🔄</button>
+                <button type="button" class="photo-tile-btn" onclick="openStashPhotoCrop(${it.id}, 'spine', 0, event)" title="Crop & rotate spine">✂️</button>
+                <button type="button" class="photo-tile-btn" onclick="rotateStashSpine90(${it.id}, event)" title="Rotate spine 90°">↻</button>
+                <button type="button" class="photo-tile-btn danger" onclick="removeStashSpine(${it.id}, event)" title="Delete spine photo">✕</button>
+              </div>
+            ` : ''}
           </div>
           <div class="photo-gallery-spine-imgwrap" onclick="openStashSpineLightbox()" title="Tap to zoom spine">
             <img src="${esc(it.spine_thumb_url)}" alt="" />
@@ -6873,30 +7511,26 @@ Return ONLY valid JSON:
       `;
     }
     galleryHtml += `
-      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; margin-top:6px;">
-        <span style="font-size:0.72rem; color:var(--muted);">${(photos.length || it.spine_thumb_url) ? 'Tap any photo to zoom fullscreen' : 'No photos saved yet'}</span>
-        <button type="button" class="btn btn-secondary btn-sm" style="min-height:30px; padding:3px 10px; font-size:0.74rem;" onclick="toggleStashPhotoManager(${it.id})">${stashPhotoManagerOpen ? '✕ Done Managing Photos' : '📷 Manage Photos'}</button>
+      <div class="sd-photo-header-bar">
+        <span style="font-size:0.72rem; color:var(--muted);">${stashPhotoManagerOpen ? 'Tap 🔄 Replace, ✂️ Crop, ↻ Rotate, or ✕ Delete' : ((photos.length || it.spine_thumb_url) ? 'Tap any photo to zoom fullscreen' : 'No photos saved yet')}</span>
+        ${stashPhotoManagerOpen ? `
+          <div class="inline-actions" style="gap:6px;">
+            <div class="sd-add-slot-wrap">
+              <button type="button" class="btn btn-green btn-sm" style="min-height:30px; padding:3px 10px; font-size:0.74rem;" onclick="toggleStashAddPhotoMenu(event)">➕ Add Photo</button>
+              <div id="sdAddSlotMenu" class="sd-add-slot-menu ${stashAddPhotoMenuOpen ? '' : 'hidden'}">
+                <button type="button" class="sd-add-slot-item" onclick="triggerStashPhotoAdd('front', event)">Front</button>
+                <button type="button" class="sd-add-slot-item" onclick="triggerStashPhotoAdd('back', event)">Back</button>
+                <button type="button" class="sd-add-slot-item" onclick="triggerStashPhotoAdd('spine', event)">Spine</button>
+                <button type="button" class="sd-add-slot-item" onclick="triggerStashPhotoAdd('extra', event)">Extra</button>
+              </div>
+            </div>
+            <button type="button" class="btn btn-secondary btn-sm" style="min-height:30px; padding:3px 10px; font-size:0.74rem;" onclick="toggleStashPhotoManager(${it.id})">✓ Done</button>
+          </div>
+        ` : `
+          <button type="button" class="btn btn-secondary btn-sm" style="min-height:30px; padding:3px 10px; font-size:0.74rem;" onclick="toggleStashPhotoManager(${it.id})">📷 Manage Photos</button>
+        `}
       </div>
     `;
-    if (stashPhotoManagerOpen) {
-      galleryHtml += `
-        <div class="sd-photo-panel">
-          <div style="font-size:0.78rem; color:var(--muted); margin-bottom:8px;">
-            Choose Camera or Photo Library directly (saved offline as crisp WebP &amp; synced to Drive — zero AI or Discogs writes). Tap <strong>✂️ Crop</strong> on any tile to frame tightly.
-          </div>
-          <input id="sdPhotoFront" class="hidden-file" type="file" accept="image/*" onchange="handleStashPhotoFiles(${it.id}, 'front', this.files); this.value='';" />
-          <input id="sdPhotoBack" class="hidden-file" type="file" accept="image/*" onchange="handleStashPhotoFiles(${it.id}, 'back', this.files); this.value='';" />
-          <input id="sdPhotoSpine" class="hidden-file" type="file" accept="image/*" onchange="handleStashPhotoFiles(${it.id}, 'spine', this.files); this.value='';" />
-          <input id="sdPhotoExtra" class="hidden-file" type="file" accept="image/*" multiple onchange="handleStashPhotoFiles(${it.id}, 'extra', this.files); this.value='';" />
-          <div class="inline-actions" style="gap:6px;">
-            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('sdPhotoFront').click()">📷 ${photos[0] ? 'Replace' : 'Add'} Front</button>
-            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('sdPhotoBack').click()">📷 ${photos[1] ? 'Replace' : 'Add'} Back</button>
-            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('sdPhotoSpine').click()">📷 ${it.spine_thumb_url ? 'Replace' : 'Add'} Spine</button>
-            <button type="button" class="btn btn-green btn-sm" onclick="document.getElementById('sdPhotoExtra').click()">➕ Extra Photo</button>
-          </div>
-        </div>
-      `;
-    }
     galleryHtml += '</div>';
 
     // Build Discogs Folder / Move to Folder panel
@@ -7573,8 +8207,26 @@ Return ONLY valid JSON:
     if (acc) acc.open = true;
   };
 
+  window.syncStashWithCloudUI = async () => {
+    if (CC.isGoogleSignedIn() && !cloudAccountMismatch) {
+      await syncGoogleDriveNow();
+      return;
+    }
+    const driveConfigured = Boolean(cfg.googleBoundEmail || cfg.googleEmail || cfg.googleLastSyncAt || cfg.googleLastLoadAt);
+    if (driveConfigured && !cloudAccountMismatch) {
+      await googleConnectAndLoad();
+      return;
+    }
+    switchView('settings');
+    const acc = document.getElementById('accCloud');
+    if (acc) acc.open = true;
+    toast(cloudAccountMismatch
+      ? 'Review your Google account mismatch in Settings before syncing.'
+      : 'Connect Google Drive in Settings to sync your Stash across devices.', 4200);
+  };
+
   function setCloudButtonsDisabled(disabled) {
-    ['btnGoogleSignIn', 'btnGoogleLoad', 'btnGoogleSyncNow'].forEach(id => {
+    ['btnGoogleSignIn', 'btnGoogleLoad', 'btnGoogleSyncNow', 'btnStashSyncCloud'].forEach(id => {
       const b = document.getElementById(id);
       if (b) b.disabled = disabled;
     });
@@ -7733,8 +8385,11 @@ Return ONLY valid JSON:
             const photoNote = (res.uploadedPhotos || res.downloadedPhotos)
               ? ` · ↑${res.uploadedPhotos} ↓${res.downloadedPhotos} photos`
               : '';
+            const compactNote = res.compactedBatches > 0
+              ? ` · compacted ${res.compactedBatches} file${res.compactedBatches === 1 ? '' : 's'}`
+              : '';
             const confNote = res.conflicts?.length ? ` · ⚠️ ${res.conflicts.length} conflict(s)` : '';
-            toast(`☁️ Synced ${res.stashCount} Stash item(s) (↑${res.uploadedBatches} batch${res.uploadedBatches === 1 ? '' : 'es'})${photoNote}${confNote}`, 4000);
+            toast(`☁️ Synced ${res.stashCount} Stash item(s) to softspot_state.json${compactNote}${photoNote}${confNote}`, 4200);
           }
         }
         return res;
@@ -7818,7 +8473,7 @@ Return ONLY valid JSON:
     }
   }
 
-  // Single-flight per account Discogs collection & folder reconciliation
+  // Single-flight per account Discogs collection & folder reconciliation (explicit user-triggered only; Drive-first gated!)
   window.syncWithDiscogsUI = async (manual = true, quiet = false) => {
     if (manual) saveSettings(true);
     const account = (cfg.discogsUser || '').trim();
@@ -7830,7 +8485,30 @@ Return ONLY valid JSON:
       return activeDiscogsRefreshPromise;
     }
 
-    const btns = [document.getElementById('btnSyncDiscogsIndex'), document.getElementById('btnStashSyncDiscogs')].filter(Boolean);
+    // Drive-Before-Discogs Safety Gate:
+    // 1) If Google Drive is connected & signed in -> sync Drive FIRST so photos, spines & grades load before checking Discogs.
+    // 2) If Google Drive was previously configured but signed out/expired -> block Discogs sync with a clear prompt.
+    // 3) If Google Drive was never configured (local-only user) -> proceed normally.
+    const driveConfigured = Boolean(cfg.googleBoundEmail || cfg.googleEmail || cfg.googleLastSyncAt || cfg.googleLastLoadAt);
+    if (CC.isGoogleSignedIn() && !cloudAccountMismatch) {
+      if (!quiet) setStatus('☁️ Syncing Google Drive before Discogs...', true);
+      const driveRes = await runGoogleSyncFlow({ interactive: false, quiet: true, publishInitialLocal: false });
+      if (!driveRes || driveRes.status === 'account_mismatch' || driveRes.awaitingExplicitPublish) {
+        if (!quiet) {
+          setStatus('', false);
+          toast('⚠️ Google Drive sync failed or needs attention — Discogs sync cancelled so photos and grades stay protected.', 5200);
+        }
+        return null;
+      }
+    } else if (driveConfigured) {
+      if (!quiet) {
+        setStatus('', false);
+        toast('Sync Google Drive first so photos and grades load before checking Discogs.', 5200);
+      }
+      return null;
+    }
+
+    const btns = [document.getElementById('btnSyncDiscogsIndex')].filter(Boolean);
     btns.forEach(b => { b.disabled = true; });
 
     const run = (async () => {
@@ -7909,15 +8587,6 @@ Return ONLY valid JSON:
   };
 
   window.syncDiscogsCollectionUI = () => syncWithDiscogsUI(true, false);
-
-  function maybeAutoRefreshDiscogs() {
-    if (!cfg.discogsToken || !cfg.discogsUser) return;
-    if (document.visibilityState === 'hidden') return;
-    if (activeDiscogsRefreshPromise) return;
-    const last = Number(cfg.discogsLastSyncAt || discogsCollectionIndex?.syncedAt || 0);
-    if (last && (Date.now() - last) < DISCOGS_FRESH_MS) return;
-    syncWithDiscogsUI(false, true);
-  }
 
   window.saveSettings = (silent = false) => {
     cfg.googleClientId = (document.getElementById('cfgGoogleClientId')?.value || '').trim();
@@ -8016,11 +8685,7 @@ Return ONLY valid JSON:
 
       populateFolders(); CC.persistCfg(); refreshNotice();
       setStatus('', false);
-      toast(`✅ Connected as @${id.username}`);
-
-      if (!discogsCollectionIndex || discogsCollectionIndex.username !== id.username) {
-        await syncWithDiscogsUI(false, false);
-      }
+      toast(`✅ Connected as @${id.username} — tap Sync with Discogs when ready to pull your collection.`, 4200);
     } catch (err) { setStatus('', false); toast('Discogs verify failed: ' + err.message, 4000); }
   };
 
@@ -8459,11 +9124,6 @@ Return ONLY valid JSON:
         renderStash();
       });
     });
-
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') maybeAutoRefreshDiscogs();
-    });
-    window.addEventListener('focus', () => maybeAutoRefreshDiscogs());
 
     document.getElementById('galleryInput').addEventListener('change', (e) => { stagePhotoFiles(e.target.files); e.target.value = ''; });
     document.getElementById('nativeCamInput').addEventListener('change', (e) => { stagePhotoFiles(e.target.files); e.target.value = ''; });

@@ -6,17 +6,17 @@ A zero-backend, sharp monochrome industrial Progressive Web App (PWA) for scanni
 
 ---
 
-## Core Features (v2.1.1)
+## Core Features (v2.1.5)
 
 | Area | Highlights |
 | --- | --- |
-| **3-Shot Single Item Scan & Auto-UPC** | Guided **Front + Side A → Back + Side B → Optional Spine** capture flow, live `BarcodeDetector` UPC locking, Sony-style red **Focus Peaking**, rear/ultrawide lens & `0.5x` zoom switching, multi-media **Other ▾** format selector, and tap-to-zoom blur inspection. |
+| **3-Shot Single Item Scan, Auto-Crop & 1x Main Camera** | Guided **Front + Side A → Back + Side B → Optional Spine** capture flow, main **1x rear camera** locking (`3840×2160` ideal, `zoom: 1.0`, excluding ultrawide/macro lenses), live `BarcodeDetector` UPC locking with one-tap **`✕`** clear button, Sony-style red **Focus Peaking**, AI bounding-box **auto-cropping to 1600px WebP** (with upright `0°/90°/180°/270°` spine rotation and zero duplicate `Extra 1` spine copies), multi-media **Other ▾** format selector, and tap-to-zoom blur inspection. |
 | **Multi-Shot Pile / Shelf Scanner** | Snap or upload **1–4 close-up shelf sections** at `3072px` ultra-high detail (`MEDIA_RESOLUTION_ULTRA_HIGH`) with smart overlap deduplication (`artist\|title\|format` + cat# guard), simultaneous **2-finger pinch + pan zoom**, rotated SVG polygon spotlights, progressive pin rendering, owned-collection badges, and non-blocking rough Discogs pricing. |
-| **Zero-Guessing Discogs Sync, Hydration & Folder Mirroring** | **Hard Format Gate** across all Discogs formats, **Top-15 Fast Pass** + `[r=ID]` sibling traversal, cached 25-item **Deep Search**, **🔄 Sync with Discogs** mirroring copies & folders 1-to-1 while automatically hydrating tracklists, pressing notes & market values (preserving last known prices if stats fail), in-place **📁 Move to Folder**, and account-guarded **🗑️ Delete from Discogs & Stash** alongside local-only support. |
-| **Direct Stash Photo Manager & Interactive Crop/Rotate** | Streamlined 4-button Stash photo manager (**Front / Back / Spine / Extra**) with an offline pure-Canvas **✂️ Crop & Rotate** modal, one-tap **↻ 90°** spine rotation, and crisp WebP storage synced across devices and the `SPINES` shelf. |
-| **Goldmine Grading & Voice Re-Grade** | Optional **"Grade in one go"** toggle (defaults to `Not Graded` for fast thrift scanning), one-tap on-demand **✨ AI Grade Photos**, spine cut-out detection (hole punches, saw cuts, notches), and continuous hands-free **🎤 AI Voice Re-Grade**. |
-| **Personal Taste Engine & Resumable Spotify Sync** | Editable **Taste Profile + Soft Spots**, local zero-AI **Spotify library matching** (**💚 Sync Liked Songs** fast pass or optional **🎧 Full Library Pass** with page-by-page checkpointing and **▶ Resume Spotify Sync**), batch Stash recalibration with notable songs & litmus tracks, and overlaid-art 30s audio previews (Apple Music & Deezer) with direct YouTube fallback. |
-| **Safe Two-Device Google Drive Sync** | Private `drive.appdata` sync using coalesced immutable versioned batches (`ss_v2_batch_*.json`), SHA-256 deduplicated photo blobs, deterministic field-level merging (conflicts strictly scoped to genuine cross-device user edits), deletion tombstones, and account-switch protection across phone and PC. |
+| **Drive-First Discogs Sync & Folder Mirroring** | **Hard Format Gate** across all Discogs formats, **Top-15 Fast Pass** + `[r=ID]` sibling traversal, cached 25-item **Deep Search**, explicit user-triggered **🔄 Sync with Discogs** (in Settings — gated so Google Drive always syncs first to protect photos, spines, and grades, with zero automatic background Discogs imports), **📁 Move to Folder**, and account-guarded **🗑️ Delete from Discogs & Stash** alongside local-only support. |
+| **Clean Stash Photo Manager & Lightbox Zoom** | Borderless sharp-corner Stash Detail gallery with zero floating clutter in normal view; **📷 Manage Photos** reveals **➕ Add Photo** (Front / Back / Spine / Extra) next to **✓ Done** plus compact **`🔄` / `✂️` / `↻` / `✕`** tile & spine overlays; fullscreen Lightbox supports **1x–6x mouse scroll-wheel zoom**, click-and-drag pan, touch pinch-zoom, and double-click `1x ↔ 2.5x`. |
+| **All-Photo AI Grading & Verbatim Stamps** | Optional **"Grade in one go"** toggle (defaults to `Not Graded` for fast thrift scanning), one-tap **✨ AI Grade Photos** inspecting **every** labeled photo (`[Front]`, `[Back]`, `[Spine]`, `[Extra]`) for punch/drill holes, saw cuts, cracked hinges, and **verbatim transcription** of ink/property stamps & handwritten markings, plus continuous **🎤 AI Voice Re-Grade**. |
+| **Personal Taste Engine & Spotify Narrative Card** | Editable **Taste Profile + Soft Spots**, local zero-AI **Spotify library matching** (**💚 Sync Liked Songs** or resumable **🎧 Full Library Pass** tracking followed artists & per-playlist song titles), a plain-English **`🎧 HOW YOU KNOW THEM`** narrative card in Scan Results & Stash Detail, batch Stash recalibration, and overlaid-art 30s audio previews (Apple Music & Deezer) with direct YouTube fallback. |
+| **Single-File Google Drive Compaction Sync** | Private `drive.appdata` sync compacting all merged state into **one** `softspot_state.json` snapshot (deleting absorbed legacy `ss_v2_batch_*.json` / `delta_*.json` files only after upload succeeds), SHA-256 deduplicated photo blobs, timestamp-safe outbox & intentional clear/`Not Graded` preservation, `discogs_instance_id` deduplication, and **☁️ Sync with Cloud** right in the Stash tab. |
 
 ---
 
@@ -29,14 +29,14 @@ A zero-backend, sharp monochrome industrial Progressive Web App (PWA) for scanni
    - **🔄 Sync Now:** Pulls, merges, uploads missing photos, and uploads pending batches. Once connected and bound to your Google account, optional **Auto-Sync** quietly keeps edits synced in the background.
 3. **Add Your Free Gemini API Key:** Open **Settings → 2. Gemini Cloud & Playback**, create a free key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) *(free tier includes generous daily scans)*, and paste it in.
 4. **Connect Discogs (+ Optional Spotify / Taste Profile):**
-   - Open **Settings → 3. Discogs Account & Preferences**, generate a free Personal Access Token at [discogs.com/settings/developers](https://www.discogs.com/settings/developers), paste it, and tap **🔗 Verify & Load Folders**. Tap **🔄 Sync with Discogs** (in Stash or Settings) anytime to pull your collection copies and mirror your Discogs folders; Stash also auto-refreshes quietly when returning to the app after 5 minutes.
+   - Open **Settings → 3. Discogs Account & Preferences**, generate a free Personal Access Token at [discogs.com/settings/developers](https://www.discogs.com/settings/developers), paste it, and tap **🔗 Verify & Load Folders**. Tap **🔄 Sync with Discogs** in Settings anytime to pull your collection copies and mirror your Discogs folders (Google Drive automatically syncs first when connected so your photos and grades stay protected). Tap **☁️ Sync with Cloud** in Stash anytime to sync phone & PC.
    - Open **Settings → 4. Music Services & Taste Profile** to edit your **Taste Profile & Soft Spots** and optionally run **💚 Sync Liked Songs** (or **🎧 Full Library Pass** — resumable via **▶ Resume Spotify Sync** if paused or rate-limited).
 
 ---
 
 ## Upgrading & Domain Migration Notes
 
-- **Update Both Phone & PC to v2.1.1:** v2.1.1 uses coalesced immutable versioned Drive batches (`ss_v2_batch_*.json`), automatically repairs verified duplicate Discogs copies, purges legacy false conflicts, and reads legacy v2.0.1 snapshots (`softspot_state.json` / `cratecheck_state.json`) and `delta_*.json` files as migration inputs. Update **both** your phone and PC to v2.1.1 for the cleanest two-device Drive sync.
+- **Update Both Phone & PC to v2.1.5:** v2.1.5 compacts all merged cloud state into a single `softspot_state.json` snapshot (automatically absorbing and cleaning up legacy `ss_v2_batch_*.json` and `delta_*.json` files only after the new snapshot uploads cleanly), deduplicates verified Discogs copies, and preserves intentional field clears and `Not Graded` resets across devices. Update **both** your phone and PC to v2.1.5 for the cleanest two-device Drive sync.
 - **Migrating a Local-Only Stash from an Old Domain:** Browser IndexedDB storage is scoped per origin (`https://old-domain` vs `https://softspot.k1s.co`). If you have an unsynced local-only Stash on an older domain:
   1. Open the old domain → **Settings → 5. Data, Backup & Workflow Guide** → tap **⬇️ Export JSON**.
   2. Open Soft Spot on the new domain → **Settings → 5. Data, Backup & Workflow Guide** → tap **⬆️ Restore JSON**.
@@ -56,7 +56,7 @@ A zero-backend, sharp monochrome industrial Progressive Web App (PWA) for scanni
 
 Soft Spot requires **zero build step** and runs on any static host (such as GitHub Pages):
 
-1. Fork or clone this repository and point GitHub Pages (or any static web server) at the active version directory (e.g., `v2.1.1/` or copied to root).
+1. Fork or clone this repository and point GitHub Pages (or any static web server) at the active version directory (e.g., `v2.1.5/` or copied to root).
 2. *(Optional)* Add a `CNAME` file for your custom subdomain (e.g., `softspot.yourdomain.com`) with HTTPS enabled (required for in-app Camera, Spotify PKCE, and Google Sign-In).
 3. *(Optional)* To use your own Google Cloud OAuth Client ID for Drive Sync:
    - Enable the **Google Drive API** in [Google Cloud Console](https://console.cloud.google.com/apis/library/drive.googleapis.com).
@@ -69,5 +69,5 @@ Soft Spot requires **zero build step** and runs on any static host (such as GitH
 
 - **Core:** Plain HTML5, CSS3 (Sharp Monochrome Industrial UI, CSS Grid, `tabular-nums`), Vanilla ES6+ JavaScript — zero frameworks, zero bundlers.
 - **Local Storage:** IndexedDB (`CrateCheckDB` with `stash` & `meta` stores for 1600×1600 WebP previews, cropped spines, Spotify checkpoints, Drive outbox, and collection indexes) + `localStorage` configuration & durable Discogs recovery ledger.
-- **Cloud Sync:** Google Identity Services (GIS) Token Client + Google Drive API v3 (`spaces=appDataFolder`, immutable `ss_v2_batch_*.json` logs, SHA-256 hashed photo deduplication, deterministic per-field merge).
+- **Cloud Sync:** Google Identity Services (GIS) Token Client + Google Drive API v3 (`spaces=appDataFolder`, compacted single-file `softspot_state.json` snapshot with backwards-compatible batch absorption, SHA-256 hashed photo deduplication, deterministic per-field merge).
 - **APIs:** Google Gemini REST API (`generateContent` with `MEDIA_RESOLUTION_ULTRA_HIGH`), Discogs API v2 (sliding-window burst queue + collection-instance folder moves), Spotify Web API (PKCE OAuth + single global rate-limit scheduler), iTunes Search API & Deezer JSONP (keyless 30s audio previews).

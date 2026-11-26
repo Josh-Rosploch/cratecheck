@@ -7,13 +7,13 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>Soft Spot — Physical Media Scanner</title>
-  <link rel="stylesheet" href="style.css?v=2.1.1" />
+  <link rel="stylesheet" href="style.css?v=2.1.5" />
   <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
 <header>
-  <div class="brand">📼 Soft Spot <span class="ver-tag">v2.1.1</span></div>
+  <div class="brand">📼 Soft Spot <span class="ver-tag">v2.1.5</span></div>
   <div class="status-pills">
     <span id="cloudPill" class="pill" title="Google Drive Cloud Sync" onclick="handleCloudPillClick()">Cloud: Off</span>
     <span id="aiPill" class="pill" title="Gemini Cloud AI status" onclick="switchView('settings')">Gemini: Off</span>
@@ -379,7 +379,7 @@
       <div id="stashFolderRow" class="chip-row hidden" aria-label="Discogs Folders"></div>
       <div id="stashDiscogsSyncLine" style="font-size:0.74rem; color:var(--muted); margin-bottom:8px;"></div>
       <div class="btn-row" style="margin-top:0; margin-bottom:8px;">
-        <button id="btnStashSyncDiscogs" type="button" class="btn btn-green btn-sm" style="width:100%;" onclick="syncWithDiscogsUI(true)">🔄 Sync with Discogs</button>
+        <button id="btnStashSyncCloud" type="button" class="btn btn-green btn-sm" style="width:100%;" onclick="syncStashWithCloudUI()">☁️ Sync with Cloud</button>
         <button id="btnRecalibrateStash" type="button" class="btn btn-purple btn-sm" style="width:100%;" onclick="recalibrateStashBatch()">🔄 Recalibrate Taste</button>
       </div>
       <div class="btn-row" style="margin-top:0;">
@@ -856,7 +856,7 @@
     </div>
   </div>
   <div id="lbImgWrap" class="lb-body">
-    <img id="lbImg" class="lb-img" />
+    <img id="lbImg" class="lb-img" draggable="false" alt="" />
   </div>
   <div class="lb-nav">
     <button id="lbPrevBtn" type="button" class="btn btn-secondary btn-sm" onclick="stepLightbox(-1)">◀ Prev</button>
@@ -914,7 +914,7 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="apis.js?v=2.1.1"></script>
-<script src="app.js?v=2.1.1"></script>
+<script src="apis.js?v=2.1.5"></script>
+<script src="app.js?v=2.1.5"></script>
 </body>
 </html>
