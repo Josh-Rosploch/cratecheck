@@ -4,8 +4,10 @@
   const CC = {};
   CC.REDIRECT_URI = location.origin + location.pathname;
   CC.CFG_KEY = 'cratecheck_cfg_v1';
+  CC.DEFAULT_GOOGLE_CLIENT_ID = '';
 
   CC.MEDIA_GRADES = [
+    'Not Graded',
     'Mint (M)',
     'Near Mint (NM or M-)',
     'Very Good Plus (VG+)',
@@ -44,6 +46,12 @@
     autoDetective: true,
     autoGradeOnScan: false,
     preferredCameraId: '',
+    googleClientId: CC.DEFAULT_GOOGLE_CLIENT_ID,
+    googleAutoSync: true,
+    googleSyncSecrets: true,
+    googleLastSyncAt: 0,
+    googleEmail: '',
+    cfgUpdatedAt: 0,
     discogsToken: '',
     discogsUser: '',
     discogsFolderId: '1',
@@ -69,7 +77,19 @@
   delete CC.cfg.ollamaModel;
   delete CC.cfg.ollamaFallback;
 
-  CC.persistCfg = () => localStorage.setItem(CC.CFG_KEY, JSON.stringify(CC.cfg));
+  CC.persistCfg = (touchTimestamp = false) => {
+    if (touchTimestamp) CC.cfg.cfgUpdatedAt = Date.now();
+    localStorage.setItem(CC.CFG_KEY, JSON.stringify(CC.cfg));
+  };
+
+  CC.generateSyncId = () => {
+    try {
+      if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return window.crypto.randomUUID();
+      }
+    } catch (_) {}
+    return 'cc_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 12);
+  };
 
   CC.isAiReady = () => Boolean(CC.cfg.geminiKey?.trim());
 
@@ -297,9 +317,14 @@
     }
     const f = CC.cfg.discogsFields || { media: 1, sleeve: 2, notes: 3 };
     const updates = [];
-    if (f.media && mediaCond) updates.push({ id: f.media, val: mediaCond, label: 'Media Condition' });
-    if (f.sleeve && sleeveCond) updates.push({ id: f.sleeve, val: sleeveCond, label: 'Sleeve Condition' });
-    if (f.notes && notes !== undefined && notes !== null) updates.push({ id: f.notes, val: notes, label: 'Notes' });
+    const mediaSet = Boolean(mediaCond && mediaCond !== 'Not Graded');
+    const sleeveSet = Boolean(sleeveCond && sleeveCond !== 'Not Graded');
+    const isUngraded = !mediaSet;
+    const noteStr = notes !== undefined && notes !== null ? String(notes) : '';
+
+    if (f.media && mediaSet) updates.push({ id: f.media, val: mediaCond, label: 'Media Condition' });
+    if (f.sleeve && sleeveSet) updates.push({ id: f.sleeve, val: sleeveCond, label: 'Sleeve Condition' });
+    if (f.notes && (!isUngraded || noteStr.trim() !== '')) updates.push({ id: f.notes, val: noteStr, label: 'Notes' });
 
     let okCount = 0;
     let failedCount = 0;
@@ -906,14 +931,40 @@
     const artistMap = {};
     const trackPairs = new Set();
     const trackTitles = new Set();
+    const trackSourcesMap = {};
     const decades = {};
     const playlistSummaries = [];
+
+    const normArtistBase = (name) => CC.norm(name).replace(/^the\s+/, '').trim();
 
     const ensureArtist = (name) => {
       const n = CC.norm(name);
       if (!n) return null;
-      if (!artistMap[n]) artistMap[n] = { name, count: 0, tracks: new Set(), playlists: new Set() };
+      if (!artistMap[n]) {
+        artistMap[n] = {
+          name,
+          count: 0,
+          isTopArtist: false,
+          tracks: new Set(),
+          likedTracks: new Set(),
+          topTracks: new Set(),
+          albumTracks: new Set(),
+          playlistTracks: new Set(),
+          playlists: new Set()
+        };
+      }
       return artistMap[n];
+    };
+
+    const ensureTrackSource = (artistName, trackTitle) => {
+      const na = normArtistBase(artistName);
+      const nt = CC.norm(trackTitle);
+      if (!na || !nt) return null;
+      const key = `${na}|${nt}`;
+      if (!trackSourcesMap[key]) {
+        trackSourcesMap[key] = { liked: false, top: false, album: false, playlists: new Set() };
+      }
+      return trackSourcesMap[key];
     };
 
     const addDecade = (dateStr) => {
@@ -923,19 +974,34 @@
       decades[dec] = (decades[dec] || 0) + 1;
     };
 
-    const addTrack = (tr, weight = 1, playlistName = '') => {
+    const addTrack = (tr, sourceType = 'playlist', weight = 1, playlistName = '') => {
       if (!tr || !tr.name) return;
-      const nt = CC.norm(tr.name);
+      const cleanTitle = tr.name.trim();
+      const nt = CC.norm(cleanTitle);
       if (nt) trackTitles.add(nt);
       if (tr.album?.release_date) addDecade(tr.album.release_date);
       (tr.artists || []).forEach(a => {
         const rec = ensureArtist(a.name);
         if (!rec) return;
         rec.count += weight;
-        rec.tracks.add(tr.name.trim());
-        if (playlistName) rec.playlists.add(playlistName);
+        rec.tracks.add(cleanTitle);
+        if (sourceType === 'liked') rec.likedTracks.add(cleanTitle);
+        else if (sourceType === 'top') rec.topTracks.add(cleanTitle);
+        else if (sourceType === 'album') rec.albumTracks.add(cleanTitle);
+        else if (sourceType === 'playlist') {
+          rec.playlistTracks.add(cleanTitle);
+          if (playlistName) rec.playlists.add(playlistName);
+        }
+
         const na = CC.norm(a.name);
         if (na && nt) trackPairs.add(`${na}|${nt}`);
+        const srcRec = ensureTrackSource(a.name, cleanTitle);
+        if (srcRec) {
+          if (sourceType === 'liked') srcRec.liked = true;
+          else if (sourceType === 'top') srcRec.top = true;
+          else if (sourceType === 'album') srcRec.album = true;
+          else if (sourceType === 'playlist' && playlistName) srcRec.playlists.add(playlistName);
+        }
       });
     };
 
@@ -948,11 +1014,14 @@
         const topA = await spFetchSafe(`https://api.spotify.com/v1/me/top/artists?limit=50&time_range=${range}`);
         (topA.items || []).forEach((a, i) => {
           const rec = ensureArtist(a.name);
-          if (rec) rec.count += Math.max(4, 20 - Math.floor(i / 3));
+          if (rec) {
+            rec.isTopArtist = true;
+            rec.count += Math.max(8, 26 - Math.floor(i / 2));
+          }
         });
         await CC.sleep(SP_GAP_MS, signal);
         const topT = await spFetchSafe(`https://api.spotify.com/v1/me/top/tracks?limit=50&time_range=${range}`);
-        (topT.items || []).forEach(t => addTrack(t, 3));
+        (topT.items || []).forEach(t => addTrack(t, 'top', 6));
       }
 
       let next = 'https://api.spotify.com/v1/me/tracks?limit=50';
@@ -961,7 +1030,7 @@
         statusCb(`Syncing Liked Songs (${count} scanned)...`, true, { cancellable: true });
         await CC.sleep(SP_GAP_MS, signal);
         const d = await spFetch(next, signal);
-        (d.items || []).forEach(it => addTrack(it.track, 2));
+        (d.items || []).forEach(it => addTrack(it.track, 'liked', 5));
         count += (d.items || []).length;
         next = d.next;
       }
@@ -978,7 +1047,7 @@
             const rec = ensureArtist(a.name);
             if (rec) rec.count += 4;
           });
-          (it.album?.tracks?.items || []).forEach(t => addTrack(t, 1));
+          (it.album?.tracks?.items || []).forEach(t => addTrack(t, 'album', 3));
         });
         count += (d.items || []).length;
         next = d.next;
@@ -1010,7 +1079,7 @@
           statusCb(`Playlist ${i + 1}/${owned.length}: ${pl.name} (${pTracks} songs)...`, true, { cancellable: true });
           await CC.sleep(SP_GAP_MS, signal);
           const pd = await spFetchSafe(pNext);
-          (pd.items || []).forEach(e => addTrack(e.item || e.track, 1, pl.name));
+          (pd.items || []).forEach(e => addTrack(e.item || e.track, 'playlist', 1, pl.name));
           pTracks += (pd.items || []).length;
           pNext = pd.next;
         }
@@ -1022,7 +1091,22 @@
         allArtists[k] = {
           name: v.name,
           count: v.count,
+          isTopArtist: Boolean(v.isTopArtist),
           tracks: Array.from(v.tracks),
+          likedTracks: Array.from(v.likedTracks),
+          topTracks: Array.from(v.topTracks),
+          albumTracks: Array.from(v.albumTracks),
+          playlistTracks: Array.from(v.playlistTracks),
+          playlists: Array.from(v.playlists)
+        };
+      });
+
+      const trackSources = {};
+      Object.entries(trackSourcesMap).forEach(([k, v]) => {
+        trackSources[k] = {
+          liked: Boolean(v.liked),
+          top: Boolean(v.top),
+          album: Boolean(v.album),
           playlists: Array.from(v.playlists)
         };
       });
@@ -1030,10 +1114,12 @@
       const topArtists = Object.values(allArtists).sort((a, b) => b.count - a.count).map(x => x.name);
 
       return {
+        provenanceVersion: 2,
         syncedAt: Date.now(),
         userDisplayName: me.display_name || me.id,
         topArtists,
         allArtists,
+        trackSources,
         trackPairs: Array.from(trackPairs),
         trackTitles: Array.from(trackTitles),
         playlistSummaries,
@@ -1072,6 +1158,447 @@
     }
     if (cur || row.length) { row.push(cur); out.push(row); }
     return out;
+  };
+
+  // ==================== GOOGLE DRIVE APPDATAFOLDER CLOUD SYNC ====================
+  const GDRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
+  const GDRIVE_STATE_FILENAME = 'cratecheck_state.json';
+  const GDRIVE_SESSION_KEY = 'cratecheck_gdrive_sess_v1';
+
+  let gToken = '';
+  let gTokenExp = 0;
+  try {
+    const savedSess = JSON.parse(sessionStorage.getItem(GDRIVE_SESSION_KEY) || 'null');
+    if (savedSess?.token && savedSess.exp > Date.now() + 20000) {
+      gToken = savedSess.token;
+      gTokenExp = savedSess.exp;
+    }
+  } catch (_) {}
+
+  CC.isGoogleSignedIn = () => Boolean(gToken && Date.now() < gTokenExp - 15000);
+
+  CC.getGoogleClientId = () => (CC.cfg.googleClientId || CC.DEFAULT_GOOGLE_CLIENT_ID || '').trim();
+
+  CC.requestGoogleAccessToken = (promptMode = '') => new Promise((resolve, reject) => {
+    const clientId = CC.getGoogleClientId();
+    if (!clientId) {
+      reject(new Error('Paste your Google OAuth Client ID in Settings → 1. Google Drive Cloud Sync first'));
+      return;
+    }
+    if (!window.google?.accounts?.oauth2?.initTokenClient) {
+      reject(new Error('Google Sign-In library is still loading or unavailable offline'));
+      return;
+    }
+    try {
+      const client = window.google.accounts.oauth2.initTokenClient({
+        client_id: clientId,
+        scope: GDRIVE_SCOPE,
+        callback: (resp) => {
+          if (!resp || resp.error || !resp.access_token) {
+            reject(new Error(resp?.error_description || resp?.error || 'Google sign-in cancelled'));
+            return;
+          }
+          gToken = resp.access_token;
+          gTokenExp = Date.now() + (Number(resp.expires_in || 3600) - 60) * 1000;
+          try {
+            sessionStorage.setItem(GDRIVE_SESSION_KEY, JSON.stringify({ token: gToken, exp: gTokenExp }));
+          } catch (_) {}
+          resolve(gToken);
+        },
+        error_callback: (err) => {
+          reject(new Error(err?.message || err?.type || 'Google sign-in popup blocked or closed'));
+        }
+      });
+      client.requestAccessToken({ prompt: promptMode });
+    } catch (err) {
+      reject(err);
+    }
+  });
+
+  CC.signOutGoogle = () => {
+    const tok = gToken;
+    gToken = '';
+    gTokenExp = 0;
+    try { sessionStorage.removeItem(GDRIVE_SESSION_KEY); } catch (_) {}
+    CC.cfg.googleEmail = '';
+    CC.persistCfg();
+    try {
+      if (tok && window.google?.accounts?.oauth2?.revoke) {
+        window.google.accounts.oauth2.revoke(tok, () => {});
+      }
+    } catch (_) {}
+  };
+
+  CC.hashDataUrlToFilename = async (dataUrl) => {
+    const str = String(dataUrl || '');
+    try {
+      if (window.crypto?.subtle) {
+        const hashBuf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+        const hex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+        return `img_${hex.slice(0, 16)}.webp`;
+      }
+    } catch (_) {}
+    let h1 = 0xdeadbeef ^ str.length;
+    let h2 = 0x41c6ce57 ^ str.length;
+    for (let i = 0; i < str.length; i++) {
+      const ch = str.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 2654435761);
+      h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    const hex = ((h1 >>> 0).toString(16).padStart(8, '0') + (h2 >>> 0).toString(16).padStart(8, '0')).slice(0, 16);
+    return `img_${hex}.webp`;
+  };
+
+  function dataUrlToBlob(dataUrl) {
+    const m = String(dataUrl || '').match(/^data:([^;]+);base64,(.+)$/);
+    if (!m) return null;
+    const mime = m[1];
+    const bin = atob(m[2]);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return new Blob([arr], { type: mime });
+  }
+
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result || ''));
+      r.onerror = () => reject(r.error || new Error('Failed to decode Drive image'));
+      r.readAsDataURL(blob);
+    });
+  }
+
+  async function gdriveFetch(url, opts = {}) {
+    if (!CC.isGoogleSignedIn()) throw new Error('Not signed in to Google Drive');
+    const headers = Object.assign({}, opts.headers || {}, { Authorization: `Bearer ${gToken}` });
+    const res = await fetch(url, { ...opts, headers });
+    if (res.status === 401) {
+      gToken = '';
+      gTokenExp = 0;
+      try { sessionStorage.removeItem(GDRIVE_SESSION_KEY); } catch (_) {}
+      throw new Error('Google session expired — tap Sign in with Google & Sync');
+    }
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      throw new Error(`Google Drive HTTP ${res.status}: ${txt.slice(0, 140)}`);
+    }
+    return res;
+  }
+
+  async function listAppDataFiles() {
+    const map = new Map();
+    let pageToken = '';
+    while (true) {
+      const url = new URL('https://www.googleapis.com/drive/v3/files');
+      url.searchParams.set('spaces', 'appDataFolder');
+      url.searchParams.set('fields', 'nextPageToken,files(id,name,modifiedTime)');
+      url.searchParams.set('pageSize', '1000');
+      if (pageToken) url.searchParams.set('pageToken', pageToken);
+      const res = await gdriveFetch(url.toString());
+      const data = await res.json();
+      (data.files || []).forEach(f => {
+        if (!f?.name) return;
+        const prev = map.get(f.name);
+        if (!prev || String(f.modifiedTime || '') > String(prev.modifiedTime || '')) {
+          map.set(f.name, f);
+        }
+      });
+      if (!data.nextPageToken) break;
+      pageToken = data.nextPageToken;
+    }
+    return map;
+  }
+
+  async function uploadAppDataMultipart(name, contentBlob, mimeType, existingFileId = null) {
+    const boundary = 'cc_sync_' + Math.random().toString(36).slice(2, 12);
+    const meta = existingFileId ? { name } : { name, parents: ['appDataFolder'] };
+    const head =
+      `--${boundary}\r\n` +
+      `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+      `${JSON.stringify(meta)}\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Type: ${mimeType}\r\n\r\n`;
+    const tail = `\r\n--${boundary}--`;
+    const body = new Blob([head, contentBlob, tail], { type: `multipart/related; boundary=${boundary}` });
+
+    const endpoint = existingFileId
+      ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(existingFileId)}?uploadType=multipart`
+      : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
+    const res = await gdriveFetch(endpoint, {
+      method: existingFileId ? 'PATCH' : 'POST',
+      headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+      body
+    });
+    return res.json();
+  }
+
+  CC.syncWithGoogleDrive = async (opts = {}) => {
+    const { interactive = false, quiet = false } = opts;
+    if (!CC.isGoogleSignedIn()) {
+      if (!interactive) throw new Error('Google Drive session expired');
+      await CC.requestGoogleAccessToken('');
+    }
+
+    const report = (msg) => { if (!quiet) statusCb(msg, true); };
+
+    // Fetch user email cleanly via Drive about endpoint (works within drive.appdata scope)
+    try {
+      const aboutRes = await gdriveFetch('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,displayName)');
+      const about = await aboutRes.json();
+      if (about?.user?.emailAddress) {
+        CC.cfg.googleEmail = about.user.emailAddress;
+        CC.persistCfg();
+      }
+    } catch (_) {}
+
+    report('☁️ Listing Google Drive appDataFolder...');
+    const fileMap = await listAppDataFiles();
+
+    // 1. Load local state from IndexedDB
+    const rawLocalStash = await CC.idbGetAll('stash');
+    for (const it of rawLocalStash) {
+      if (!it.sync_id) {
+        it.sync_id = CC.generateSyncId();
+        await CC.idbPut('stash', it);
+      }
+    }
+    const localDeletedRec = await CC.idbGet('meta', 'deleted_sync_ids');
+    const localDeleted = Object.assign({}, localDeletedRec?.value || {});
+    const localSpotify = (await CC.idbGet('meta', 'spotify_profile'))?.value || null;
+    const localDiscogsIdx = (await CC.idbGet('meta', 'discogs_collection_index'))?.value || null;
+
+    // 2. Download existing cratecheck_state.json if present
+    const stateFile = fileMap.get(GDRIVE_STATE_FILENAME) || null;
+    let remoteState = null;
+    if (stateFile?.id) {
+      report('☁️ Downloading cloud state...');
+      const res = await gdriveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(stateFile.id)}?alt=media`);
+      try { remoteState = await res.json(); } catch (_) { remoteState = null; }
+    }
+
+    // 3. Merge deleted_sync_ids tombstones
+    const mergedDeleted = Object.assign({}, localDeleted);
+    const remoteDeleted = remoteState?.deleted_sync_ids || {};
+    Object.entries(remoteDeleted).forEach(([sid, ts]) => {
+      const nTs = Number(ts) || 0;
+      if (!mergedDeleted[sid] || nTs > mergedDeleted[sid]) mergedDeleted[sid] = nTs;
+    });
+
+    // 4. Merge Stash items by sync_id
+    const localBySync = new Map();
+    rawLocalStash.forEach(it => localBySync.set(it.sync_id, it));
+    const remoteBySync = new Map();
+    (remoteState?.stash || []).forEach(it => {
+      if (it?.sync_id) remoteBySync.set(it.sync_id, it);
+    });
+
+    const allSyncIds = new Set([...localBySync.keys(), ...remoteBySync.keys()]);
+    const mergedItems = [];
+    const localIdsToDelete = [];
+
+    for (const sid of allSyncIds) {
+      const loc = localBySync.get(sid) || null;
+      const rem = remoteBySync.get(sid) || null;
+      const locTs = loc ? Number(loc.updated_at || loc.created_at || 0) : -1;
+      const remTs = rem ? Number(rem.updated_at || rem.created_at || 0) : -1;
+      const winner = locTs >= remTs ? { ...loc } : { ...rem };
+      if (loc?.id !== undefined) winner.id = loc.id;
+      else delete winner.id;
+
+      const winTs = Number(winner.updated_at || winner.created_at || 0);
+      const delTs = Number(mergedDeleted[sid] || 0);
+      if (delTs > winTs) {
+        if (loc?.id !== undefined) localIdsToDelete.push(loc.id);
+        continue;
+      }
+      if (delTs && winTs >= delTs) {
+        delete mergedDeleted[sid];
+      }
+      mergedItems.push(winner);
+    }
+
+    // 5. Incremental photo blob sync (upload missing data: URLs once, hydrate missing gdrive: refs)
+    let uploadedPhotos = 0;
+    let downloadedPhotos = 0;
+    const downloadedCache = new Map();
+    const uploadedSet = new Set();
+
+    const processImageField = async (val) => {
+      const s = String(val || '');
+      if (!s) return { localVal: '', remoteVal: '' };
+
+      if (s.startsWith('data:image/')) {
+        const fname = await CC.hashDataUrlToFilename(s);
+        if (!fileMap.has(fname) && !uploadedSet.has(fname)) {
+          const blob = dataUrlToBlob(s);
+          if (blob) {
+            report(`☁️ Uploading photo ${uploadedPhotos + 1}...`);
+            const created = await uploadAppDataMultipart(fname, blob, blob.type || 'image/webp', null);
+            fileMap.set(fname, { id: created.id, name: fname });
+            uploadedSet.add(fname);
+            uploadedPhotos++;
+          }
+        }
+        return { localVal: s, remoteVal: `gdrive:${fname}` };
+      }
+
+      if (s.startsWith('gdrive:')) {
+        const fname = s.slice(7);
+        if (downloadedCache.has(fname)) {
+          return { localVal: downloadedCache.get(fname), remoteVal: s };
+        }
+        const fInfo = fileMap.get(fname);
+        if (fInfo?.id) {
+          report(`☁️ Downloading photo ${downloadedPhotos + 1}...`);
+          const res = await gdriveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fInfo.id)}?alt=media`);
+          const blob = await res.blob();
+          const dataUrl = await blobToDataUrl(blob);
+          downloadedCache.set(fname, dataUrl);
+          downloadedPhotos++;
+          return { localVal: dataUrl, remoteVal: s };
+        }
+        return { localVal: '', remoteVal: s };
+      }
+
+      return { localVal: s, remoteVal: s };
+    };
+
+    const hydratedForLocal = [];
+    const lightweightForRemote = [];
+
+    for (const item of mergedItems) {
+      const localItem = { ...item };
+      const remoteItem = { ...item };
+      delete remoteItem.id;
+
+      if (Array.isArray(item.thumbs)) {
+        const locThumbs = [];
+        const remThumbs = [];
+        for (const t of item.thumbs) {
+          const r = await processImageField(t);
+          if (r.localVal) locThumbs.push(r.localVal);
+          if (r.remoteVal) remThumbs.push(r.remoteVal);
+        }
+        localItem.thumbs = locThumbs;
+        remoteItem.thumbs = remThumbs;
+      }
+
+      if (item.thumb_data_url) {
+        const r = await processImageField(item.thumb_data_url);
+        localItem.thumb_data_url = r.localVal || localItem.thumbs?.[0] || localItem.discogs_thumb || '';
+        remoteItem.thumb_data_url = r.remoteVal || remoteItem.thumbs?.[0] || remoteItem.discogs_thumb || '';
+      }
+
+      if (item.spine_thumb_url) {
+        const r = await processImageField(item.spine_thumb_url);
+        localItem.spine_thumb_url = r.localVal;
+        remoteItem.spine_thumb_url = r.remoteVal;
+      }
+
+      hydratedForLocal.push(localItem);
+      lightweightForRemote.push(remoteItem);
+    }
+
+    // 6. Merge spotifyProfile & discogsCollectionIndex by latest timestamp
+    const spTime = (p) => p ? Math.max(Number(p.syncedAt || 0), Number(p.dnaUpdatedAt || 0)) : 0;
+    const remSpotify = remoteState?.spotifyProfile || null;
+    let mergedSpotify = spTime(remSpotify) > spTime(localSpotify) ? remSpotify : localSpotify;
+    if (localSpotify && remSpotify) {
+      const baseSp = Number(remSpotify.syncedAt || 0) > Number(localSpotify.syncedAt || 0) ? { ...remSpotify } : { ...localSpotify };
+      if (Number(localSpotify.dnaUpdatedAt || 0) >= Number(remSpotify.dnaUpdatedAt || 0)) {
+        baseSp.tasteDna = localSpotify.tasteDna || '';
+        baseSp.softSpots = localSpotify.softSpots || '';
+        baseSp.dnaUpdatedAt = localSpotify.dnaUpdatedAt || 0;
+      } else {
+        baseSp.tasteDna = remSpotify.tasteDna || '';
+        baseSp.softSpots = remSpotify.softSpots || '';
+        baseSp.dnaUpdatedAt = remSpotify.dnaUpdatedAt || 0;
+      }
+      mergedSpotify = baseSp;
+    }
+
+    const remDiscogsIdx = remoteState?.discogsCollectionIndex || null;
+    const mergedDiscogsIdx = Number(remDiscogsIdx?.syncedAt || 0) > Number(localDiscogsIdx?.syncedAt || 0)
+      ? remDiscogsIdx
+      : localDiscogsIdx;
+
+    // 7. Merge preferences & optional secrets (NEVER sync spotifyRefreshToken/AccessToken/preferredCameraId)
+    const PREF_KEYS = [
+      'geminiModel', 'autoPlayHighlight', 'autoDetective', 'autoGradeOnScan',
+      'homeCountry', 'fetchVgSuggestions', 'threshold', 'voice',
+      'showSpotify', 'showApple', 'showDeezer', 'showYoutube'
+    ];
+    const SECRET_KEYS = [
+      'geminiKey', 'discogsToken', 'discogsUser', 'discogsFolderId',
+      'discogsFolders', 'discogsFields', 'spotifyClientId'
+    ];
+
+    const remPrefs = remoteState?.prefs || null;
+    const remCfgTs = Number(remPrefs?.cfgUpdatedAt || 0);
+    const locCfgTs = Number(CC.cfg.cfgUpdatedAt || 0);
+    if (remPrefs) {
+      if (remCfgTs > locCfgTs) {
+        PREF_KEYS.forEach(k => { if (remPrefs[k] !== undefined) CC.cfg[k] = remPrefs[k]; });
+        CC.cfg.cfgUpdatedAt = remCfgTs;
+      }
+      if (CC.cfg.googleSyncSecrets && remoteState?.secrets) {
+        SECRET_KEYS.forEach(k => {
+          const rVal = remoteState.secrets[k];
+          const lVal = CC.cfg[k];
+          const rEmpty = rVal === undefined || rVal === null || rVal === '';
+          const lEmpty = lVal === undefined || lVal === null || lVal === '';
+          if (!rEmpty && (lEmpty || remCfgTs > locCfgTs)) {
+            CC.cfg[k] = rVal;
+          }
+        });
+      }
+    }
+
+    const outPrefs = { cfgUpdatedAt: Number(CC.cfg.cfgUpdatedAt || Date.now()) };
+    PREF_KEYS.forEach(k => { outPrefs[k] = CC.cfg[k]; });
+    const outSecrets = CC.cfg.googleSyncSecrets ? {} : (remoteState?.secrets || null);
+    if (CC.cfg.googleSyncSecrets) {
+      SECRET_KEYS.forEach(k => { outSecrets[k] = CC.cfg[k]; });
+    }
+
+    // 8. Persist merged state back to local IndexedDB
+    report('☁️ Updating local Stash...');
+    for (const delId of localIdsToDelete) {
+      await CC.idbDelete('stash', delId);
+    }
+    for (const item of hydratedForLocal) {
+      await CC.idbPut('stash', item);
+    }
+    await CC.idbPut('meta', { key: 'deleted_sync_ids', value: mergedDeleted });
+    if (mergedSpotify) await CC.idbPut('meta', { key: 'spotify_profile', value: mergedSpotify });
+    if (mergedDiscogsIdx) await CC.idbPut('meta', { key: 'discogs_collection_index', value: mergedDiscogsIdx });
+
+    // 9. Upload lightweight cratecheck_state.json to appDataFolder
+    report('☁️ Saving merged state to Google Drive...');
+    const payload = {
+      version: 10,
+      syncedAt: Date.now(),
+      stash: lightweightForRemote,
+      deleted_sync_ids: mergedDeleted,
+      spotifyProfile: mergedSpotify,
+      discogsCollectionIndex: mergedDiscogsIdx,
+      prefs: outPrefs,
+      secrets: outSecrets
+    };
+    const jsonBlob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+    await uploadAppDataMultipart(GDRIVE_STATE_FILENAME, jsonBlob, 'application/json', stateFile?.id || null);
+
+    CC.cfg.googleLastSyncAt = Date.now();
+    CC.persistCfg();
+
+    return {
+      stashCount: hydratedForLocal.length,
+      uploadedPhotos,
+      downloadedPhotos,
+      deletedCount: localIdsToDelete.length,
+      spotifyProfile: mergedSpotify,
+      discogsCollectionIndex: mergedDiscogsIdx
+    };
   };
 
   window.CC = CC;
