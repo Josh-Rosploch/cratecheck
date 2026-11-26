@@ -83,7 +83,7 @@
 
     const joined = tokens.join(' | ');
     const primaryJoined = primaryNames.join(' | ');
-    if (!joined) return 'Vinyl';
+    if (!joined) return 'Unknown';
 
     // Check specific non-primary / specialized optical/tape/digital formats first so SACD/DVD/LaserDisc/MiniDisc aren't misclassified
     const checkList = (txt) => {
@@ -107,14 +107,15 @@
       return '';
     };
 
-    // Prioritize primary Discogs format names (so e.g. "Vinyl, LP, Box Set" stays "Vinyl", and "Box Set" alone stays "Box Set")
-    const nonContainerPrimary = primaryNames.filter(n => !/^box\s*set$/i.test(n) && !/^all media$/i.test(n)).join(' | ');
-    if (nonContainerPrimary) {
-      const hit = checkList(nonContainerPrimary);
+    // Evaluate primary Discogs format entries IN ORDER (skipping container names 'Box Set' and 'All Media')
+    // so e.g. a CD + DVD combo resolves to 'CD' while standalone DVD/SACD resolves to 'DVD'/'SACD'.
+    const orderedPrimary = primaryNames.filter(n => n && !/^box\s*set$/i.test(n) && !/^all media$/i.test(n));
+    for (const pName of orderedPrimary) {
+      const hit = checkList(pName);
       if (hit) return hit;
-      // Preserve any exotic Discogs primary format name (e.g., "Cylinder", "Floppy Disk", "Memory Stick")
-      const firstClean = primaryNames.find(n => n && !/^all media$/i.test(n));
-      if (firstClean) return firstClean;
+    }
+    if (orderedPrimary.length > 0) {
+      return orderedPrimary[0];
     }
 
     const fromPrimary = checkList(primaryJoined);
@@ -123,7 +124,7 @@
     const fromAll = checkList(joined);
     if (fromAll) return fromAll;
 
-    return primaryNames[0] || 'Vinyl';
+    return primaryNames[0] || 'Unknown';
   };
 
   CC.matchesMediaFormat = (rawFormats, targetFormat) => {
@@ -311,6 +312,18 @@
     .replace(/[\u0300-\u036f]/g, '');
   CC.norm = (s) => CC.foldText(s).toLowerCase().replace(/\(.*?\)|\[.*?\]/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
   CC.normFull = (s) => CC.foldText(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  // Strip parenthetical/bracket tags AND trailing hyphenated release/edition suffixes (e.g. " - 2009 Remaster", " - Single Version", " - Radio Edit")
+  CC.normTrackBase = (title) => {
+    let s = CC.foldText(title || '').replace(/\(.*?\)|\[.*?\]/g, ' ').trim();
+    const suffixRx = /\s+[-–—]\s+(?:\d{4}\s+)?(?:digital\s+|hd\s+|24[\s-]*bit\s+)?(?:remaster(?:ed)?|radio\s+edit|single\s+(?:version|edit|mix)|album\s+(?:version|mix)|lp\s+version|night\s+version|club\s+(?:version|mix)|dub\s+(?:version|mix)|(?:us|uk)\s+(?:version|mix|edit)|7["']?\s*(?:version|edit|mix)|12["']?\s*(?:version|edit|mix)|mono|stereo|bonus\s+track|edit|extended\s+(?:version|mix)|original\s+(?:version|mix)|deluxe(?:\s+edition)?|anniversary(?:\s+edition)?|reissue|remastered\s+\d{4}|live(?:\s+at\b.*)?|acoustic(?:\s+version)?|demo(?:\s+version)?|remix|from\s+["'].*|\d{4}\s+mix|\d{4}\s+version)\b.*$/i;
+    for (let i = 0; i < 3; i++) {
+      const next = s.replace(suffixRx, '').trim();
+      if (next === s || !next) break;
+      s = next;
+    }
+    const base = CC.norm(s);
+    return base || CC.norm(title || '');
+  };
 
   function tokenSim(na, nb) {
     const ta = new Set(na.split(' ').filter(w => w.length > 1));
@@ -1142,19 +1155,7 @@
         ops.push({ type: 'discogs_index', index: syncResult.collectionIndex });
       }
 
-      const nextQueue = outboxBefore.slice();
-      if (ops.length > 0) {
-        nextQueue.push({
-          batchId: CC.newBatchId(),
-          accountEmail: CC.cfg.googleBoundEmail || CC.cfg.googleEmail || '',
-          createdAt: syncedAt,
-          deviceId: CC.getDeviceId(),
-          status: 'queued',
-          ops
-        });
-      }
-
-      await CC.idbAtomicWrite(({ stashStore, metaStore }) => {
+      const finalQueueLen = await CC.idbAtomicWrite(({ stashStore, metaStore }) => {
         for (const delId of localIdsToDelete) stashStore.delete(delId);
         for (const rec of toPut) stashStore.put(rec);
         if (Object.keys(repair.newAliases).length > 0) {
@@ -1164,11 +1165,23 @@
           metaStore.put({ key: 'discogs_collection_index', value: syncResult.collectionIndex });
         }
         if (ops.length > 0) {
-          metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: nextQueue } });
+          const outReq = metaStore.get(CLOUD_OUTBOX_KEY);
+          outReq.onsuccess = () => {
+            const liveQ = Array.isArray(outReq.result?.value?.queue) ? outReq.result.value.queue.slice() : [];
+            liveQ.push({
+              batchId: CC.newBatchId(),
+              accountEmail: CC.cfg.googleBoundEmail || CC.cfg.googleEmail || '',
+              createdAt: syncedAt,
+              deviceId: CC.getDeviceId(),
+              status: 'queued',
+              ops
+            });
+            metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: liveQ } });
+            CC.setPendingCloudChanges(liveQ.length);
+          };
         }
       });
-
-      if (ops.length > 0) CC.setPendingCloudChanges(nextQueue.length);
+      void finalQueueLen;
 
       CC.cfg.discogsFolders = syncResult.folders;
       CC.cfg.discogsLastSyncAt = syncedAt;
@@ -1499,40 +1512,47 @@
       if (runOutboxOpsBySync.size > 0) {
         try {
           await withLocalCommitLock(async () => {
-            // Re-read LIVE IndexedDB state & tombstones so items deleted/edited mid-hydration are never resurrected or clobbered!
-            const liveStash = await CC.idbGetAll('stash');
-            const liveDeleted = (await CC.idbGet('meta', 'deleted_sync_ids'))?.value || {};
-            const liveBySync = new Map();
-            liveStash.forEach(x => { if (x?.sync_id) liveBySync.set(x.sync_id, x); });
+            // Re-read LIVE IndexedDB stash, tombstones & outbox inside ONE readwrite transaction
+            // so concurrent tabs or mid-hydration deletions can never be overwritten or resurrected!
+            let finalPending = null;
+            await CC.idbAtomicWrite(({ stashStore, metaStore }) => {
+              const stashReq = stashStore.getAll();
+              stashReq.onsuccess = () => {
+                const liveStash = stashReq.result || [];
+                readMetaInTx(metaStore, ['deleted_sync_ids', CLOUD_OUTBOX_KEY], (m) => {
+                  const liveDeleted = m.deleted_sync_ids || {};
+                  const liveBySync = new Map();
+                  liveStash.forEach(x => { if (x?.sync_id) liveBySync.set(x.sync_id, x); });
 
-            const freshOps = [];
-            for (const [sid] of runOutboxOpsBySync.entries()) {
-              const liveRec = liveBySync.get(sid);
-              if (!liveRec) continue; // Deleted locally while Discogs was hydrating -> skip!
-              const delTs = normTombstoneTs(liveDeleted[sid]);
-              const recTs = Number(liveRec.updated_at || liveRec.created_at || 0);
-              if (delTs > 0 && delTs >= recTs) continue;
-              const opCopy = { ...liveRec };
-              delete opCopy.id;
-              freshOps.push({ type: 'upsert_stash', sync_id: sid, record: opCopy });
-            }
+                  const freshOps = [];
+                  for (const [sid] of runOutboxOpsBySync.entries()) {
+                    const liveRec = liveBySync.get(sid);
+                    if (!liveRec) continue;
+                    const delTs = normTombstoneTs(liveDeleted[sid]);
+                    const recTs = Number(liveRec.updated_at || liveRec.created_at || 0);
+                    if (delTs > 0 && delTs >= recTs) continue;
+                    const opCopy = { ...liveRec };
+                    delete opCopy.id;
+                    freshOps.push({ type: 'upsert_stash', sync_id: sid, record: opCopy });
+                  }
 
-            if (freshOps.length > 0) {
-              const outboxBefore = await CC.getCloudOutbox();
-              const nextQueue = outboxBefore.slice();
-              nextQueue.push({
-                batchId: CC.newBatchId(),
-                accountEmail: CC.cfg.googleBoundEmail || CC.cfg.googleEmail || '',
-                createdAt: Date.now(),
-                deviceId: CC.getDeviceId(),
-                status: 'queued',
-                ops: freshOps
-              });
-              await CC.idbAtomicWrite(({ metaStore }) => {
-                metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: nextQueue } });
-              });
-              CC.setPendingCloudChanges(nextQueue.length);
-            }
+                  if (freshOps.length > 0) {
+                    const liveQ = Array.isArray(m[CLOUD_OUTBOX_KEY]?.queue) ? m[CLOUD_OUTBOX_KEY].queue.slice() : [];
+                    liveQ.push({
+                      batchId: CC.newBatchId(),
+                      accountEmail: CC.cfg.googleBoundEmail || CC.cfg.googleEmail || '',
+                      createdAt: Date.now(),
+                      deviceId: CC.getDeviceId(),
+                      status: 'queued',
+                      ops: freshOps
+                    });
+                    metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: liveQ } });
+                    finalPending = liveQ.length;
+                  }
+                });
+              };
+            });
+            if (finalPending !== null) CC.setPendingCloudChanges(finalPending);
           });
         } catch (_) {}
       }
@@ -3112,7 +3132,7 @@
   const STASH_MERGE_FIELDS = [
     'title', 'artist', 'catno', 'format', 'year', 'label', 'country', 'genres',
     'media_condition', 'sleeve_condition', 'condition_note',
-    'thumbs', 'thumb_data_url', 'spine_thumb_url', 'spine_source_url', 'spine_flipped',
+    'photo_slots', 'thumbs', 'thumb_data_url', 'spine_thumb_url', 'spine_source_url', 'spine_flipped',
     'taste_score', 'taste_verdict', 'taste_summary', 'context_note',
     'notable_songs', 'litmus_track', 'litmus_artist', 'taste_scored_at',
     'discogs_id', 'master_id', 'discogs_account', 'discogs_instance_id',
@@ -3246,7 +3266,130 @@
     return out;
   }
 
-  // Serialized atomic local mutation: safe against overlapping saves & in-flight Drive/Discogs syncs
+  // Read multiple meta keys inside an active readwrite IndexedDB transaction synchronously via onsuccess chaining
+  function readMetaInTx(metaStore, keys, onDone) {
+    const out = {};
+    let remaining = keys.length;
+    if (!remaining) { onDone(out); return; }
+    keys.forEach(k => {
+      const req = metaStore.get(k);
+      req.onsuccess = () => {
+        out[k] = req.result?.value;
+        if (--remaining === 0) onDone(out);
+      };
+    });
+  }
+
+  // Stable named photo slots helper (migrates legacy positional thumbs cleanly)
+  CC.normalizePhotoSlots = (rec) => {
+    if (rec && rec.photo_slots && typeof rec.photo_slots === 'object') {
+      return {
+        front: String(rec.photo_slots.front || ''),
+        back: String(rec.photo_slots.back || ''),
+        extras: Array.isArray(rec.photo_slots.extras) ? rec.photo_slots.extras.filter(Boolean).map(String) : []
+      };
+    }
+    const legacy = Array.isArray(rec?.thumbs) && rec.thumbs.length
+      ? rec.thumbs.filter(Boolean).map(String)
+      : (rec?.thumb_data_url && (String(rec.thumb_data_url).startsWith('data:image/') || String(rec.thumb_data_url).startsWith('gdrive:'))
+        ? [String(rec.thumb_data_url)]
+        : []);
+    return {
+      front: legacy[0] || '',
+      back: legacy[1] || '',
+      extras: legacy.slice(2)
+    };
+  };
+
+  CC.deriveThumbsFromSlots = (slots, discogsThumb = '') => {
+    const s = slots || { front: '', back: '', extras: [] };
+    const extras = Array.isArray(s.extras) ? s.extras.filter(Boolean) : [];
+    const thumbs = [s.front, s.back, ...extras].filter(Boolean);
+    const thumb_data_url = s.front || s.back || extras[0] || discogsThumb || '';
+    return { thumbs, thumb_data_url };
+  };
+
+  // Atomic live-row Stash mutation: re-reads live row + tombstones + outbox inside ONE readwrite transaction.
+  // If the item was deleted/tombstoned while photo work was in flight, aborts cleanly without recreating it!
+  CC.mutateStashItemIfAlive = async (id, syncId, updaterFn, changedFields = null) => withLocalCommitLock(async () => {
+    let outcome = { aborted: true, reason: 'missing', savedStash: null, pendingCount: 0 };
+    await CC.idbAtomicWrite(({ stashStore, metaStore }) => {
+      readMetaInTx(metaStore, ['deleted_sync_ids', SYNC_ID_ALIASES_KEY, CLOUD_OUTBOX_KEY], (m) => {
+        const deletedMap = Object.assign({}, m.deleted_sync_ids || {});
+        const aliases = Object.assign({}, m[SYNC_ID_ALIASES_KEY] || {});
+        const liveQueue = Array.isArray(m[CLOUD_OUTBOX_KEY]?.queue) ? m[CLOUD_OUTBOX_KEY].queue.slice() : [];
+
+        const finishWithLiveRow = (liveRow) => {
+          if (!liveRow) {
+            outcome = { aborted: true, reason: 'deleted', savedStash: null, pendingCount: liveQueue.length };
+            return;
+          }
+          const canonSid = resolveCanonicalSyncId(liveRow.sync_id || syncId || '', aliases);
+          const delTs = normTombstoneTs(deletedMap[canonSid]);
+          const recTs = Number(liveRow.updated_at || liveRow.created_at || 0);
+          if (delTs > 0 && delTs >= recTs) {
+            outcome = { aborted: true, reason: 'tombstoned', savedStash: null, pendingCount: liveQueue.length };
+            return;
+          }
+          const nextRaw = updaterFn({ ...liveRow });
+          if (!nextRaw) {
+            outcome = { aborted: true, reason: 'noop', savedStash: liveRow, pendingCount: liveQueue.length };
+            return;
+          }
+          const stamped = CC.stampStashRevision(nextRaw, liveRow, changedFields);
+          stamped.sync_id = canonSid || stamped.sync_id || CC.generateSyncId();
+          if (liveRow.id !== undefined) stamped.id = liveRow.id;
+          stashStore.put(stamped);
+
+          const opCopy = { ...stamped };
+          delete opCopy.id;
+          const now = Date.now();
+          liveQueue.push({
+            batchId: CC.newBatchId(),
+            accountEmail: CC.cfg.googleBoundEmail || CC.cfg.googleEmail || '',
+            createdAt: now,
+            deviceId: CC.getDeviceId(),
+            status: 'queued',
+            ops: [{ type: 'upsert_stash', sync_id: stamped.sync_id, record: opCopy }]
+          });
+          metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: liveQueue } });
+          outcome = { aborted: false, reason: '', savedStash: stamped, pendingCount: liveQueue.length };
+        };
+
+        if (id !== undefined && id !== null) {
+          const getReq = stashStore.get(id);
+          getReq.onsuccess = () => {
+            if (getReq.result) {
+              finishWithLiveRow(getReq.result);
+            } else if (syncId) {
+              const allReq = stashStore.getAll();
+              allReq.onsuccess = () => {
+                const targetCanon = resolveCanonicalSyncId(syncId, aliases);
+                const found = (allReq.result || []).find(r => resolveCanonicalSyncId(r.sync_id || '', aliases) === targetCanon);
+                finishWithLiveRow(found || null);
+              };
+            } else {
+              finishWithLiveRow(null);
+            }
+          };
+        } else if (syncId) {
+          const allReq = stashStore.getAll();
+          allReq.onsuccess = () => {
+            const targetCanon = resolveCanonicalSyncId(syncId, aliases);
+            const found = (allReq.result || []).find(r => resolveCanonicalSyncId(r.sync_id || '', aliases) === targetCanon);
+            finishWithLiveRow(found || null);
+          };
+        } else {
+          finishWithLiveRow(null);
+        }
+      });
+    });
+
+    if (!outcome.aborted) CC.setPendingCloudChanges(outcome.pendingCount);
+    return outcome;
+  });
+
+  // Serialized atomic local mutation: reads & updates outbox/tombstones/aliases inside ONE readwrite transaction (safe across tabs!)
   CC.commitLocalMutation = async (opts = {}) => withLocalCommitLock(async () => {
     const {
       upsertStash = null,
@@ -3257,69 +3400,74 @@
       queueOutbox = true
     } = opts || {};
 
-    const outboxBefore = await CC.getCloudOutbox();
-    const deletedBefore = (await CC.idbGet('meta', 'deleted_sync_ids'))?.value || {};
-    const aliases = await CC.getSyncIdAliases();
-    const now = Date.now();
-    const ops = [...extraOps];
     let savedStash = upsertStash ? { ...upsertStash } : null;
-
-    if (savedStash) {
-      if (!savedStash.sync_id) savedStash.sync_id = CC.generateSyncId();
-      savedStash.sync_id = resolveCanonicalSyncId(savedStash.sync_id, aliases);
-      if (!savedStash.rev) savedStash = CC.stampStashRevision(savedStash, null);
-      const opCopy = { ...savedStash };
-      delete opCopy.id;
-      ops.push({ type: 'upsert_stash', sync_id: savedStash.sync_id, record: opCopy });
-    }
-
-    const updatedDeleted = Object.assign({}, deletedBefore);
-    const delSyncId = deleteStash?.sync_id ? resolveCanonicalSyncId(deleteStash.sync_id, aliases) : null;
-    if (delSyncId) {
-      const delEntry = { ts: now, rev: CC.newRev(), deviceId: CC.getDeviceId() };
-      updatedDeleted[delSyncId] = delEntry;
-      ops.push({ type: 'delete_stash', sync_id: delSyncId, deleted: delEntry });
-    }
-
-    const nextQueue = outboxBefore.slice();
-    let createdBatch = null;
-    if (queueOutbox && ops.length > 0) {
-      createdBatch = {
-        batchId: CC.newBatchId(),
-        accountEmail: CC.cfg.googleBoundEmail || CC.cfg.googleEmail || '',
-        createdAt: now,
-        deviceId: CC.getDeviceId(),
-        status: 'queued',
-        ops
-      };
-      nextQueue.push(createdBatch);
-    }
-
     let assignedId = savedStash?.id;
+    let createdBatch = null;
+    let pendingCount = 0;
+
     await CC.idbAtomicWrite(({ stashStore, metaStore }) => {
-      if (savedStash) {
-        const req = stashStore.put(savedStash);
-        req.onsuccess = () => { assignedId = req.result; savedStash.id = assignedId; };
-      }
-      if (deleteStash?.id !== undefined && deleteStash?.id !== null) {
-        stashStore.delete(deleteStash.id);
-      }
-      if (delSyncId) {
-        metaStore.put({ key: 'deleted_sync_ids', value: updatedDeleted });
-      }
-      for (const mp of metaPuts) {
-        metaStore.put(mp);
-      }
-      for (const mk of metaDeletes) {
-        metaStore.delete(mk);
-      }
-      if (createdBatch) {
-        metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: nextQueue } });
-      }
+      readMetaInTx(metaStore, [CLOUD_OUTBOX_KEY, 'deleted_sync_ids', SYNC_ID_ALIASES_KEY], (m) => {
+        const outboxBefore = Array.isArray(m[CLOUD_OUTBOX_KEY]?.queue) ? m[CLOUD_OUTBOX_KEY].queue : [];
+        const deletedBefore = m.deleted_sync_ids || {};
+        const aliases = m[SYNC_ID_ALIASES_KEY] || {};
+        const now = Date.now();
+        const ops = [...extraOps];
+
+        if (savedStash) {
+          if (!savedStash.sync_id) savedStash.sync_id = CC.generateSyncId();
+          savedStash.sync_id = resolveCanonicalSyncId(savedStash.sync_id, aliases);
+          if (!savedStash.rev) savedStash = CC.stampStashRevision(savedStash, null);
+          const opCopy = { ...savedStash };
+          delete opCopy.id;
+          ops.push({ type: 'upsert_stash', sync_id: savedStash.sync_id, record: opCopy });
+        }
+
+        const updatedDeleted = Object.assign({}, deletedBefore);
+        const delSyncId = deleteStash?.sync_id ? resolveCanonicalSyncId(deleteStash.sync_id, aliases) : null;
+        if (delSyncId) {
+          const delEntry = { ts: now, rev: CC.newRev(), deviceId: CC.getDeviceId() };
+          updatedDeleted[delSyncId] = delEntry;
+          ops.push({ type: 'delete_stash', sync_id: delSyncId, deleted: delEntry });
+        }
+
+        const nextQueue = outboxBefore.slice();
+        if (queueOutbox && ops.length > 0) {
+          createdBatch = {
+            batchId: CC.newBatchId(),
+            accountEmail: CC.cfg.googleBoundEmail || CC.cfg.googleEmail || '',
+            createdAt: now,
+            deviceId: CC.getDeviceId(),
+            status: 'queued',
+            ops
+          };
+          nextQueue.push(createdBatch);
+        }
+        pendingCount = nextQueue.length;
+
+        if (savedStash) {
+          const req = stashStore.put(savedStash);
+          req.onsuccess = () => { assignedId = req.result; savedStash.id = assignedId; };
+        }
+        if (deleteStash?.id !== undefined && deleteStash?.id !== null) {
+          stashStore.delete(deleteStash.id);
+        }
+        if (delSyncId) {
+          metaStore.put({ key: 'deleted_sync_ids', value: updatedDeleted });
+        }
+        for (const mp of metaPuts) {
+          metaStore.put(mp);
+        }
+        for (const mk of metaDeletes) {
+          metaStore.delete(mk);
+        }
+        if (createdBatch) {
+          metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: nextQueue } });
+        }
+      });
     });
 
-    if (createdBatch) CC.setPendingCloudChanges(nextQueue.length);
-    return { savedStash, assignedId, batch: createdBatch, pendingCount: nextQueue.length };
+    if (createdBatch) CC.setPendingCloudChanges(pendingCount);
+    return { savedStash, assignedId, batch: createdBatch, pendingCount };
   });
 
   CC.recordLocalCloudChange = async (syncId = null, isDelete = false, extraOps = []) => {
@@ -3478,9 +3626,10 @@
   async function listAppDataFiles() {
     const map = new Map();
     const v2Batches = new Map();     // batchId -> file
-    const allV2BatchFiles = [];      // every ss_v2_batch_*.json file (including any duplicates) for full compaction cleanup
+    const allV2BatchFiles = [];      // every ss_v2_batch_*.json file
     const v2Secrets = new Map();     // batchId -> file
     const legacyDeltas = [];
+    const snapshotFiles = [];        // ALL softspot_state.json / cratecheck_state.json files (sorted oldest -> newest)
     let pageToken = '';
     const seenTokens = new Set();
 
@@ -3500,6 +3649,9 @@
         const prev = map.get(f.name);
         if (!prev || String(f.modifiedTime || '') > String(prev.modifiedTime || '')) {
           map.set(f.name, f);
+        }
+        if (GDRIVE_LEGACY_STATE_NAMES.includes(f.name)) {
+          snapshotFiles.push(f);
         }
         const mBatch = f.name.match(GDRIVE_V2_BATCH_RX);
         if (mBatch) {
@@ -3524,7 +3676,12 @@
       pageToken = data.nextPageToken;
     }
 
-    return { map, v2Batches, allV2BatchFiles, v2Secrets, legacyDeltas };
+    snapshotFiles.sort((a, b) =>
+      String(a.modifiedTime || '').localeCompare(String(b.modifiedTime || '')) ||
+      String(a.id || '').localeCompare(String(b.id || ''))
+    );
+
+    return { map, snapshotFiles, v2Batches, allV2BatchFiles, v2Secrets, legacyDeltas };
   }
 
   async function uploadAppDataMultipart(name, contentBlob, mimeType, existingFileId = null) {
@@ -3599,6 +3756,9 @@
   function isMergeValueEmpty(field, val) {
     if (val === undefined || val === null || val === '') return true;
     if (Array.isArray(val) && val.length === 0) return true;
+    if (field === 'photo_slots' && typeof val === 'object') {
+      return !val.front && !val.back && (!Array.isArray(val.extras) || val.extras.length === 0);
+    }
     if ((field === 'media_condition' || field === 'sleeve_condition') && val === 'Not Graded') return true;
     return false;
   }
@@ -3680,6 +3840,23 @@
       }
 
       // Union photos when merging duplicate copy rows so ZERO local photos or cloud refs from either row are lost!
+      if (duplicateMerge && f === 'photo_slots') {
+        const slL = CC.normalizePhotoSlots({ photo_slots: lv, thumbs: localRec.thumbs, thumb_data_url: localRec.thumb_data_url });
+        const slR = CC.normalizePhotoSlots({ photo_slots: rv, thumbs: remoteRec.thumbs, thumb_data_url: remoteRec.thumb_data_url });
+        const combinedExtras = mergePhotoListsUnique(slL.extras, slR.extras);
+        const front = slL.front || slR.front || '';
+        const back = slL.back || slR.back || '';
+        // If both rows had distinct fronts/backs, preserve the alternate inside extras so zero photos vanish
+        if (slL.front && slR.front && slL.front !== slR.front && !combinedExtras.includes(slR.front)) combinedExtras.push(slR.front);
+        if (slL.back && slR.back && slL.back !== slR.back && !combinedExtras.includes(slR.back)) combinedExtras.push(slR.back);
+        merged.photo_slots = { front, back, extras: combinedExtras };
+        const winMeta = compareRevMeta(Number(remFRevs[f]?.ts || remTs), String(remFRevs[f]?.rev || remRev), Number(locFRevs[f]?.ts || locTs), String(locFRevs[f]?.rev || locRev)) > 0
+          ? (remFRevs[f] || { ts: remTs, rev: remRev })
+          : (locFRevs[f] || { ts: locTs, rev: locRev });
+        mergedFieldRevs[f] = winMeta;
+        continue;
+      }
+
       if (duplicateMerge && f === 'thumbs') {
         const combined = mergePhotoListsUnique(lv, rv);
         merged.thumbs = combined;
@@ -3784,8 +3961,12 @@
       }
     }
 
-    // Re-align thumb_data_url with merged thumbs if duplicate merge produced user photos
-    if (duplicateMerge && Array.isArray(merged.thumbs) && merged.thumbs.length > 0) {
+    // Keep derived thumbs / thumb_data_url consistent with photo_slots when photo_slots is present
+    if (merged.photo_slots && typeof merged.photo_slots === 'object') {
+      const derived = CC.deriveThumbsFromSlots(CC.normalizePhotoSlots(merged), merged.discogs_thumb || '');
+      merged.thumbs = derived.thumbs;
+      merged.thumb_data_url = derived.thumb_data_url;
+    } else if (duplicateMerge && Array.isArray(merged.thumbs) && merged.thumbs.length > 0) {
       const curThumb = String(merged.thumb_data_url || '');
       if (!curThumb || (!curThumb.startsWith('data:image/') && !curThumb.startsWith('gdrive:'))) {
         merged.thumb_data_url = merged.thumbs[0];
@@ -3843,151 +4024,164 @@
     return { purgedCount, updatedItems: toUpdate.length };
   });
 
-  // Coalesce queued cloud outbox batches per accountEmail into ONE compact batch:
+  // Coalesce queued cloud outbox batches per accountEmail into ONE compact batch inside ONE readwrite transaction:
   // - Tracks timestamps per op so an older upsert_stash NEVER cancels a newer delete_stash tombstone
   // - Merges two upsert_stash ops for the same sync_id field-by-field via mergeStashRecordsDeterministic!
   CC.coalesceCloudOutbox = async () => withLocalCommitLock(async () => {
-    const rawQueue = await CC.getCloudOutbox();
-    if (rawQueue.length <= 1) {
-      CC.setPendingCloudChanges(rawQueue.length);
-      return { before: rawQueue.length, after: rawQueue.length };
-    }
-
-    const byAccount = new Map();
-    for (const batch of rawQueue) {
-      const acctKey = String(batch?.accountEmail || '').trim().toLowerCase();
-      if (!byAccount.has(acctKey)) byAccount.set(acctKey, []);
-      byAccount.get(acctKey).push(batch);
-    }
-
-    const opTimestamp = (op, batchCreatedAt) => {
-      if (!op) return Number(batchCreatedAt || 0);
-      if (op.type === 'delete_stash') return Math.max(normTombstoneTs(op.deleted), Number(batchCreatedAt || 0));
-      if (op.type === 'upsert_stash') return Number(op.record?.updated_at || op.record?.created_at || batchCreatedAt || 0);
-      return Number(batchCreatedAt || 0);
-    };
-
-    const compacted = [];
-    for (const [, group] of byAccount.entries()) {
-      if (group.length === 1) {
-        compacted.push(group[0]);
-        continue;
-      }
-      const opEntryByKey = new Map(); // key -> { op, ts }
-      const orderedKeys = [];
-      const putEntry = (key, op, ts) => {
-        if (!opEntryByKey.has(key)) orderedKeys.push(key);
-        opEntryByKey.set(key, { op, ts });
-      };
-      let isFullSeed = false;
-      let latestCreatedAt = 0;
-      let accountEmail = '';
-      let deviceId = CC.getDeviceId();
-      let idxCounter = 0;
-
-      for (const b of group) {
-        const bTs = Number(b.createdAt || 0);
-        if (b.isFullSeed) isFullSeed = true;
-        if (bTs > latestCreatedAt) latestCreatedAt = bTs;
-        if (b.accountEmail) accountEmail = b.accountEmail;
-        if (b.deviceId) deviceId = b.deviceId;
-        for (const op of (b.ops || [])) {
-          if (!op || !op.type) continue;
-          const ts = opTimestamp(op, bTs);
-          if ((op.type === 'upsert_stash' || op.type === 'delete_stash') && op.sync_id) {
-            const key = `stash:${op.sync_id}`;
-            const prev = opEntryByKey.get(key);
-            if (!prev) {
-              putEntry(key, op, ts);
-            } else if (prev.op.type === 'delete_stash' && op.type === 'upsert_stash') {
-              // NEVER let an older upsert_stash cancel a newer delete_stash tombstone!
-              if (ts > prev.ts) putEntry(key, op, ts);
-            } else if (prev.op.type === 'upsert_stash' && op.type === 'delete_stash') {
-              // Newer or equal delete_stash supersedes upsert_stash
-              if (ts >= prev.ts) putEntry(key, op, ts);
-            } else if (prev.op.type === 'delete_stash' && op.type === 'delete_stash') {
-              if (ts >= prev.ts) putEntry(key, op, ts);
-            } else if (prev.op.type === 'upsert_stash' && op.type === 'upsert_stash') {
-              // Field-by-field merge so concurrent user edits & Discogs hydrations NEVER clobber each other!
-              const mergedRes = CC.mergeStashRecordsDeterministic(prev.op.record, op.record);
-              const cleanRec = { ...mergedRes.merged };
-              delete cleanRec.id;
-              putEntry(key, { type: 'upsert_stash', sync_id: op.sync_id, record: cleanRec }, Math.max(prev.ts, ts));
-            }
-          } else if (op.type === 'retire_sync_id' && op.retired_sync_id) {
-            putEntry(`retire:${op.retired_sync_id}`, op, ts);
-          } else if (['prefs', 'discogs_index', 'spotify_profile', 'taste_profile'].includes(op.type)) {
-            const key = `single:${op.type}`;
-            const prev = opEntryByKey.get(key);
-            if (!prev || ts >= prev.ts) putEntry(key, op, ts);
-          } else {
-            putEntry(`other:${idxCounter++}`, op, ts);
-          }
-        }
-      }
-
-      const ops = orderedKeys.map(k => opEntryByKey.get(k)?.op).filter(Boolean);
-      if (ops.length > 0) {
-        const mergedBatch = {
-          batchId: CC.newBatchId(),
-          accountEmail,
-          createdAt: latestCreatedAt || Date.now(),
-          deviceId,
-          status: 'queued',
-          ops
-        };
-        if (isFullSeed) mergedBatch.isFullSeed = true;
-        compacted.push(mergedBatch);
-      }
-    }
+    let beforeLen = 0;
+    let afterLen = 0;
 
     await CC.idbAtomicWrite(({ metaStore }) => {
-      metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: compacted } });
+      const req = metaStore.get(CLOUD_OUTBOX_KEY);
+      req.onsuccess = () => {
+        const rawQueue = Array.isArray(req.result?.value?.queue) ? req.result.value.queue : [];
+        beforeLen = rawQueue.length;
+        if (rawQueue.length <= 1) {
+          afterLen = rawQueue.length;
+          return;
+        }
+
+        const byAccount = new Map();
+        for (const batch of rawQueue) {
+          const acctKey = String(batch?.accountEmail || '').trim().toLowerCase();
+          if (!byAccount.has(acctKey)) byAccount.set(acctKey, []);
+          byAccount.get(acctKey).push(batch);
+        }
+
+        const opTimestamp = (op, batchCreatedAt) => {
+          if (!op) return Number(batchCreatedAt || 0);
+          if (op.type === 'delete_stash') return Math.max(normTombstoneTs(op.deleted), Number(batchCreatedAt || 0));
+          if (op.type === 'upsert_stash') return Number(op.record?.updated_at || op.record?.created_at || batchCreatedAt || 0);
+          return Number(batchCreatedAt || 0);
+        };
+
+        const compacted = [];
+        for (const [, group] of byAccount.entries()) {
+          if (group.length === 1) {
+            compacted.push(group[0]);
+            continue;
+          }
+          const opEntryByKey = new Map(); // key -> { op, ts }
+          const orderedKeys = [];
+          const putEntry = (key, op, ts) => {
+            if (!opEntryByKey.has(key)) orderedKeys.push(key);
+            opEntryByKey.set(key, { op, ts });
+          };
+          let isFullSeed = false;
+          let latestCreatedAt = 0;
+          let accountEmail = '';
+          let deviceId = CC.getDeviceId();
+          let idxCounter = 0;
+
+          for (const b of group) {
+            const bTs = Number(b.createdAt || 0);
+            if (b.isFullSeed) isFullSeed = true;
+            if (bTs > latestCreatedAt) latestCreatedAt = bTs;
+            if (b.accountEmail) accountEmail = b.accountEmail;
+            if (b.deviceId) deviceId = b.deviceId;
+            for (const op of (b.ops || [])) {
+              if (!op || !op.type) continue;
+              const ts = opTimestamp(op, bTs);
+              if ((op.type === 'upsert_stash' || op.type === 'delete_stash') && op.sync_id) {
+                const key = `stash:${op.sync_id}`;
+                const prev = opEntryByKey.get(key);
+                if (!prev) {
+                  putEntry(key, op, ts);
+                } else if (prev.op.type === 'delete_stash' && op.type === 'upsert_stash') {
+                  if (ts > prev.ts) putEntry(key, op, ts);
+                } else if (prev.op.type === 'upsert_stash' && op.type === 'delete_stash') {
+                  if (ts >= prev.ts) putEntry(key, op, ts);
+                } else if (prev.op.type === 'delete_stash' && op.type === 'delete_stash') {
+                  if (ts >= prev.ts) putEntry(key, op, ts);
+                } else if (prev.op.type === 'upsert_stash' && op.type === 'upsert_stash') {
+                  const mergedRes = CC.mergeStashRecordsDeterministic(prev.op.record, op.record);
+                  const cleanRec = { ...mergedRes.merged };
+                  delete cleanRec.id;
+                  putEntry(key, { type: 'upsert_stash', sync_id: op.sync_id, record: cleanRec }, Math.max(prev.ts, ts));
+                }
+              } else if (op.type === 'retire_sync_id' && op.retired_sync_id) {
+                putEntry(`retire:${op.retired_sync_id}`, op, ts);
+              } else if (['prefs', 'discogs_index', 'spotify_profile', 'taste_profile'].includes(op.type)) {
+                const key = `single:${op.type}`;
+                const prev = opEntryByKey.get(key);
+                if (!prev || ts >= prev.ts) putEntry(key, op, ts);
+              } else {
+                putEntry(`other:${idxCounter++}`, op, ts);
+              }
+            }
+          }
+
+          const ops = orderedKeys.map(k => opEntryByKey.get(k)?.op).filter(Boolean);
+          if (ops.length > 0) {
+            const mergedBatch = {
+              batchId: CC.newBatchId(),
+              accountEmail,
+              createdAt: latestCreatedAt || Date.now(),
+              deviceId,
+              status: 'queued',
+              ops
+            };
+            if (isFullSeed) mergedBatch.isFullSeed = true;
+            compacted.push(mergedBatch);
+          }
+        }
+
+        afterLen = compacted.length;
+        metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: compacted } });
+      };
     });
-    CC.setPendingCloudChanges(compacted.length);
-    return { before: rawQueue.length, after: compacted.length };
+
+    CC.setPendingCloudChanges(afterLen);
+    return { before: beforeLen, after: afterLen };
   });
 
-  // Commit multiple Stash upserts + ONE combined Drive outbox batch atomically
+  // Commit multiple Stash upserts + ONE combined Drive outbox batch atomically inside ONE readwrite transaction
   CC.commitBatchStashUpserts = async (records = [], queueOutbox = true) => withLocalCommitLock(async () => {
     const valid = (Array.isArray(records) ? records : []).filter(Boolean);
     if (!valid.length) return { count: 0 };
-    const outboxBefore = await CC.getCloudOutbox();
-    const aliases = await CC.getSyncIdAliases();
-    const toPut = [];
-    const ops = [];
-
-    for (const raw of valid) {
-      let rec = { ...raw };
-      if (!rec.sync_id) rec.sync_id = CC.generateSyncId();
-      rec.sync_id = resolveCanonicalSyncId(rec.sync_id, aliases);
-      if (!rec.rev) rec = CC.stampStashRevision(rec, null);
-      toPut.push(rec);
-      const opCopy = { ...rec };
-      delete opCopy.id;
-      ops.push({ type: 'upsert_stash', sync_id: rec.sync_id, record: opCopy });
-    }
-
-    const nextQueue = outboxBefore.slice();
-    if (queueOutbox && ops.length > 0) {
-      nextQueue.push({
-        batchId: CC.newBatchId(),
-        accountEmail: CC.cfg.googleBoundEmail || CC.cfg.googleEmail || '',
-        createdAt: Date.now(),
-        deviceId: CC.getDeviceId(),
-        status: 'queued',
-        ops
-      });
-    }
+    let pendingCount = 0;
+    let putCount = 0;
 
     await CC.idbAtomicWrite(({ stashStore, metaStore }) => {
-      for (const rec of toPut) stashStore.put(rec);
-      if (queueOutbox && ops.length > 0) {
-        metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: nextQueue } });
-      }
+      readMetaInTx(metaStore, [CLOUD_OUTBOX_KEY, SYNC_ID_ALIASES_KEY], (m) => {
+        const outboxBefore = Array.isArray(m[CLOUD_OUTBOX_KEY]?.queue) ? m[CLOUD_OUTBOX_KEY].queue : [];
+        const aliases = m[SYNC_ID_ALIASES_KEY] || {};
+        const toPut = [];
+        const ops = [];
+
+        for (const raw of valid) {
+          let rec = { ...raw };
+          if (!rec.sync_id) rec.sync_id = CC.generateSyncId();
+          rec.sync_id = resolveCanonicalSyncId(rec.sync_id, aliases);
+          if (!rec.rev) rec = CC.stampStashRevision(rec, null);
+          toPut.push(rec);
+          const opCopy = { ...rec };
+          delete opCopy.id;
+          ops.push({ type: 'upsert_stash', sync_id: rec.sync_id, record: opCopy });
+        }
+
+        const nextQueue = outboxBefore.slice();
+        if (queueOutbox && ops.length > 0) {
+          nextQueue.push({
+            batchId: CC.newBatchId(),
+            accountEmail: CC.cfg.googleBoundEmail || CC.cfg.googleEmail || '',
+            createdAt: Date.now(),
+            deviceId: CC.getDeviceId(),
+            status: 'queued',
+            ops
+          });
+        }
+
+        for (const rec of toPut) stashStore.put(rec);
+        if (queueOutbox && ops.length > 0) {
+          metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: nextQueue } });
+        }
+        putCount = toPut.length;
+        pendingCount = nextQueue.length;
+      });
     });
-    if (queueOutbox && ops.length > 0) CC.setPendingCloudChanges(nextQueue.length);
-    return { count: toPut.length, pendingCount: nextQueue.length };
+    if (queueOutbox && putCount > 0) CC.setPendingCloudChanges(pendingCount);
+    return { count: putCount, pendingCount };
   });
 
   // Deduplicate & deterministically merge records sharing a verified (discogs_account, discogs_id, discogs_instance_id)
@@ -4215,7 +4409,8 @@
     const email = await identifyGoogleAccount();
     const preLocalStash = await CC.idbGetAll('stash');
     const preLocalSpotify = (await CC.idbGet('meta', 'spotify_profile'))?.value || null;
-    const hasLocalDataPre = preLocalStash.length > 0 || Boolean(preLocalSpotify?.tasteDna || preLocalSpotify?.softSpots || preLocalSpotify?.totalTracks);
+    const preOutboxQueue = await CC.getCloudOutbox();
+    const hasLocalDataPre = preLocalStash.length > 0 || preOutboxQueue.length > 0 || Boolean(preLocalSpotify?.tasteDna || preLocalSpotify?.softSpots || preLocalSpotify?.totalTracks);
 
     // Account switch protection: pause and warn before mixing two different Google accounts
     if (CC.cfg.googleBoundEmail && CC.cfg.googleBoundEmail !== email && hasLocalDataPre) {
@@ -4231,8 +4426,10 @@
     const listing = _prefetchedListing || await listAppDataFiles();
     const { map: fileMap, v2Batches, v2Secrets, legacyDeltas } = listing;
 
-    // Read ALL present snapshot files (both softspot_state.json AND cratecheck_state.json if both exist!)
-    const legacySnapshotFiles = GDRIVE_LEGACY_STATE_NAMES.map(n => fileMap.get(n)).filter(Boolean);
+    // Read ALL present snapshot files (including multiple softspot_state.json / cratecheck_state.json files, oldest -> newest!)
+    const legacySnapshotFiles = Array.isArray(listing.snapshotFiles) && listing.snapshotFiles.length
+      ? listing.snapshotFiles
+      : GDRIVE_LEGACY_STATE_NAMES.map(n => fileMap.get(n)).filter(Boolean);
     const hasCloudData = Boolean(legacySnapshotFiles.length > 0 || v2Batches.size > 0 || legacyDeltas.length > 0);
     const preSyncMeta = await CC.getCloudSyncMeta();
     const alreadyAppliedIds = preSyncMeta?.appliedBatchIds || {};
@@ -4438,28 +4635,42 @@
 
     // E. Download all needed gdrive:img_<hash>.webp photos over the network BEFORE acquiring the local commit lock!
     const neededPhotoNames = new Set();
-    const collectGdriveRef = (val) => {
-      const s = String(val || '');
-      if (s.startsWith('gdrive:')) neededPhotoNames.add(s.slice(7));
+    const collectItemPhotoRefs = (it, targetSet) => {
+      if (!it || typeof it !== 'object') return;
+      const addRef = (val) => {
+        const s = String(val || '');
+        if (s.startsWith('gdrive:')) targetSet.add(s.slice(7));
+      };
+      if (it.photo_slots && typeof it.photo_slots === 'object') {
+        addRef(it.photo_slots.front);
+        addRef(it.photo_slots.back);
+        if (Array.isArray(it.photo_slots.extras)) it.photo_slots.extras.forEach(addRef);
+      }
+      if (Array.isArray(it.thumbs)) it.thumbs.forEach(addRef);
+      addRef(it.thumb_data_url);
+      addRef(it.spine_thumb_url);
+      addRef(it.spine_source_url);
     };
-    cloudRawItems.forEach(it => {
-      if (Array.isArray(it.thumbs)) it.thumbs.forEach(collectGdriveRef);
-      collectGdriveRef(it.thumb_data_url);
-      collectGdriveRef(it.spine_thumb_url);
-      collectGdriveRef(it.spine_source_url);
-    });
-    preLocalStash.forEach(it => {
-      if (Array.isArray(it.thumbs)) it.thumbs.forEach(collectGdriveRef);
-      collectGdriveRef(it.thumb_data_url);
-      collectGdriveRef(it.spine_thumb_url);
-      collectGdriveRef(it.spine_source_url);
-    });
+
+    const batchPhotoRefs = new Map(); // batchId -> Set<fname>
+    for (const b of loadedBatches) {
+      const refSet = new Set();
+      for (const op of (b.ops || [])) {
+        if (op?.type === 'upsert_stash' && op.record) collectItemPhotoRefs(op.record, refSet);
+      }
+      if (refSet.size > 0) batchPhotoRefs.set(b.batchId, refSet);
+    }
+
+    cloudRawItems.forEach(it => collectItemPhotoRefs(it, neededPhotoNames));
+    preLocalStash.forEach(it => collectItemPhotoRefs(it, neededPhotoNames));
 
     let downloadedPhotos = 0;
     const dlCache = new Map();
+    const failedPhotoNames = new Set();
     for (const fname of neededPhotoNames) {
       const fInfo = fileMap.get(fname);
       if (!fInfo?.id) {
+        failedPhotoNames.add(fname);
         partialErrors.push(`Missing photo asset ${fname} on Drive`);
         continue;
       }
@@ -4471,6 +4682,7 @@
         dlCache.set(fname, dataUrl);
         downloadedPhotos++;
       } catch (e) {
+        failedPhotoNames.add(fname);
         partialErrors.push(`Failed downloading ${fname}: ${e.message}`);
       }
     }
@@ -4487,6 +4699,9 @@
 
       let appliedBatchCount = 0;
       seenRemoteBatchIds.forEach(bid => {
+        const refs = batchPhotoRefs.get(bid);
+        const hasFailedPhoto = refs ? Array.from(refs).some(fn => failedPhotoNames.has(fn)) : false;
+        if (hasFailedPhoto) return; // Keep unapplied so next sync retries failed photo downloads!
         if (!syncMeta.appliedBatchIds[bid]) appliedBatchCount++;
         syncMeta.appliedBatchIds[bid] = Date.now();
       });
@@ -4567,23 +4782,35 @@
         combinedBeforeDedupe.push(rec);
       }
 
-      // Hydrate gdrive: refs from pre-downloaded dlCache BEFORE duplicate dedupe so local data:image/ & hydrated photos match cleanly
-      const hydrateFromCache = (val, localFallbackVal = '') => {
+      // Hydrate gdrive: refs from pre-downloaded dlCache BEFORE duplicate dedupe.
+      // CRITICAL: If a gdrive:<fname> failed to download, ALWAYS preserve the unresolved gdrive:<fname> ref
+      // (NEVER overwrite it with a stale local data:image/ fallback!) so the next sync retries it cleanly.
+      const hydrateFromCache = (val) => {
         const s = String(val || '');
         if (!s.startsWith('gdrive:')) return s;
         const fname = s.slice(7);
         if (dlCache.has(fname)) return dlCache.get(fname);
-        return localFallbackVal && localFallbackVal.startsWith('data:image/') ? localFallbackVal : s;
+        return s;
       };
 
       for (const item of combinedBeforeDedupe) {
-        const prevLoc = localBySync.get(item.sync_id) || {};
-        if (Array.isArray(item.thumbs)) {
-          item.thumbs = item.thumbs.map((t, i) => hydrateFromCache(t, Array.isArray(prevLoc.thumbs) ? (prevLoc.thumbs[i] || '') : '')).filter(Boolean);
+        if (item.photo_slots && typeof item.photo_slots === 'object') {
+          item.photo_slots = {
+            front: hydrateFromCache(item.photo_slots.front || ''),
+            back: hydrateFromCache(item.photo_slots.back || ''),
+            extras: Array.isArray(item.photo_slots.extras) ? item.photo_slots.extras.map(hydrateFromCache).filter(Boolean) : []
+          };
+          const derived = CC.deriveThumbsFromSlots(item.photo_slots, item.discogs_thumb || '');
+          item.thumbs = derived.thumbs;
+          item.thumb_data_url = derived.thumb_data_url;
+        } else {
+          if (Array.isArray(item.thumbs)) {
+            item.thumbs = item.thumbs.map(hydrateFromCache).filter(Boolean);
+          }
+          if (item.thumb_data_url) item.thumb_data_url = hydrateFromCache(item.thumb_data_url);
         }
-        if (item.thumb_data_url) item.thumb_data_url = hydrateFromCache(item.thumb_data_url, prevLoc.thumb_data_url || '');
-        if (item.spine_thumb_url) item.spine_thumb_url = hydrateFromCache(item.spine_thumb_url, prevLoc.spine_thumb_url || '');
-        if (item.spine_source_url) item.spine_source_url = hydrateFromCache(item.spine_source_url, prevLoc.spine_source_url || '');
+        if (item.spine_thumb_url) item.spine_thumb_url = hydrateFromCache(item.spine_thumb_url);
+        if (item.spine_source_url) item.spine_source_url = hydrateFromCache(item.spine_source_url);
       }
 
       // Automatically detect & deterministically merge any verified Discogs duplicate copies!
@@ -4840,25 +5067,32 @@
       CC.persistCfg();
     }
 
-    // 2. Coalesce redundant queued outbox batches, then atomically snapshot & mark 'uploading' under commit lock BEFORE network writes
+    // 2. Coalesce redundant queued outbox batches, then atomically snapshot & mark matching-account batches 'uploading' inside ONE readwrite transaction
     await CC.coalesceCloudOutbox();
-    const { batchesToUpload, snapshotState } = await withLocalCommitLock(async () => {
-      const currentOutbox = await CC.getCloudOutbox();
-      const marked = currentOutbox.map(b => ({ ...b, status: 'uploading' }));
-      if (marked.length > 0) {
-        await CC.idbAtomicWrite(({ metaStore }) => {
+    const activeEmailNorm = String(email || '').trim().toLowerCase();
+    const batchMatchesActiveAccount = (b) => {
+      const bAcct = String(b?.accountEmail || '').trim().toLowerCase();
+      return !bAcct || bAcct === activeEmailNorm;
+    };
+
+    const batchesToUpload = [];
+    await withLocalCommitLock(async () => {
+      await CC.idbAtomicWrite(({ metaStore }) => {
+        const req = metaStore.get(CLOUD_OUTBOX_KEY);
+        req.onsuccess = () => {
+          const currentOutbox = Array.isArray(req.result?.value?.queue) ? req.result.value.queue : [];
+          if (!currentOutbox.length) return;
+          const marked = currentOutbox.map(b => {
+            if (batchMatchesActiveAccount(b)) {
+              const mb = { ...b, status: 'uploading' };
+              batchesToUpload.push(mb);
+              return mb;
+            }
+            return b; // Leave another account's pending batch strictly isolated!
+          });
           metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: marked } });
-        });
-      }
-      const localStash = await CC.idbGetAll('stash');
-      const localDeleted = (await CC.idbGet('meta', 'deleted_sync_ids'))?.value || {};
-      const localAliases = await CC.getSyncIdAliases();
-      const localSpotify = (await CC.idbGet('meta', 'spotify_profile'))?.value || null;
-      const localDiscogsIdx = (await CC.idbGet('meta', 'discogs_collection_index'))?.value || null;
-      return {
-        batchesToUpload: marked,
-        snapshotState: { localStash, localDeleted, localAliases, localSpotify, localDiscogsIdx }
-      };
+        };
+      });
     });
 
     let uploadedPhotos = 0;
@@ -4886,12 +5120,27 @@
     const dehydrateRecord = async (rec) => {
       const out = { ...rec };
       delete out.id;
-      if (Array.isArray(out.thumbs)) {
-        const nextT = [];
-        for (const t of out.thumbs) nextT.push(await uploadPhotoIfMissing(t));
-        out.thumbs = nextT;
+      if (out.photo_slots && typeof out.photo_slots === 'object') {
+        const extras = [];
+        for (const e of (Array.isArray(out.photo_slots.extras) ? out.photo_slots.extras : [])) {
+          extras.push(await uploadPhotoIfMissing(e));
+        }
+        out.photo_slots = {
+          front: out.photo_slots.front ? await uploadPhotoIfMissing(out.photo_slots.front) : '',
+          back: out.photo_slots.back ? await uploadPhotoIfMissing(out.photo_slots.back) : '',
+          extras: extras.filter(Boolean)
+        };
+        const derived = CC.deriveThumbsFromSlots(out.photo_slots, out.discogs_thumb || '');
+        out.thumbs = derived.thumbs;
+        out.thumb_data_url = derived.thumb_data_url;
+      } else {
+        if (Array.isArray(out.thumbs)) {
+          const nextT = [];
+          for (const t of out.thumbs) nextT.push(await uploadPhotoIfMissing(t));
+          out.thumbs = nextT;
+        }
+        if (out.thumb_data_url) out.thumb_data_url = await uploadPhotoIfMissing(out.thumb_data_url);
       }
-      if (out.thumb_data_url) out.thumb_data_url = await uploadPhotoIfMissing(out.thumb_data_url);
       if (out.spine_thumb_url) out.spine_thumb_url = await uploadPhotoIfMissing(out.spine_thumb_url);
       if (out.spine_source_url) out.spine_source_url = await uploadPhotoIfMissing(out.spine_source_url);
       return out;
@@ -4955,20 +5204,30 @@
       await uploadAppDataMultipart(`ss_v2_secrets_${secBatchId}.json`, secBlob, 'application/json');
     }
 
-    // 3. Atomically acknowledge ONLY uploaded batchIds under commit lock, preserving ANY batch queued mid-upload!
-    const { remainingQueue, finalStashCount } = await withLocalCommitLock(async () => {
-      const latestOutbox = await CC.getCloudOutbox();
-      const remaining = latestOutbox.filter(b => !acknowledgedBatchIds.has(b.batchId));
-      const syncMeta = await CC.getCloudSyncMeta();
-      acknowledgedBatchIds.forEach(bid => { syncMeta.appliedBatchIds[bid] = Date.now(); });
+    // 3. Atomically acknowledge ONLY uploaded batchIds inside ONE readwrite transaction, preserving ANY batch queued mid-upload or from another tab!
+    let remainingQueue = [];
+    let finalStashCount = 0;
+    await withLocalCommitLock(async () => {
+      await CC.idbAtomicWrite(({ stashStore, metaStore }) => {
+        readMetaInTx(metaStore, [CLOUD_OUTBOX_KEY, CLOUD_META_KEY], (m) => {
+          const latestOutbox = Array.isArray(m[CLOUD_OUTBOX_KEY]?.queue) ? m[CLOUD_OUTBOX_KEY].queue : [];
+          const remaining = latestOutbox.filter(b => !acknowledgedBatchIds.has(b.batchId));
+          const v = m[CLOUD_META_KEY] || {};
+          const syncMeta = {
+            appliedBatchIds: Object.assign({}, v.appliedBatchIds || {}),
+            conflicts: Array.isArray(v.conflicts) ? v.conflicts : [],
+            deviceId: v.deviceId || CC.getDeviceId()
+          };
+          acknowledgedBatchIds.forEach(bid => { syncMeta.appliedBatchIds[bid] = Date.now(); });
 
-      await CC.idbAtomicWrite(({ metaStore }) => {
-        metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: remaining } });
-        metaStore.put({ key: CLOUD_META_KEY, value: syncMeta });
+          metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: remaining } });
+          metaStore.put({ key: CLOUD_META_KEY, value: syncMeta });
+          remainingQueue = remaining;
+        });
+        const cntReq = stashStore.getAll();
+        cntReq.onsuccess = () => { finalStashCount = (cntReq.result || []).length; };
       });
-      CC.setPendingCloudChanges(remaining.length);
-      const countNow = (await CC.idbGetAll('stash')).length;
-      return { remainingQueue: remaining, finalStashCount: countNow };
+      CC.setPendingCloudChanges(remainingQueue.length);
     });
 
     CC.cfg.googleLastSyncAt = Date.now();
@@ -4997,6 +5256,203 @@
 
   // Alias for backward compatibility
   CC.syncWithGoogleDrive = CC.syncNowWithGoogleDrive;
+
+  // Atomic, idempotent JSON backup restore inside ONE readwrite IndexedDB transaction:
+  // merges by canonical sync_id via mergeStashRecordsDeterministic (preserving original rev/updated_at/field_revs),
+  // merges deleted_sync_ids & sync_id_aliases, dedupes Discogs copies, and merges spotifyProfile by syncedAt/dnaUpdatedAt.
+  CC.importJsonBackupAtomic = async (data) => withLocalCommitLock(async () => {
+    const incomingStash = Array.isArray(data?.stash) ? data.stash : [];
+    const incomingDeleted = (data?.deleted_sync_ids && typeof data.deleted_sync_ids === 'object' && !Array.isArray(data.deleted_sync_ids))
+      ? data.deleted_sync_ids
+      : {};
+    const incomingAliases = (data?.sync_id_aliases && typeof data.sync_id_aliases === 'object' && !Array.isArray(data.sync_id_aliases))
+      ? data.sync_id_aliases
+      : {};
+    const incomingSpotify = (data?.spotifyProfile && typeof data.spotifyProfile === 'object')
+      ? data.spotifyProfile
+      : null;
+
+    let totalStashCount = 0;
+    let changedStashCount = 0;
+    let mergedSpotifyOut = null;
+    let pendingCount = 0;
+
+    await CC.idbAtomicWrite(({ stashStore, metaStore }) => {
+      const allReq = stashStore.getAll();
+      allReq.onsuccess = () => {
+        const liveRows = Array.isArray(allReq.result) ? allReq.result : [];
+        readMetaInTx(metaStore, ['deleted_sync_ids', SYNC_ID_ALIASES_KEY, 'spotify_profile', CLOUD_OUTBOX_KEY], (m) => {
+          const liveDeleted = Object.assign({}, m.deleted_sync_ids || {});
+          const liveAliases = Object.assign({}, m[SYNC_ID_ALIASES_KEY] || {});
+          const liveSpotify = m.spotify_profile || null;
+          const liveQueue = Array.isArray(m[CLOUD_OUTBOX_KEY]?.queue) ? m[CLOUD_OUTBOX_KEY].queue.slice() : [];
+
+          // 1. Merge aliases
+          let mergedAliases = mergeAliasMaps(liveAliases, incomingAliases);
+
+          // 2. Merge tombstones (newest timestamp wins per canonical sync_id)
+          const mergedDeleted = {};
+          const foldDel = (rawSid, entry) => {
+            const cSid = resolveCanonicalSyncId(rawSid, mergedAliases);
+            if (!cSid) return;
+            const nextTs = normTombstoneTs(entry);
+            const prevTs = normTombstoneTs(mergedDeleted[cSid]);
+            if (nextTs > prevTs) mergedDeleted[cSid] = typeof entry === 'object' ? { ...entry } : { ts: nextTs };
+          };
+          Object.entries(liveDeleted).forEach(([k, v]) => foldDel(k, v));
+          Object.entries(incomingDeleted).forEach(([k, v]) => foldDel(k, v));
+
+          // 3. Index live stash by canonical sync_id
+          const bySyncId = new Map();
+          const liveSnapshotJsonBySid = new Map();
+          liveRows.forEach(r => {
+            const copy = { ...r };
+            if (!copy.sync_id) copy.sync_id = CC.generateSyncId();
+            copy.sync_id = resolveCanonicalSyncId(copy.sync_id, mergedAliases);
+            const noId = { ...copy };
+            delete noId.id;
+            liveSnapshotJsonBySid.set(copy.sync_id, JSON.stringify(noId));
+            if (bySyncId.has(copy.sync_id)) {
+              const prev = bySyncId.get(copy.sync_id);
+              const res = CC.mergeStashRecordsDeterministic(prev, copy);
+              bySyncId.set(copy.sync_id, { ...res.merged, id: prev.id });
+            } else {
+              bySyncId.set(copy.sync_id, copy);
+            }
+          });
+
+          // 4. Merge incoming stash preserving original rev / updated_at / field_revs / _fieldMeta
+          for (const rawItem of incomingStash) {
+            if (!rawItem || typeof rawItem !== 'object') continue;
+            const imp = { ...rawItem };
+            delete imp.id;
+            if (!imp.sync_id) imp.sync_id = CC.generateSyncId();
+            imp.sync_id = resolveCanonicalSyncId(imp.sync_id, mergedAliases);
+            if (!imp.photo_slots) imp.photo_slots = CC.normalizePhotoSlots(imp);
+            const impDerived = CC.deriveThumbsFromSlots(imp.photo_slots, imp.discogs_thumb || '');
+            imp.thumbs = impDerived.thumbs;
+            imp.thumb_data_url = impDerived.thumb_data_url;
+            if (!imp.field_revs || typeof imp.field_revs !== 'object') imp.field_revs = {};
+            if (!imp.created_at) imp.created_at = Number(imp.updated_at || 0);
+
+            const delTs = normTombstoneTs(mergedDeleted[imp.sync_id]);
+            const impTs = Number(imp.updated_at || imp.created_at || 0);
+            if (delTs > 0 && delTs >= impTs) continue;
+
+            if (bySyncId.has(imp.sync_id)) {
+              const existing = bySyncId.get(imp.sync_id);
+              const res = CC.mergeStashRecordsDeterministic(existing, imp);
+              const nextRec = { ...res.merged, sync_id: imp.sync_id };
+              if (existing.id !== undefined) nextRec.id = existing.id;
+              bySyncId.set(imp.sync_id, nextRec);
+            } else {
+              bySyncId.set(imp.sync_id, imp);
+            }
+          }
+
+          // 5. Dedupe any duplicate Discogs copies deterministically
+          const repair = CC.dedupeAndMergeStashRecords(Array.from(bySyncId.values()), mergedAliases);
+          mergedAliases = repair.aliases;
+          const finalRows = repair.records.filter(r => {
+            const delTs = normTombstoneTs(mergedDeleted[r.sync_id]);
+            const recTs = Number(r.updated_at || r.created_at || 0);
+            return !(delTs > 0 && delTs >= recTs);
+          });
+
+          // Determine IDs to remove (deduped or newly tombstoned)
+          const survivingIds = new Set(finalRows.map(r => r.id).filter(id => id !== undefined && id !== null));
+          const idsToDelete = new Set(repair.duplicateLocalIdsToDelete || []);
+          liveRows.forEach(r => {
+            if (r.id !== undefined && r.id !== null && !survivingIds.has(r.id)) {
+              idsToDelete.add(r.id);
+            }
+          });
+
+          // Persist changed/new rows & collect outbox ops ONLY for rows that actually changed
+          const ops = [];
+          idsToDelete.forEach(delId => stashStore.delete(delId));
+          finalRows.forEach(r => {
+            const noId = { ...r };
+            delete noId.id;
+            const nextJson = JSON.stringify(noId);
+            const prevJson = liveSnapshotJsonBySid.get(r.sync_id);
+            if (nextJson !== prevJson) {
+              stashStore.put(r);
+              ops.push({ type: 'upsert_stash', sync_id: r.sync_id, record: noId });
+              changedStashCount++;
+            }
+          });
+
+          // Queue any newly imported tombstones
+          Object.entries(mergedDeleted).forEach(([sid, entry]) => {
+            if (normTombstoneTs(entry) > normTombstoneTs(liveDeleted[sid])) {
+              ops.push({ type: 'delete_stash', sync_id: sid, deleted: entry });
+            }
+          });
+
+          // 6. Merge spotifyProfile by syncedAt / dnaUpdatedAt
+          let nextSpotify = liveSpotify ? { ...liveSpotify } : null;
+          let spotifyChanged = false;
+          if (incomingSpotify) {
+            if (!nextSpotify) {
+              nextSpotify = { ...incomingSpotify };
+              spotifyChanged = true;
+            } else {
+              const incSync = Number(incomingSpotify.syncedAt || 0);
+              const curSync = Number(nextSpotify.syncedAt || 0);
+              const incDna = Number(incomingSpotify.dnaUpdatedAt || 0);
+              const curDna = Number(nextSpotify.dnaUpdatedAt || 0);
+              const base = incSync > curSync ? { ...incomingSpotify } : { ...nextSpotify };
+              if (incDna > curDna) {
+                base.tasteDna = incomingSpotify.tasteDna || '';
+                base.softSpots = incomingSpotify.softSpots || '';
+                base.dnaUpdatedAt = incDna;
+              } else if (curDna >= incDna) {
+                base.tasteDna = nextSpotify.tasteDna || '';
+                base.softSpots = nextSpotify.softSpots || '';
+                base.dnaUpdatedAt = curDna;
+              }
+              if (JSON.stringify(base) !== JSON.stringify(nextSpotify)) {
+                nextSpotify = base;
+                spotifyChanged = true;
+              }
+            }
+          }
+          if (spotifyChanged && nextSpotify) {
+            metaStore.put({ key: 'spotify_profile', value: nextSpotify });
+            ops.push({ type: 'spotify_profile', profile: nextSpotify });
+          }
+
+          metaStore.put({ key: 'deleted_sync_ids', value: mergedDeleted });
+          metaStore.put({ key: SYNC_ID_ALIASES_KEY, value: mergedAliases });
+
+          if (ops.length > 0) {
+            liveQueue.push({
+              batchId: CC.newBatchId(),
+              accountEmail: CC.cfg.googleBoundEmail || CC.cfg.googleEmail || '',
+              createdAt: Date.now(),
+              deviceId: CC.getDeviceId(),
+              status: 'queued',
+              ops
+            });
+            metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: liveQueue } });
+          }
+
+          totalStashCount = finalRows.length;
+          mergedSpotifyOut = nextSpotify;
+          pendingCount = liveQueue.length;
+        });
+      };
+    });
+
+    CC.setPendingCloudChanges(pendingCount);
+    return {
+      totalStashCount,
+      changedStashCount,
+      spotifyProfile: mergedSpotifyOut,
+      pendingCount
+    };
+  });
 
   window.CC = CC;
 })();

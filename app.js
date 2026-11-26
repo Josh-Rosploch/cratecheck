@@ -47,6 +47,7 @@
   const DISCOGS_FRESH_MS = 5 * 60 * 1000;
 
   let stagedPhotos = [];
+  let stagedSlots = { front: null, back: null, spine: null, extras: [] };
   let stagedSpineThumbUrl = '';
   let stagedSpineSourceUrl = '';
   let stagedSpineFlipped = false;
@@ -55,6 +56,10 @@
   let stagedUpc = '';
   let camIgnoredUpc = '';
   let camIgnoredUpcMisses = 0;
+  let camOpenSeq = 0;
+  let inspectSeq = 0;
+  let stageSeq = 0;
+  let batchAutoCropCancelled = false;
   let activeFolderMoveConflict = null;
   let currentExtracted = null;
   let currentCandidates = [];
@@ -165,9 +170,78 @@
     document.body.classList.toggle('has-status', isShowing);
   }
 
+  function syncStagedPhotosCompat() {
+    const arr = [];
+    if (stagedSlots.front) arr.push(stagedSlots.front);
+    if (stagedSlots.back) arr.push(stagedSlots.back);
+    if (stagedSlots.spine) arr.push(stagedSlots.spine);
+    if (Array.isArray(stagedSlots.extras)) {
+      stagedSlots.extras.forEach(p => { if (p) arr.push(p); });
+    }
+    stagedPhotos = arr;
+    return arr;
+  }
+
+  function getStagedSlotEntries() {
+    const out = [];
+    if (stagedSlots.front) out.push({ slotKey: 'front', extraIdx: -1, label: 'FRONT', tag: '[Front]', photo: stagedSlots.front });
+    if (stagedSlots.back) out.push({ slotKey: 'back', extraIdx: -1, label: 'BACK', tag: '[Back]', photo: stagedSlots.back });
+    if (stagedSlots.spine) out.push({ slotKey: 'spine', extraIdx: -1, label: 'SPINE', tag: '[Spine]', photo: stagedSlots.spine });
+    (stagedSlots.extras || []).forEach((p, i) => {
+      if (p) out.push({ slotKey: 'extra', extraIdx: i, label: i === 0 ? 'EXTRA' : `EXTRA ${i + 1}`, tag: `[Extra ${i + 1}]`, photo: p });
+    });
+    return out;
+  }
+
+  function getStagedPhotoCount() {
+    return (stagedSlots.front ? 1 : 0) + (stagedSlots.back ? 1 : 0) + (stagedSlots.spine ? 1 : 0) + (stagedSlots.extras || []).filter(Boolean).length;
+  }
+
+  function assignPhotoToFirstEmptySlot(pair) {
+    if (!stagedSlots.front) { stagedSlots.front = pair; syncStagedPhotosCompat(); return { slotKey: 'front', extraIdx: -1 }; }
+    if (!stagedSlots.back) { stagedSlots.back = pair; syncStagedPhotosCompat(); return { slotKey: 'back', extraIdx: -1 }; }
+    if (!stagedSlots.spine) { stagedSlots.spine = pair; syncStagedPhotosCompat(); return { slotKey: 'spine', extraIdx: -1 }; }
+    stagedSlots.extras.push(pair);
+    const eIdx = stagedSlots.extras.length - 1;
+    syncStagedPhotosCompat();
+    return { slotKey: 'extra', extraIdx: eIdx };
+  }
+
+  function getStagedSlotPhoto(slotKey, extraIdx = -1) {
+    if (slotKey === 'front') return stagedSlots.front;
+    if (slotKey === 'back') return stagedSlots.back;
+    if (slotKey === 'spine') return stagedSlots.spine;
+    if (slotKey === 'extra') return (stagedSlots.extras || [])[extraIdx] || null;
+    return null;
+  }
+
+  function isOwnedByActiveDiscogsAccount(itemOrAccount) {
+    const curAcct = String(cfg.discogsUser || '').trim().toLowerCase();
+    const rawOwner = typeof itemOrAccount === 'string'
+      ? itemOrAccount
+      : (itemOrAccount?.discogs_account ?? itemOrAccount?.account ?? '');
+    const ownerAcct = String(rawOwner || '').trim().toLowerCase();
+    if (!ownerAcct) return true;
+    if (!curAcct) return false;
+    return ownerAcct === curAcct;
+  }
+
+  function isUnresolvedDriveRef(src) {
+    return String(src || '').trim().startsWith('gdrive:');
+  }
+
+  function renderPhotoImgOrPlaceholder(src, cls = '', extraAttrs = '') {
+    const s = String(src || '').trim();
+    if (isUnresolvedDriveRef(s)) {
+      return `<div class="photo-unresolved-ph ${cls}" title="Photo stored on Google Drive — tap Sync with Cloud to download"><span>☁️</span><span>Sync Drive</span></div>`;
+    }
+    return `<img ${cls ? `class="${cls}" ` : ''}src="${esc(s)}" ${extraAttrs} />`;
+  }
+
   window.cancelActiveAI = () => {
     deepSearchCancelled = true;
     recalibratingStash = false;
+    batchAutoCropCancelled = true;
     CC.cancelAI();
     CC.cancelSpotifySync();
     CC.cancelDiscogsEnrich();
@@ -350,6 +424,7 @@
   }
 
   function hideCameraUI() {
+    camOpenSeq++;
     if (camUpcRaf) cancelAnimationFrame(camUpcRaf);
     camUpcRaf = null;
     camIgnoredUpc = '';
@@ -1031,7 +1106,8 @@ Return ONLY valid JSON:
       const rotRaw = Number(res?.spine_rotation);
       const spineRotation = [0, 90, 180, 270].includes(rotRaw) ? rotRaw : 0;
       return { box_2d: cleanBox, spine_rotation: isSpine ? spineRotation : 0 };
-    } catch (_) {
+    } catch (err) {
+      if (err?.name === 'AbortError') throw err;
       return { box_2d: null, spine_rotation: 0 };
     }
   }
@@ -1060,10 +1136,8 @@ Return ONLY valid JSON:
       const nw = img.naturalWidth || img.width;
       const nh = img.naturalHeight || img.height;
       if (!nw || !nh) { toast('Could not load photo for cropping'); return; }
-      const spec = getPhotoQualitySpec();
-      const { width, height } = spec.raw
-        ? { width: nw, height: nh }
-        : fitDims(nw, nh, Math.max(1800, spec.maxEdge || 1800));
+      // Preview canvas capped for smooth UI; actual applyCropModal slices from full-res origImg directly!
+      const { width, height } = fitDims(nw, nh, 1800);
       let c = document.createElement('canvas');
       c.width = width;
       c.height = height;
@@ -1078,6 +1152,9 @@ Return ONLY valid JSON:
       cropState.active = true;
       cropState.mode = mode === 'spine' ? 'spine' : 'cover';
       cropState.srcCanvas = c;
+      cropState.origImg = img;
+      cropState.origDataUrl = dataUrl;
+      cropState.rotationDeg = initRot;
       cropState.rotatedInModal = Boolean(initRot);
       if (initialRect && typeof initialRect === 'object' && Number(initialRect.w) >= 0.05 && Number(initialRect.h) >= 0.05) {
         cropState.rect = {
@@ -1127,6 +1204,8 @@ Return ONLY valid JSON:
       let box = res.box_2d;
       if (cropState.mode === 'spine' && res.spine_rotation) {
         cropState.srcCanvas = rotateCanvasByDeg(cropState.srcCanvas, res.spine_rotation);
+        cropState.rotationDeg = ((Number(cropState.rotationDeg) || 0) + res.spine_rotation) % 360;
+        cropState.rotatedInModal = true;
         if (box) box = rotateBox2dClockwise(box, res.spine_rotation);
       }
       const nextRect = box ? box2dToNormRect(box, 0.025, cropState.mode === 'spine' ? 25 : 150) : null;
@@ -1148,6 +1227,7 @@ Return ONLY valid JSON:
   window.rotateCropImage90 = () => {
     if (!cropState.active || !cropState.srcCanvas) return;
     cropState.srcCanvas = rotateCanvasByDeg(cropState.srcCanvas, 90);
+    cropState.rotationDeg = ((Number(cropState.rotationDeg) || 0) + 90) % 360;
     cropState.rotatedInModal = true;
     cropState.rect = defaultCropRectForMode(cropState.mode);
     renderCropCanvas();
@@ -1168,12 +1248,32 @@ Return ONLY valid JSON:
 
   window.applyCropModal = async () => {
     if (!cropState.active || !cropState.srcCanvas) return;
-    const src = cropState.srcCanvas;
     const r = { ...cropState.rect };
-    const sx = Math.max(0, Math.round(r.x * src.width));
-    const sy = Math.max(0, Math.round(r.y * src.height));
-    const sw = Math.max(16, Math.min(src.width - sx, Math.round(r.w * src.width)));
-    const sh = Math.max(16, Math.min(src.height - sy, Math.round(r.h * src.height)));
+    const finalRotDeg = ((Number(cropState.rotationDeg) % 360) + 360) % 360;
+
+    // Perform actual crop & rotation directly from the FULL-RESOLUTION original image,
+    // then scale once to getPhotoQualitySpec() for exact parity with cropImageByBox!
+    let fullCanvas = cropState.srcCanvas;
+    if (cropState.origImg && cropState.origImg.naturalWidth && cropState.origImg.naturalHeight) {
+      const nw = cropState.origImg.naturalWidth;
+      const nh = cropState.origImg.naturalHeight;
+      const swap = finalRotDeg === 90 || finalRotDeg === 270;
+      const rc = document.createElement('canvas');
+      rc.width = swap ? nh : nw;
+      rc.height = swap ? nw : nh;
+      const rctx = rc.getContext('2d');
+      rctx.imageSmoothingEnabled = true;
+      rctx.imageSmoothingQuality = 'high';
+      rctx.translate(rc.width / 2, rc.height / 2);
+      rctx.rotate((finalRotDeg * Math.PI) / 180);
+      rctx.drawImage(cropState.origImg, -nw / 2, -nh / 2, nw, nh);
+      fullCanvas = rc;
+    }
+
+    const sx = Math.max(0, Math.round(r.x * fullCanvas.width));
+    const sy = Math.max(0, Math.round(r.y * fullCanvas.height));
+    const sw = Math.max(16, Math.min(fullCanvas.width - sx, Math.round(r.w * fullCanvas.width)));
+    const sh = Math.max(16, Math.min(fullCanvas.height - sy, Math.round(r.h * fullCanvas.height)));
 
     const spec = getPhotoQualitySpec();
     let dstW = sw, dstH = sh;
@@ -1192,18 +1292,18 @@ Return ONLY valid JSON:
     const ctx = outCanvas.getContext('2d');
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(src, sx, sy, sw, sh, 0, 0, dstW, dstH);
+    ctx.drawImage(fullCanvas, sx, sy, sw, sh, 0, 0, dstW, dstH);
 
     const croppedWebp = canvasToDataUrl(outCanvas, 'image/webp', spec.quality);
-    const workingSourceWebp = canvasToDataUrl(src, 'image/webp', spec.quality);
+    const workingSourceWebp = cropState.origDataUrl || canvasToDataUrl(cropState.srcCanvas, 'image/webp', spec.quality);
     const cb = cropState.onApply;
+    const wasRotated = Boolean(cropState.rotatedInModal || finalRotDeg !== 0);
 
-    const wasRotated = Boolean(cropState.rotatedInModal);
     hideCropModalUI();
     if (history.state?.modal === 'crop') {
       try { history.replaceState({ view: currentView, modal: activeStashItem ? 'stashDetail' : null, itemId: activeStashItem?.id || null }, ''); } catch (_) {}
     }
-    if (typeof cb === 'function') await cb(croppedWebp, workingSourceWebp, r, wasRotated);
+    if (typeof cb === 'function') await cb(croppedWebp, workingSourceWebp, r, wasRotated, finalRotDeg);
   };
 
   // ==================== HIGH-RES MEMORY-SAFE IMAGE DECODING ====================
@@ -1741,11 +1841,25 @@ Return ONLY valid JSON:
     return pool[0]?.deviceId || '';
   }
 
-  async function bindStreamToViewfinder(stream, allowPrimaryLensSwitch = true) {
+  function isCameraStillActive(expectedCamSeq) {
+    const modal = document.getElementById('cameraModal');
+    return expectedCamSeq === camOpenSeq && Boolean(modal && !modal.classList.contains('hidden'));
+  }
+
+  async function bindStreamToViewfinder(stream, allowPrimaryLensSwitch = true, expectedCamSeq = camOpenSeq) {
+    if (!isCameraStillActive(expectedCamSeq)) {
+      stream?.getTracks?.().forEach(t => t.stop());
+      return false;
+    }
     const video = document.getElementById('camVideo');
     camStream = stream;
     video.srcObject = stream;
     await video.play();
+    if (!isCameraStillActive(expectedCamSeq)) {
+      stream?.getTracks?.().forEach(t => t.stop());
+      if (camStream === stream) camStream = null;
+      return false;
+    }
 
     let track = camStream.getVideoTracks()[0];
     let caps = track?.getCapabilities ? track.getCapabilities() : {};
@@ -1755,6 +1869,10 @@ Return ONLY valid JSON:
       let stoppedOld = false;
       try {
         const allDevs = await navigator.mediaDevices.enumerateDevices();
+        if (!isCameraStillActive(expectedCamSeq)) {
+          stream?.getTracks?.().forEach(t => t.stop());
+          return false;
+        }
         const curLabel = track.label || '';
         const primaryId = pickPrimaryRearCameraId(allDevs);
         const curDevId = track.getSettings?.()?.deviceId || '';
@@ -1762,22 +1880,27 @@ Return ONLY valid JSON:
           camStream.getTracks().forEach(t => t.stop());
           stoppedOld = true;
           const mainStream = await openHighResCameraStream(primaryId);
-          return await bindStreamToViewfinder(mainStream, false);
+          return await bindStreamToViewfinder(mainStream, false, expectedCamSeq);
         }
       } catch (_) {
-        if (stoppedOld) {
-          // Immediately recover stream if switching to primaryId failed so viewfinder NEVER stays on a stopped stream!
+        if (stoppedOld && isCameraStillActive(expectedCamSeq)) {
           try {
             const recovered = await openHighResCameraStream('');
-            return await bindStreamToViewfinder(recovered, false);
+            return await bindStreamToViewfinder(recovered, false, expectedCamSeq);
           } catch (recErr) {
             hideCameraUI();
             toast('Camera lens switch failed — opening phone camera', 3200);
             document.getElementById(camMode === 'pile' ? 'pileCamInput' : 'nativeCamInput')?.click();
-            return;
+            return false;
           }
         }
       }
+    }
+
+    if (!isCameraStillActive(expectedCamSeq)) {
+      stream?.getTracks?.().forEach(t => t.stop());
+      if (camStream === stream) camStream = null;
+      return false;
     }
 
     camTorchOn = false;
@@ -1804,11 +1927,17 @@ Return ONLY valid JSON:
     }
 
     await refreshCameraLensControls(track);
+    if (!isCameraStillActive(expectedCamSeq)) {
+      stream?.getTracks?.().forEach(t => t.stop());
+      if (camStream === stream) camStream = null;
+      return false;
+    }
     if (camPeakingOn) {
       document.getElementById('camPeakCanvas')?.classList.remove('hidden');
       if (camPeakRaf) cancelAnimationFrame(camPeakRaf);
       camPeakRaf = requestAnimationFrame(runFocusPeakingLoop);
     }
+    return true;
   }
 
   window.cycleCameraLens = async () => {
@@ -1818,6 +1947,7 @@ Return ONLY valid JSON:
     const nextDev = camRearDevices[nextIdx];
     if (!nextDev?.deviceId) return;
 
+    const myCamSeq = ++camOpenSeq;
     const prevStream = camStream;
     if (prevStream) {
       prevStream.getTracks().forEach(t => t.stop());
@@ -1826,14 +1956,19 @@ Return ONLY valid JSON:
 
     try {
       const nextStream = await openHighResCameraStream(nextDev.deviceId);
+      if (!isCameraStillActive(myCamSeq)) {
+        nextStream?.getTracks?.().forEach(t => t.stop());
+        return;
+      }
       cfg.preferredCameraId = nextDev.deviceId;
       CC.persistCfg();
-      await bindStreamToViewfinder(nextStream);
-      toast(`Switched to ${getCameraLensShortLabel(nextDev, nextIdx)}`, 1600);
+      const bound = await bindStreamToViewfinder(nextStream, false, myCamSeq);
+      if (bound) toast(`Switched to ${getCameraLensShortLabel(nextDev, nextIdx)}`, 1600);
     } catch (err) {
+      if (!isCameraStillActive(myCamSeq)) return;
       try {
         const fallbackStream = await openHighResCameraStream('');
-        await bindStreamToViewfinder(fallbackStream);
+        await bindStreamToViewfinder(fallbackStream, false, myCamSeq);
       } catch (_) {}
       toast('Could not switch lens: ' + (err?.message || 'busy'), 2600);
     }
@@ -1872,20 +2007,21 @@ Return ONLY valid JSON:
       return;
     }
 
-    const n = stagedPhotos.length;
+    const entries = getStagedSlotEntries();
+    const n = entries.length;
     thumbsEl.classList.remove('hidden');
-    if (n === 0) { badge.textContent = 'Shot 1: Front + Side A'; badge.className = 'badge badge-blue'; }
-    else if (n === 1) { badge.textContent = 'Shot 2: Back + Side B'; badge.className = 'badge badge-purple'; }
-    else if (n === 2) { badge.textContent = 'Shot 3: Spine (Optional — Auto-Crops)'; badge.className = 'badge badge-green'; }
-    else if (n === 3) { badge.textContent = 'Shot 4: Extra Detail (Optional)'; badge.className = 'badge badge-green'; }
+    if (!stagedSlots.front) { badge.textContent = 'Shot 1: Front + Side A'; badge.className = 'badge badge-blue'; }
+    else if (!stagedSlots.back) { badge.textContent = 'Shot 2: Back + Side B'; badge.className = 'badge badge-purple'; }
+    else if (!stagedSlots.spine) { badge.textContent = 'Shot 3: Spine (Optional — Auto-Crops)'; badge.className = 'badge badge-green'; }
+    else if (n < 4) { badge.textContent = 'Shot 4: Extra Detail (Optional)'; badge.className = 'badge badge-green'; }
     else { badge.textContent = '4/4 Shots Ready'; badge.className = 'badge badge-green'; }
 
     finishBtn.className = n > 0 ? 'btn btn-green btn-sm' : 'btn btn-secondary btn-sm';
     finishBtn.innerHTML = `🔍 Finish &amp; Search (<span id="camCountLbl">${n}</span>)`;
-    thumbsEl.innerHTML = stagedPhotos.map((p, i) => `
-      <div class="cam-thumb-item" onclick="openCameraShotLightbox(${i})" title="Tap to inspect sharpness">
-        <img src="${p.saveWebp}" />
-        <button type="button" class="cam-thumb-remove" onclick="removeCameraShot(${i}, event)" title="Delete shot">×</button>
+    thumbsEl.innerHTML = entries.map((e, i) => `
+      <div class="cam-thumb-item" onclick="openCameraShotLightbox(${i})" title="Tap to inspect ${e.label}">
+        <img src="${e.photo.saveWebp}" />
+        <button type="button" class="cam-thumb-remove" onclick="removeStagedPhoto('${e.slotKey}', ${e.extraIdx}, event)" title="Delete ${e.label}">×</button>
       </div>
     `).join('');
 
@@ -2010,12 +2146,18 @@ Return ONLY valid JSON:
     }
     const modal = document.getElementById('cameraModal');
     const video = document.getElementById('camVideo');
+    const myCamSeq = ++camOpenSeq;
     modal.classList.remove('hidden');
     updateCameraOverlayUI();
 
     try {
       const stream = await openHighResCameraStream();
-      await bindStreamToViewfinder(stream);
+      if (!isCameraStillActive(myCamSeq)) {
+        stream?.getTracks?.().forEach(t => t.stop());
+        return;
+      }
+      const bound = await bindStreamToViewfinder(stream, true, myCamSeq);
+      if (!bound || !isCameraStillActive(myCamSeq)) return;
       try { history.pushState({ view: currentView, modal: 'camera' }, ''); } catch (_) {}
 
       if (camMode === 'single' && 'BarcodeDetector' in window) {
@@ -2086,6 +2228,7 @@ Return ONLY valid JSON:
     flash.classList.add('flash');
     setTimeout(() => flash.classList.remove('flash'), 160);
 
+    const myStageSeq = stageSeq;
     const spec = getPhotoQualitySpec();
     const decodeOpts = camMode === 'pile'
       ? { aiMaxDim: 3072, aiQuality: 0.92, saveMaxDim: 2048, saveQuality: 0.82, rawSave: false, squarePreview: false }
@@ -2123,21 +2266,23 @@ Return ONLY valid JSON:
           updateCameraOverlayUI();
           toast(`Shot ${pilePhotos.length} captured — tap thumb to check sharpness, or Finish & Analyze`);
         } else {
-          const slotIdx = stagedPhotos.length;
+          if (myStageSeq !== stageSeq) return;
           if (!pair.origDataUrl) pair.origDataUrl = pair.apiB64 ? `data:image/jpeg;base64,${pair.apiB64}` : pair.saveWebp;
           pair.autoCropped = false;
           pair.cropBox = null;
-          stagedPhotos.push(pair);
-          if (slotIdx === 2) {
+          pair.rotationDeg = 0;
+          const placed = assignPhotoToFirstEmptySlot(pair);
+          if (placed.slotKey === 'spine') {
             stagedSpineSourceUrl = pair.origDataUrl || pair.saveWebp;
             stagedSpineThumbUrl = pair.saveWebp;
             stagedSpineFlipped = false;
           }
           updateStageUI();
           updateCameraOverlayUI();
-          if (stagedPhotos.length === 1) toast('Front + Side A captured! Flip for Back + Side B');
-          else if (stagedPhotos.length === 2) toast('Back + Side B captured! Snap Spine (optional) or Finish & Search');
-          else if (stagedPhotos.length === 3) toast('Spine captured! Review orientation or tap 🔍 Finish & Search');
+          if (placed.slotKey === 'front') toast('Front + Side A captured! Flip for Back + Side B');
+          else if (placed.slotKey === 'back') toast('Back + Side B captured! Snap Spine (optional) or Finish & Search');
+          else if (placed.slotKey === 'spine') toast('Spine captured! Review orientation or tap 🔍 Finish & Search');
+          else toast('Extra shot captured! Tap 🔍 Finish & Search');
         }
       }
     } catch (err) {
@@ -2148,72 +2293,87 @@ Return ONLY valid JSON:
     }
   };
 
-  async function autoCropStagedPhotosNow(indices = null) {
-    if (!cfg.autoCropPhotos || !CC.isAiReady() || !stagedPhotos.length) return 0;
+  async function autoCropStagedPhotosNow(targetSlots = null) {
+    const entries = getStagedSlotEntries();
+    if (!cfg.autoCropPhotos || !CC.isAiReady() || !entries.length) return 0;
+    const myStageSeq = stageSeq;
+    batchAutoCropCancelled = false;
     const spec = getPhotoQualitySpec();
-    const targets = (Array.isArray(indices) ? indices : stagedPhotos.map((_, i) => i))
-      .filter(i => i >= 0 && i < stagedPhotos.length && stagedPhotos[i] && !stagedPhotos[i].autoCropped);
+
+    const targets = (Array.isArray(targetSlots) ? targetSlots : entries)
+      .filter(e => e && e.photo && !e.photo.autoCropped);
     if (!targets.length) return 0;
 
     let croppedCount = 0;
-    for (let t = 0; t < targets.length; t++) {
-      const idx = targets[t];
-      const p = stagedPhotos[idx];
-      if (!p || p.autoCropped) continue;
-      const isSpine = idx === 2;
-      const lbl = idx === 0 ? 'Front' : (idx === 1 ? 'Back' : (isSpine ? 'Spine' : 'Extra'));
-      setStatus(`✂️ Auto-cropping ${lbl} (${t + 1}/${targets.length})...`, true, { cancellable: true });
-      const srcUrl = p.origDataUrl || (p.apiB64 ? `data:image/jpeg;base64,${p.apiB64}` : p.saveWebp);
-      const res = await autoCropImageWithGemini(srcUrl, isSpine ? 'spine' : 'cover');
-      if (!stagedPhotos[idx] || stagedPhotos[idx] !== p) continue;
+    try {
+      for (let t = 0; t < targets.length; t++) {
+        if (batchAutoCropCancelled || myStageSeq !== stageSeq) break;
+        const entry = targets[t];
+        const p = entry.photo;
+        if (!p || p.autoCropped) continue;
+        const isSpine = entry.slotKey === 'spine';
+        setStatus(`✂️ Auto-cropping ${entry.label} (${t + 1}/${targets.length})...`, true, { cancellable: true });
+        const srcUrl = p.origDataUrl || (p.apiB64 ? `data:image/jpeg;base64,${p.apiB64}` : p.saveWebp);
+        const res = await autoCropImageWithGemini(srcUrl, isSpine ? 'spine' : 'cover');
+        if (batchAutoCropCancelled || myStageSeq !== stageSeq) break;
+        if (getStagedSlotPhoto(entry.slotKey, entry.extraIdx) !== p) continue;
 
-      if (isSpine) {
-        const rot = [0, 90, 180, 270].includes(Number(res.spine_rotation)) ? Number(res.spine_rotation) : 0;
-        let thumbUrl = '';
-        if (res.box_2d) {
-          thumbUrl = await cropImageByBox(srcUrl, res.box_2d, {
-            minBoxSpan: 25,
-            padFrac: 0.025,
-            maxLongEdge: spec.raw ? null : spec.spineMaxW,
-            maxWidthOnly: !spec.raw,
-            rotationDeg: rot,
-            quality: spec.quality
-          }) || '';
-          p.cropBox = res.box_2d;
-          p.spineRotation = rot;
-        } else if (rot !== 0) {
-          thumbUrl = await rotateDataUrlByDeg(srcUrl, rot, 'image/webp', spec.quality, spec.raw ? null : spec.spineMaxW);
-          p.spineRotation = rot;
-        }
-        if (thumbUrl) {
-          p.saveWebp = thumbUrl;
-          stagedSpineSourceUrl = srcUrl;
-          stagedSpineThumbUrl = thumbUrl;
-          stagedSpineFlipped = rot === 180;
-          croppedCount++;
-        }
-        p.autoCropped = true;
-      } else {
-        if (res.box_2d) {
-          const cropped = await cropImageByBox(srcUrl, res.box_2d, {
-            minBoxSpan: 150,
-            padFrac: 0.025,
-            maxLongEdge: spec.raw ? null : spec.maxEdge,
-            maxWidthOnly: false,
-            rotationDeg: 0,
-            quality: spec.quality
-          });
-          if (cropped) {
-            p.saveWebp = cropped;
+        if (isSpine) {
+          const rot = [0, 90, 180, 270].includes(Number(res.spine_rotation)) ? Number(res.spine_rotation) : 0;
+          let thumbUrl = '';
+          if (res.box_2d) {
+            thumbUrl = await cropImageByBox(srcUrl, res.box_2d, {
+              minBoxSpan: 25,
+              padFrac: 0.025,
+              maxLongEdge: spec.raw ? null : spec.spineMaxW,
+              maxWidthOnly: !spec.raw,
+              rotationDeg: rot,
+              quality: spec.quality
+            }) || '';
             p.cropBox = res.box_2d;
+            p.rotationDeg = rot;
+            p.spineRotation = rot;
+          } else if (rot !== 0) {
+            thumbUrl = await rotateDataUrlByDeg(srcUrl, rot, 'image/webp', spec.quality, spec.raw ? null : spec.spineMaxW);
+            p.rotationDeg = rot;
+            p.spineRotation = rot;
+          }
+          if (batchAutoCropCancelled || myStageSeq !== stageSeq) break;
+          if (thumbUrl) {
+            p.saveWebp = thumbUrl;
+            stagedSpineSourceUrl = srcUrl;
+            stagedSpineThumbUrl = thumbUrl;
+            stagedSpineFlipped = rot === 180;
             croppedCount++;
           }
+          p.autoCropped = true;
+        } else {
+          if (res.box_2d) {
+            const cropped = await cropImageByBox(srcUrl, res.box_2d, {
+              minBoxSpan: 150,
+              padFrac: 0.025,
+              maxLongEdge: spec.raw ? null : spec.maxEdge,
+              maxWidthOnly: false,
+              rotationDeg: 0,
+              quality: spec.quality
+            });
+            if (batchAutoCropCancelled || myStageSeq !== stageSeq) break;
+            if (cropped) {
+              p.saveWebp = cropped;
+              p.cropBox = res.box_2d;
+              p.rotationDeg = 0;
+              croppedCount++;
+            }
+          }
+          p.autoCropped = true;
         }
-        p.autoCropped = true;
+        updateStageUI();
       }
-      updateStageUI();
+    } catch (err) {
+      if (err?.name !== 'AbortError') throw err;
+    } finally {
+      setStatus('', false);
     }
-    setStatus('', false);
     return croppedCount;
   }
 
@@ -2225,14 +2385,14 @@ Return ONLY valid JSON:
     }
     if (modeNow === 'pile' && pilePhotos.length > 0) {
       applyLoadedPilePhotos(pilePhotos, false);
-    } else if (modeNow === 'single' && stagedPhotos.length > 0 && cfg.autoCropPhotos && CC.isAiReady()) {
+    } else if (modeNow === 'single' && getStagedPhotoCount() > 0 && cfg.autoCropPhotos && CC.isAiReady()) {
       autoCropStagedPhotosNow().catch(() => {});
     }
   };
 
   window.finishCameraAndSearch = async () => {
     const modeNow = camMode;
-    const hasSingleShots = stagedPhotos.length > 0;
+    const hasSingleShots = getStagedPhotoCount() > 0;
     const hasPileShots = pilePhotos.length > 0;
     hideCameraUI();
     if (history.state?.modal === 'camera') {
@@ -2257,13 +2417,14 @@ Return ONLY valid JSON:
   async function stagePhotoFiles(fileList) {
     const files = Array.from(fileList || []);
     if (!files.length) return;
+    const myStageSeq = stageSeq;
     const spec = getPhotoQualitySpec();
     setStatus(`Processing ${files.length} photo(s) (${spec.label})...`, true);
-    const addedIndices = [];
+    const addedEntries = [];
     try {
       for (const file of files) {
-        if (stagedPhotos.length >= 4) { toast('Max 4 photos per scan'); break; }
-        const slotIdx = stagedPhotos.length;
+        if (myStageSeq !== stageSeq) return;
+        if (getStagedPhotoCount() >= 4) { toast('Max 4 photos per scan'); break; }
         const pair = await decodeBlobToPhotoPair(file, {
           aiMaxDim: 2048,
           aiQuality: 0.90,
@@ -2273,53 +2434,71 @@ Return ONLY valid JSON:
           keepOrigDataUrl: true,
           squarePreview: false
         });
+        if (myStageSeq !== stageSeq) return;
         pair.autoCropped = false;
         pair.cropBox = null;
-        stagedPhotos.push(pair);
-        addedIndices.push(slotIdx);
-        if (slotIdx === 2) {
+        pair.rotationDeg = 0;
+        const placed = assignPhotoToFirstEmptySlot(pair);
+        const lbl = placed.slotKey === 'front' ? 'FRONT' : (placed.slotKey === 'back' ? 'BACK' : (placed.slotKey === 'spine' ? 'SPINE' : `EXTRA ${placed.extraIdx + 1}`));
+        addedEntries.push({ slotKey: placed.slotKey, extraIdx: placed.extraIdx, label: lbl, photo: pair });
+        if (placed.slotKey === 'spine') {
           stagedSpineSourceUrl = pair.origDataUrl || pair.saveWebp;
           stagedSpineThumbUrl = pair.saveWebp;
           stagedSpineFlipped = false;
         }
       }
+      if (myStageSeq !== stageSeq) return;
       updateStageUI();
-      if (cfg.autoCropPhotos && CC.isAiReady() && addedIndices.length) {
-        const cnt = await autoCropStagedPhotosNow(addedIndices);
+      if (cfg.autoCropPhotos && CC.isAiReady() && addedEntries.length) {
+        const cnt = await autoCropStagedPhotosNow(addedEntries);
+        if (myStageSeq !== stageSeq) return;
         toast(cnt > 0
           ? `✂️ Auto-cropped ${cnt} photo(s) — tap ✂️ to adjust or Search & Verify`
-          : `${stagedPhotos.length} photo(s) ready — tap Search & Verify`);
+          : `${getStagedPhotoCount()} photo(s) ready — tap Search & Verify`);
       } else {
         setStatus('', false);
-        toast(`${stagedPhotos.length} photo(s) ready — tap Search & Verify`);
+        toast(`${getStagedPhotoCount()} photo(s) ready — tap Search & Verify`);
       }
     } catch (err) {
       setStatus('', false);
-      toast('Photo error: ' + (err?.message || 'Could not read image'), 5000);
+      if (err?.name !== 'AbortError') toast('Photo error: ' + (err?.message || 'Could not read image'), 5000);
     }
   }
 
-  window.removeStagedPhoto = (idx, ev) => {
+  window.removeStagedPhoto = (slotKey, extraIdx = -1, ev = null) => {
+    if (typeof extraIdx === 'object' && extraIdx !== null && ev === null) { ev = extraIdx; extraIdx = -1; }
     if (ev) ev.stopPropagation();
-    stagedPhotos.splice(idx, 1);
-    if (idx === 2 || stagedPhotos.length < 3) {
-      if (!currentExtracted?.spine_thumb_url) {
-        stagedSpineThumbUrl = '';
-        stagedSpineSourceUrl = '';
-        stagedSpineFlipped = false;
-      }
+    if (slotKey === 'front') stagedSlots.front = null;
+    else if (slotKey === 'back') stagedSlots.back = null;
+    else if (slotKey === 'spine') {
+      stagedSlots.spine = null;
+      stagedSpineThumbUrl = '';
+      stagedSpineSourceUrl = '';
+      stagedSpineFlipped = false;
+      if (currentExtracted) { currentExtracted.spine_thumb_url = ''; currentExtracted.spine_source_url = ''; }
+      if (currentInspected) { currentInspected.spine_thumb_url = ''; currentInspected.spine_source_url = ''; }
+    } else if (slotKey === 'extra' && extraIdx >= 0 && extraIdx < stagedSlots.extras.length) {
+      stagedSlots.extras.splice(extraIdx, 1);
     }
+    syncStagedPhotosCompat();
     updateStageUI();
+    updateCameraOverlayUI();
   };
 
   window.rotateStagedSpine90 = async (ev) => {
     if (ev) ev.stopPropagation();
-    const cur = stagedSpineThumbUrl || currentExtracted?.spine_thumb_url || stagedPhotos[2]?.saveWebp || '';
+    const cur = stagedSpineThumbUrl || currentExtracted?.spine_thumb_url || stagedSlots.spine?.saveWebp || '';
     if (!cur) return;
-    if (!stagedSpineSourceUrl) stagedSpineSourceUrl = cur;
-    const rotated = await rotateDataUrlByDeg(cur, 90, 'image/webp', 0.82, 960);
+    if (!stagedSpineSourceUrl) stagedSpineSourceUrl = stagedSlots.spine?.origDataUrl || cur;
+    const spec = getPhotoQualitySpec();
+    const rotated = await rotateDataUrlByDeg(cur, 90, 'image/webp', spec.quality, spec.raw ? null : spec.spineMaxW);
     stagedSpineThumbUrl = rotated;
     stagedSpineFlipped = !stagedSpineFlipped;
+    if (stagedSlots.spine) {
+      stagedSlots.spine.saveWebp = rotated;
+      stagedSlots.spine.rotationDeg = ((Number(stagedSlots.spine.rotationDeg) || 0) + 90) % 360;
+      stagedSlots.spine.spineRotation = stagedSlots.spine.rotationDeg;
+    }
     if (currentExtracted) {
       currentExtracted.spine_thumb_url = rotated;
       currentExtracted.spine_source_url = stagedSpineSourceUrl;
@@ -2336,7 +2515,7 @@ Return ONLY valid JSON:
   window.flipStagedSpine180 = window.rotateStagedSpine90;
 
   window.openStagedSpineLightbox = () => {
-    const src = stagedSpineThumbUrl || currentExtracted?.spine_thumb_url || stagedPhotos[2]?.saveWebp || '';
+    const src = stagedSpineThumbUrl || currentExtracted?.spine_thumb_url || stagedSlots.spine?.saveWebp || '';
     if (src) openLightbox([src], 0);
   };
 
@@ -2380,37 +2559,39 @@ Return ONLY valid JSON:
       upcRow.innerHTML = '';
     }
 
-    // Responsive gallery: Front & Back side-by-side square tiles (1 cover capped at 420px), full-width Spine strip below
-    const coverIndices = [];
-    if (stagedPhotos[0]) coverIndices.push({ idx: 0, label: 'FRONT' });
-    if (stagedPhotos[1]) coverIndices.push({ idx: 1, label: 'BACK' });
-    if (stagedPhotos[3]) coverIndices.push({ idx: 3, label: 'EXTRA' });
+    // Responsive gallery using STABLE NAMED SLOTS (removing Back never shifts Spine or Extra!)
+    const coverCards = [];
+    if (stagedSlots.front) coverCards.push({ slotKey: 'front', extraIdx: -1, label: 'FRONT', photo: stagedSlots.front });
+    if (stagedSlots.back) coverCards.push({ slotKey: 'back', extraIdx: -1, label: 'BACK', photo: stagedSlots.back });
+    (stagedSlots.extras || []).forEach((p, i) => {
+      if (p) coverCards.push({ slotKey: 'extra', extraIdx: i, label: i === 0 ? 'EXTRA' : `EXTRA ${i + 1}`, photo: p });
+    });
 
     let galleryHtml = '';
-    if (coverIndices.length > 0) {
-      const singleCls = coverIndices.length === 1 ? 'single-cover' : '';
-      galleryHtml += `<div class="photo-gallery-covers ${singleCls}">${coverIndices.map(c => `
-        <div class="photo-tile" onclick="openStagedLightbox(${c.idx})">
-          <img src="${stagedPhotos[c.idx].saveWebp}" alt="" />
+    if (coverCards.length > 0) {
+      const singleCls = coverCards.length === 1 ? 'single-cover' : '';
+      galleryHtml += `<div class="photo-gallery-covers ${singleCls}">${coverCards.map((c, lbI) => `
+        <div class="photo-tile" onclick="openStagedLightbox(${lbI})">
+          <img src="${c.photo.saveWebp}" alt="" />
           <span class="photo-tile-label">${c.label}</span>
           <div class="photo-tile-actions">
-            <button type="button" class="photo-tile-btn" onclick="openStagedPhotoCrop(${c.idx}, event)" title="Crop or rotate ${c.label}">✂️</button>
-            <button type="button" class="photo-tile-btn danger" onclick="removeStagedPhoto(${c.idx}, event)" title="Remove ${c.label}">×</button>
+            <button type="button" class="photo-tile-btn" onclick="openStagedPhotoCrop('${c.slotKey}', ${c.extraIdx}, event)" title="Crop or rotate ${c.label}">✂️</button>
+            <button type="button" class="photo-tile-btn danger" onclick="removeStagedPhoto('${c.slotKey}', ${c.extraIdx}, event)" title="Remove ${c.label}">×</button>
           </div>
         </div>
       `).join('')}</div>`;
     }
 
-    const spinePreviewSrc = activeSpineUrl || stagedPhotos[2]?.saveWebp || '';
+    const spinePreviewSrc = activeSpineUrl || stagedSlots.spine?.saveWebp || '';
     if (spinePreviewSrc) {
       galleryHtml += `
         <div class="photo-gallery-spine">
           <div class="photo-gallery-spine-bar">
             <span style="font-size:0.7rem; font-weight:800; letter-spacing:0.06em; color:var(--muted);">SPINE</span>
             <div class="inline-actions" style="gap:4px;">
-              <button type="button" class="photo-tile-btn" onclick="openStagedPhotoCrop(2, event)" title="Crop & rotate spine">✂️</button>
+              <button type="button" class="photo-tile-btn" onclick="openStagedPhotoCrop('spine', -1, event)" title="Crop & rotate spine">✂️</button>
               <button type="button" class="photo-tile-btn" onclick="rotateStagedSpine90(event)" title="Rotate spine 90°">↻ 90°</button>
-              ${stagedPhotos[2] ? `<button type="button" class="photo-tile-btn danger" onclick="removeStagedPhoto(2, event)" title="Remove spine">×</button>` : ''}
+              ${stagedSlots.spine ? `<button type="button" class="photo-tile-btn danger" onclick="removeStagedPhoto('spine', -1, event)" title="Remove spine">×</button>` : ''}
             </div>
           </div>
           <div class="photo-gallery-spine-imgwrap" onclick="openStagedSpineLightbox()" title="Tap to zoom spine">
@@ -2432,12 +2613,15 @@ Return ONLY valid JSON:
   function renderInspectorPhotosToSave() {
     const wrap = document.getElementById('inspPhotosToSaveWrap');
     if (!wrap) return;
-    const activeSpineUrl = stagedSpineThumbUrl || currentInspected?.spine_thumb_url || currentExtracted?.spine_thumb_url || stagedPhotos[2]?.saveWebp || '';
+    const activeSpineUrl = stagedSpineThumbUrl || currentInspected?.spine_thumb_url || currentExtracted?.spine_thumb_url || stagedSlots.spine?.saveWebp || '';
     const cards = [];
-    if (stagedPhotos[0]) cards.push({ idx: 0, label: 'FRONT', src: stagedPhotos[0].saveWebp, isSpine: false });
-    if (stagedPhotos[1]) cards.push({ idx: 1, label: 'BACK', src: stagedPhotos[1].saveWebp, isSpine: false });
-    if (activeSpineUrl) cards.push({ idx: 2, label: 'SPINE', src: activeSpineUrl, isSpine: true });
-    if (stagedPhotos[3]) cards.push({ idx: 3, label: 'EXTRA', src: stagedPhotos[3].saveWebp, isSpine: false });
+    let coverLbIdx = 0;
+    if (stagedSlots.front) cards.push({ slotKey: 'front', extraIdx: -1, lbIdx: coverLbIdx++, label: 'FRONT', src: stagedSlots.front.saveWebp, isSpine: false });
+    if (stagedSlots.back) cards.push({ slotKey: 'back', extraIdx: -1, lbIdx: coverLbIdx++, label: 'BACK', src: stagedSlots.back.saveWebp, isSpine: false });
+    if (activeSpineUrl) cards.push({ slotKey: 'spine', extraIdx: -1, lbIdx: -1, label: 'SPINE', src: activeSpineUrl, isSpine: true });
+    (stagedSlots.extras || []).forEach((p, i) => {
+      if (p) cards.push({ slotKey: 'extra', extraIdx: i, lbIdx: coverLbIdx++, label: i === 0 ? 'EXTRA' : `EXTRA ${i + 1}`, src: p.saveWebp, isSpine: false });
+    });
 
     if (!currentInspected || !cards.length) {
       wrap.classList.add('hidden');
@@ -2454,12 +2638,12 @@ Return ONLY valid JSON:
       <div class="insp-save-photos-strip">
         ${cards.map(c => `
           <div class="insp-save-photo-card">
-            <div class="insp-save-photo-thumb" onclick="${c.isSpine ? 'openStagedSpineLightbox()' : `openStagedLightbox(${c.idx})`}" title="Tap to inspect">
+            <div class="insp-save-photo-thumb" onclick="${c.isSpine ? 'openStagedSpineLightbox()' : `openStagedLightbox(${c.lbIdx})`}" title="Tap to inspect">
               <img src="${c.src}" alt="" />
             </div>
             <div class="insp-save-photo-meta">
               <span class="insp-save-photo-lbl">${c.label}</span>
-              <button type="button" class="photo-tile-btn" onclick="openStagedPhotoCrop(${c.idx}, event)" title="Adjust crop on full original">✂️ Crop</button>
+              <button type="button" class="photo-tile-btn" onclick="openStagedPhotoCrop('${c.slotKey}', ${c.extraIdx}, event)" title="Adjust crop on full original">✂️ Crop</button>
             </div>
           </div>
         `).join('')}
@@ -2467,16 +2651,18 @@ Return ONLY valid JSON:
     `;
   }
 
-  window.openStagedPhotoCrop = (idx, ev) => {
+  window.openStagedPhotoCrop = (slotKey, extraIdx = -1, ev = null) => {
+    if (typeof extraIdx === 'object' && extraIdx !== null && ev === null) { ev = extraIdx; extraIdx = -1; }
     if (ev) ev.stopPropagation();
-    const isSpine = idx === 2;
-    const photo = stagedPhotos[idx];
+    const isSpine = slotKey === 'spine';
+    const photo = getStagedSlotPhoto(slotKey, extraIdx);
     const src = isSpine
       ? (photo?.origDataUrl || stagedSpineSourceUrl || stagedSpineThumbUrl || photo?.saveWebp || '')
       : (photo?.origDataUrl || (photo?.apiB64 ? `data:image/jpeg;base64,${photo.apiB64}` : photo?.saveWebp) || '');
     if (!src) return;
-    const lbl = idx === 0 ? 'Front' : (idx === 1 ? 'Back' : (idx === 2 ? 'Spine' : 'Extra'));
-    const initRot = isSpine ? Number(photo?.spineRotation || 0) : 0;
+    const lbl = slotKey === 'front' ? 'Front' : (slotKey === 'back' ? 'Back' : (isSpine ? 'Spine' : `Extra ${Math.max(1, extraIdx + 1)}`));
+    // Preserve cumulative rotationDeg for ALL slots (Front, Back, Spine, Extras)!
+    const initRot = ((Number(photo?.rotationDeg ?? (isSpine ? photo?.spineRotation : 0)) % 360) + 360) % 360;
     const boxForModal = photo?.cropBox ? (initRot ? rotateBox2dClockwise(photo.cropBox, initRot) : photo.cropBox) : null;
     const initialRect = boxForModal ? box2dToNormRect(boxForModal, 0, isSpine ? 25 : 150) : null;
 
@@ -2486,31 +2672,38 @@ Return ONLY valid JSON:
       mode: isSpine ? 'spine' : 'cover',
       initialRect,
       initialRotation: initRot,
-      onApply: async (croppedWebp, workingSourceWebp, appliedRect) => {
+      onApply: async (croppedWebp, workingSourceWebp, appliedRect, _wasRotated, finalRotDeg = 0) => {
+        // Store cropBox in unrotated original coordinates so reopening with rotationDeg round-trips accurately
+        const invRot = (360 - (((Number(finalRotDeg) || 0) % 360 + 360) % 360)) % 360;
+        const rotBox = normRectToBox2d(appliedRect);
+        const origCoordsBox = invRot ? rotateBox2dClockwise(rotBox, invRot) : rotBox;
+
         if (isSpine) {
           stagedSpineThumbUrl = croppedWebp;
           stagedSpineSourceUrl = workingSourceWebp || src;
-          stagedSpineFlipped = false;
-          if (stagedPhotos[2]) {
-            stagedPhotos[2].saveWebp = croppedWebp;
-            stagedPhotos[2].autoCropped = true;
-            stagedPhotos[2].cropBox = normRectToBox2d(appliedRect);
-            stagedPhotos[2].spineRotation = 0;
+          stagedSpineFlipped = finalRotDeg === 180;
+          if (stagedSlots.spine) {
+            stagedSlots.spine.saveWebp = croppedWebp;
+            stagedSlots.spine.autoCropped = true;
+            stagedSlots.spine.cropBox = origCoordsBox;
+            stagedSlots.spine.rotationDeg = finalRotDeg;
+            stagedSlots.spine.spineRotation = finalRotDeg;
           }
           if (currentExtracted) {
             currentExtracted.spine_thumb_url = croppedWebp;
             currentExtracted.spine_source_url = stagedSpineSourceUrl;
-            currentExtracted.spine_flipped = false;
+            currentExtracted.spine_flipped = stagedSpineFlipped;
           }
           if (currentInspected) {
             currentInspected.spine_thumb_url = croppedWebp;
             currentInspected.spine_source_url = stagedSpineSourceUrl;
-            currentInspected.spine_flipped = false;
+            currentInspected.spine_flipped = stagedSpineFlipped;
           }
-        } else if (stagedPhotos[idx]) {
-          stagedPhotos[idx].saveWebp = croppedWebp;
-          stagedPhotos[idx].autoCropped = true;
-          stagedPhotos[idx].cropBox = normRectToBox2d(appliedRect);
+        } else if (photo) {
+          photo.saveWebp = croppedWebp;
+          photo.autoCropped = true;
+          photo.cropBox = origCoordsBox;
+          photo.rotationDeg = finalRotDeg;
         }
         updateStageUI();
         toast(`✂️ ${lbl} crop applied`);
@@ -2518,44 +2711,50 @@ Return ONLY valid JSON:
     });
   };
 
-  window.openStagedLightbox = (idx) => openLightbox(stagedPhotos.map(p => p.saveWebp), idx);
+  window.openStagedLightbox = (idx) => {
+    const coverList = [stagedSlots.front, stagedSlots.back, ...(stagedSlots.extras || [])].filter(Boolean).map(p => p.saveWebp);
+    openLightbox(coverList, idx);
+  };
 
-  // Build labeled image parts for AI Grading / Voice Re-Grade: sends Front, Back, Spine, and all Extra photos!
-  function buildLabeledGradingImageParts(source, item) {
+  // Build labeled image parts for AI Grading / Voice Re-Grade: sends Front, Back, Spine, and all Extra photos,
+  // enforcing a <= 2048px JPEG cap on Stash photos so Raw / Very High saves never bloat Gemini payloads!
+  async function buildLabeledGradingImageParts(source, item) {
     const parts = [];
-    const pushDataUrl = (label, dataUrl) => {
-      const m = String(dataUrl || '').match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
-      if (m) {
+    const pushDownscaledDataUrl = async (label, dataUrl) => {
+      const s = String(dataUrl || '').trim();
+      if (!s || isUnresolvedDriveRef(s) || !s.startsWith('data:image/')) return;
+      const b64 = await renderDataUrlToCompactJpegB64(s, 2048, 0.88);
+      if (b64) {
         parts.push({ text: label });
-        parts.push({ inline_data: { mime_type: m[1], data: m[2] } });
+        parts.push({ inline_data: { mime_type: 'image/jpeg', data: b64 } });
       }
     };
 
     if (source !== 'stash') {
-      const slotNames = ['[Front]', '[Back]', '[Spine]', '[Extra 1]'];
+      const entries = getStagedSlotEntries();
       let hasSpinePart = false;
-      stagedPhotos.forEach((p, idx) => {
-        if (!p?.apiB64) return;
-        const lbl = slotNames[idx] || `[Extra ${idx - 2}]`;
-        if (idx === 2) hasSpinePart = true;
-        parts.push({ text: lbl });
-        parts.push({ inline_data: { mime_type: 'image/jpeg', data: p.apiB64 } });
-      });
+      for (const e of entries) {
+        if (!e.photo?.apiB64) continue;
+        if (e.slotKey === 'spine') hasSpinePart = true;
+        parts.push({ text: e.tag });
+        parts.push({ inline_data: { mime_type: 'image/jpeg', data: e.photo.apiB64 } });
+      }
       const extraSpine = stagedSpineThumbUrl || item?.spine_thumb_url || '';
       if (!hasSpinePart && extraSpine) {
-        pushDataUrl('[Spine]', extraSpine);
+        await pushDownscaledDataUrl('[Spine]', extraSpine);
       }
       return parts;
     }
 
-    const thumbs = getStashCoverPhotos(item);
-    thumbs.forEach((src, i) => {
-      const lbl = i === 0 ? '[Front]' : (i === 1 ? '[Back]' : `[Extra ${i - 1}]`);
-      pushDataUrl(lbl, src);
-    });
+    const slots = getStashPhotoSlots(item);
+    if (slots.front) await pushDownscaledDataUrl('[Front]', slots.front);
+    if (slots.back) await pushDownscaledDataUrl('[Back]', slots.back);
+    for (let i = 0; i < slots.extras.length; i++) {
+      await pushDownscaledDataUrl(`[Extra ${i + 1}]`, slots.extras[i]);
+    }
     const spineSrc = item?.spine_thumb_url || item?.spine_source_url || '';
     if (spineSrc) {
-      pushDataUrl('[Spine]', spineSrc);
+      await pushDownscaledDataUrl('[Spine]', spineSrc);
     }
     return parts;
   }
@@ -2694,10 +2893,23 @@ Return ONLY valid JSON:
   "polished_note": "clean, factual, buyer-ready Discogs listing note incorporating every flaw reported by the seller and visible in photos including verbatim stamps/markings (1-3 short sentences, no fluff)"
 }`;
 
-    const parts = [{ text: prompt }, ...buildLabeledGradingImageParts(source, item)];
+    const targetRunId = scanRunId;
+    const targetInspectSeq = inspectSeq;
+    const targetItemRef = item;
+    const targetStashId = isStash ? item.id : null;
+    const parts = [{ text: prompt }, ...(await buildLabeledGradingImageParts(source, item))];
 
     try {
       const res = await CC.callAI(parts, 'MEDIUM', { retryLabel: 'Voice Re-Grade' });
+      // Discard stale Voice Re-Grade response if user switched pressings, reset scanner, or closed/switched Stash Detail!
+      if (!isStash && (targetRunId !== scanRunId || targetInspectSeq !== inspectSeq || currentInspected !== targetItemRef)) {
+        setStatus('', false);
+        return;
+      }
+      if (isStash && (!activeStashItem || activeStashItem.id !== targetStashId || document.getElementById('stashDetailModal')?.classList.contains('hidden'))) {
+        setStatus('', false);
+        return;
+      }
       pendingVoiceRetry = null;
       const newMedia = normalizeGrade(res.media_condition, MEDIA_GRADES, mediaEl.value);
       const newSleeve = normalizeGrade(res.sleeve_condition, SLEEVE_GRADES, sleeveEl.value);
@@ -3151,12 +3363,27 @@ Return ONLY valid JSON:
   };
 
   window.toggleAutoGradeOnScan = (checked) => {
-    cfg.autoGradeOnScan = Boolean(checked);
-    CC.persistCfg();
+    const nextVal = Boolean(checked);
+    const changed = Boolean(cfg.autoGradeOnScan) !== nextVal;
+    cfg.autoGradeOnScan = nextVal;
     const scanChk = document.getElementById('scanAutoGradeChk');
     const cfgChk = document.getElementById('cfgAutoGradeOnScan');
     if (scanChk) scanChk.checked = cfg.autoGradeOnScan;
     if (cfgChk) cfgChk.checked = cfg.autoGradeOnScan;
+    CC.persistCfg(changed);
+    if (changed) {
+      const prefKeys = CC.PREF_KEYS || [
+        'geminiModel', 'autoPlayHighlight', 'autoDetective', 'autoGradeOnScan',
+        'autoCropPhotos', 'photoQuality', 'homeCountry', 'fetchVgSuggestions',
+        'threshold', 'voice', 'showSpotify', 'showApple', 'showDeezer', 'showYoutube'
+      ];
+      const outPrefs = { cfgUpdatedAt: Number(cfg.cfgUpdatedAt || Date.now()) };
+      prefKeys.forEach(k => { outPrefs[k] = cfg[k]; });
+      CC.commitLocalMutation({ extraOps: [{ type: 'prefs', prefs: outPrefs }], queueOutbox: true }).then(() => {
+        updateCloudUI();
+        scheduleGoogleAutoSync();
+      }).catch(() => {});
+    }
   };
 
   async function cropImageByBox(sourceDataUrl, box2d, opts = {}) {
@@ -3413,11 +3640,12 @@ Return ONLY valid JSON:
   "visible_tracks": ["every song title clearly visible on shell/insert"]
 }`;
 
-    const slotLabelsForOcr = ['[Front]', '[Back]', '[Spine]', '[Extra 1]'];
+    const slotEntries = getStagedSlotEntries();
     const parts = [{ text: prompt }];
-    stagedPhotos.forEach((p, idx) => {
-      parts.push({ text: slotLabelsForOcr[idx] || `[Extra ${idx - 2}]` });
-      parts.push({ inline_data: { mime_type: 'image/jpeg', data: p.apiB64 } });
+    slotEntries.forEach((entry) => {
+      if (!entry.photo?.apiB64) return;
+      parts.push({ text: entry.tag });
+      parts.push({ inline_data: { mime_type: 'image/jpeg', data: entry.photo.apiB64 } });
     });
 
     try {
@@ -3447,16 +3675,17 @@ Return ONLY valid JSON:
         ext.graded_by_ai = true;
       }
 
-      // Auto-crop any not-yet-cropped scan photos when autoCropPhotos is enabled (respects cfg.photoQuality & skips already autoCropped shots!)
+      // Auto-crop any not-yet-cropped scan photos when autoCropPhotos is enabled (respects cfg.photoQuality & stable slots!)
       const spec = getPhotoQualitySpec();
       const rawPhotoCrops = Array.isArray(ext.photo_crops) ? ext.photo_crops : [];
       const exactSpineRot = [0, 90, 180, 270].includes(Number(ext.spine_rotation)) ? Number(ext.spine_rotation) : null;
       let anyPhotoCropped = false;
 
       if (cfg.autoCropPhotos) {
-        for (let i = 0; i < stagedPhotos.length; i++) {
-          if (i === 2) continue; // Spine handled below with spine_rotation
-          const p = stagedPhotos[i];
+        for (let i = 0; i < slotEntries.length; i++) {
+          const entry = slotEntries[i];
+          if (entry.slotKey === 'spine') continue;
+          const p = entry.photo;
           if (!p || p.autoCropped) continue;
           const box = rawPhotoCrops[i];
           if (!Array.isArray(box) || box.length !== 4) continue;
@@ -3482,12 +3711,12 @@ Return ONLY valid JSON:
       ext.spine_source_url = stagedSpineSourceUrl || '';
       ext.spine_flipped = Boolean(stagedSpineFlipped);
 
-      const spineAlreadyCropped = Boolean(stagedPhotos[2]?.autoCropped && stagedSpineThumbUrl);
+      const spineSlotIdx = slotEntries.findIndex(e => e.slotKey === 'spine');
+      const spineAlreadyCropped = Boolean(stagedSlots.spine?.autoCropped && stagedSpineThumbUrl);
       if (cfg.autoCropPhotos && !spineAlreadyCropped) {
-        // Prefer explicit spine_crop, falling back to photo_crops[2] if a dedicated Spine shot (index 2) was provided
         const effectiveSpineCrop = (ext.spine_crop && Array.isArray(ext.spine_crop.box_2d))
           ? ext.spine_crop
-          : (stagedPhotos[2] && Array.isArray(rawPhotoCrops[2]) ? { photo_index: 2, box_2d: rawPhotoCrops[2] } : null);
+          : (spineSlotIdx >= 0 && Array.isArray(rawPhotoCrops[spineSlotIdx]) ? { photo_index: spineSlotIdx, box_2d: rawPhotoCrops[spineSlotIdx] } : null);
 
         if (effectiveSpineCrop) {
           const cropRes = await cropSpineFromStagedPhoto(effectiveSpineCrop, exactSpineRot);
@@ -3498,17 +3727,18 @@ Return ONLY valid JSON:
             stagedSpineThumbUrl = cropRes.thumbUrl;
             stagedSpineSourceUrl = cropRes.sourceUrl;
             stagedSpineFlipped = Boolean(cropRes.flipped);
-            if (stagedPhotos[2]) {
-              stagedPhotos[2].saveWebp = cropRes.thumbUrl;
-              stagedPhotos[2].cropBox = effectiveSpineCrop.box_2d;
-              stagedPhotos[2].spineRotation = cropRes.angle || 0;
-              stagedPhotos[2].autoCropped = true;
+            if (stagedSlots.spine) {
+              stagedSlots.spine.saveWebp = cropRes.thumbUrl;
+              stagedSlots.spine.cropBox = effectiveSpineCrop.box_2d;
+              stagedSlots.spine.rotationDeg = cropRes.angle || 0;
+              stagedSlots.spine.spineRotation = cropRes.angle || 0;
+              stagedSlots.spine.autoCropped = true;
             }
             anyPhotoCropped = true;
           }
-        } else if (stagedPhotos[2] && exactSpineRot !== null) {
-          const spOrig = stagedPhotos[2].origDataUrl || stagedPhotos[2].saveWebp;
-          const rotThumb = exactSpineRot === 0 ? stagedPhotos[2].saveWebp : await rotateDataUrlByDeg(spOrig, exactSpineRot, 'image/webp', spec.quality, spec.raw ? null : spec.spineMaxW);
+        } else if (stagedSlots.spine && exactSpineRot !== null) {
+          const spOrig = stagedSlots.spine.origDataUrl || stagedSlots.spine.saveWebp;
+          const rotThumb = exactSpineRot === 0 ? stagedSlots.spine.saveWebp : await rotateDataUrlByDeg(spOrig, exactSpineRot, 'image/webp', spec.quality, spec.raw ? null : spec.spineMaxW);
           if (rotThumb) {
             ext.spine_thumb_url = rotThumb;
             ext.spine_source_url = spOrig;
@@ -3516,9 +3746,10 @@ Return ONLY valid JSON:
             stagedSpineThumbUrl = rotThumb;
             stagedSpineSourceUrl = spOrig;
             stagedSpineFlipped = exactSpineRot === 180;
-            stagedPhotos[2].saveWebp = rotThumb;
-            stagedPhotos[2].spineRotation = exactSpineRot;
-            stagedPhotos[2].autoCropped = true;
+            stagedSlots.spine.saveWebp = rotThumb;
+            stagedSlots.spine.rotationDeg = exactSpineRot;
+            stagedSlots.spine.spineRotation = exactSpineRot;
+            stagedSlots.spine.autoCropped = true;
             anyPhotoCropped = true;
           }
         }
@@ -4288,12 +4519,26 @@ Return ONLY valid JSON:
   window.inspectCandidate = async (idx, myRunId = scanRunId, opts = {}) => {
     const cand = currentCandidates[idx];
     if (!cand) return;
+    const myInspectSeq = ++inspectSeq;
     setStatus('Loading Discogs price, collection status, tracklist & Taste check...', true);
 
     try {
       const release = await CC.getReleaseCached(cand.id);
-      if (myRunId !== scanRunId) return;
-      const stats = await CC.discogsFetch(`/marketplace/stats/${cand.id}`).catch(() => ({}));
+      if (myRunId !== scanRunId || myInspectSeq !== inspectSeq) return;
+
+      let statsOk = false;
+      let stats = null;
+      try {
+        const sRes = await CC.discogsFetch(`/marketplace/stats/${cand.id}`);
+        if (sRes && typeof sRes === 'object') {
+          stats = sRes;
+          statsOk = true;
+        }
+      } catch (_) {
+        statsOk = false;
+        stats = null;
+      }
+      if (myRunId !== scanRunId || myInspectSeq !== inspectSeq) return;
 
       let suggestions = null;
       if (cfg.fetchVgSuggestions) {
@@ -4306,7 +4551,7 @@ Return ONLY valid JSON:
       if (cfg.discogsUser && cfg.discogsToken) {
         liveDiscogsInstances = await CC.findDiscogsInstances(release.id).catch(() => []);
       }
-      if (myRunId !== scanRunId) return;
+      if (myRunId !== scanRunId || myInspectSeq !== inspectSeq) return;
 
       const artistName = cleanDiscogsArtist(release.artists) ||
                          (cand.title.includes(' - ') ? cand.title.split(' - ')[0] : '');
@@ -4323,9 +4568,10 @@ Return ONLY valid JSON:
         .filter(t => t.type_ !== 'heading')
         .map(t => ({ pos: t.position || '', artist: cleanDiscogsArtist(t.artists), title: t.title || '' }));
 
-      const lowestPrice = stats?.lowest_price?.value ?? release.lowest_price ?? null;
-      const lowestCurrency = stats?.lowest_price?.currency || 'USD';
-      const numForSale = stats?.num_for_sale ?? release.num_for_sale ?? 0;
+      // Honest Discogs outage handling: if /marketplace/stats failed, NEVER fake 0 listed / SCARCE or stamp synced_at!
+      const lowestPrice = statsOk ? (stats?.lowest_price?.value ?? release.lowest_price ?? null) : null;
+      const lowestCurrency = statsOk ? (stats?.lowest_price?.currency || 'USD') : 'USD';
+      const numForSale = statsOk ? (stats?.num_for_sale ?? release.num_for_sale ?? 0) : null;
       const vgPlusPrice = suggestions?.['Very Good Plus (VG+)']?.value ?? null;
       const vgPlusCurrency = suggestions?.['Very Good Plus (VG+)']?.currency || lowestCurrency || 'USD';
       const estPrice = vgPlusPrice ?? lowestPrice;
@@ -4336,7 +4582,7 @@ Return ONLY valid JSON:
 
       // Currency-aware High-Value threshold (compares approximate USD value against USD threshold)
       const isHighValue = estUsd !== null && estUsd >= Number(cfg.threshold || 20);
-      const isScarce = numForSale === 0 && (want >= 10 || (want > have && want >= 5));
+      const isScarce = statsOk && numForSale === 0 && (want >= 10 || (want > have && want >= 5));
 
       const otherPressingMatches = findOtherPressingMatches(release.id, masterId, artistName, albumTitle);
 
@@ -4373,12 +4619,12 @@ Return ONLY valid JSON:
         lowest_price: lowestPrice, lowest_currency: lowestCurrency,
         vg_plus_price: vgPlusPrice, vg_plus_currency: vgPlusCurrency,
         est_price: estPrice, est_currency: estCurrency, est_usd: estUsd,
-        num_for_sale: numForSale, have, want, is_high_value: isHighValue, is_scarce: isScarce,
+        num_for_sale: numForSale, stats_ok: statsOk, have, want, is_high_value: isHighValue, is_scarce: isScarce,
         discogs_owned_count: liveDiscogsInstances.length,
         other_pressing_matches: otherPressingMatches,
         is_conservative_tiebreak: Boolean(opts.isConservativeTiebreak),
         tracklist, pressing_notes: notesParts.join('\n').trim(),
-        discogs_details_synced_at: Date.now(),
+        discogs_details_synced_at: statsOk ? Date.now() : 0,
         discogs_url: release.uri || `https://www.discogs.com/release/${release.id}`,
         discogs_thumb: release.thumb || cand.thumb || '',
         taste_score: null, taste_verdict: null, taste_summary: '', context_note: '',
@@ -4392,14 +4638,17 @@ Return ONLY valid JSON:
       document.getElementById('inspectorCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
 
       if (isHighValue || isScarce) playChime();
-      await runTasteAnalysis(currentInspected, myRunId);
+      await runTasteAnalysis(currentInspected, myRunId, myInspectSeq);
     } catch (err) {
+      if (myRunId !== scanRunId || myInspectSeq !== inspectSeq) return;
       setStatus('', false);
       toast('Error loading release: ' + err.message, 4000);
     }
   };
 
   window.inspectUnlistedItem = async () => {
+    const myRunId = scanRunId;
+    const myInspectSeq = ++inspectSeq;
     const title = document.getElementById('fTitle').value.trim() || 'Untitled Release';
     const artist = document.getElementById('fArtist').value.trim() || 'Unknown Artist';
     const tracks = (currentExtracted?.visible_tracks || []).map((raw, i) => {
@@ -4429,7 +4678,7 @@ Return ONLY valid JSON:
       spine_flipped: stagedSpineThumbUrl ? Boolean(stagedSpineFlipped) : Boolean(currentExtracted?.spine_flipped ?? editingStashItem?.spine_flipped),
       lowest_price: null, lowest_currency: 'USD',
       vg_plus_price: null, vg_plus_currency: 'USD',
-      est_price: null, est_currency: 'USD', est_usd: null, num_for_sale: null,
+      est_price: null, est_currency: 'USD', est_usd: null, num_for_sale: null, stats_ok: true,
       have: 0, want: 0, is_high_value: false, is_scarce: false,
       discogs_owned_count: 0, other_pressing_matches: otherPressingMatches,
       is_conservative_tiebreak: false,
@@ -4441,7 +4690,7 @@ Return ONLY valid JSON:
 
     renderInspector(currentInspected, false);
     document.getElementById('inspectorCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    await runTasteAnalysis(currentInspected, scanRunId);
+    await runTasteAnalysis(currentInspected, myRunId, myInspectSeq);
   };
 
   function buildTracklistHtml(tracks, matched = [], source = 'scan', defaultArtist = '') {
@@ -4473,7 +4722,7 @@ Return ONLY valid JSON:
       const fn = source === 'stash' ? 'previewStashLitmus()' : 'previewLitmusTrack()';
       const litmusKey = normFull(`${lArt || ''}|${item.litmus_track}`);
       html += `<div class="notable-row litmus-row">
-        <div><strong>🎧 Test Song:</strong> ${showArt ? `${esc(lArt)} — ` : ''}${esc(item.litmus_track)}</div>
+        <div><strong>▶️ Test Song:</strong> ${showArt ? `${esc(lArt)} — ` : ''}${esc(item.litmus_track)}</div>
         <button type="button" class="play-pill-btn sm" data-play-key="${esc(litmusKey)}" onclick="${fn}" title="Play Test Song">▶</button>
       </div>`;
     }
@@ -4558,7 +4807,9 @@ Return ONLY valid JSON:
 
     document.getElementById('mLowest').textContent = item.lowest_price !== null ? formatMoneyWithUsd(item.lowest_price, item.lowest_currency) : 'N/A';
     document.getElementById('mVgPlus').textContent = item.vg_plus_price !== null ? formatMoneyWithUsd(item.vg_plus_price, item.vg_plus_currency) : '—';
-    document.getElementById('mForSale').textContent = item.num_for_sale !== null ? `${item.num_for_sale} listed` : '—';
+    document.getElementById('mForSale').textContent = (hasDiscogs && item.stats_ok === false)
+      ? 'Unavailable'
+      : (item.num_for_sale !== null ? `${item.num_for_sale} listed` : '—');
     document.getElementById('mHaveWant').textContent = hasDiscogs ? `${item.have} / ${item.want}` : '—';
 
     const ebayQ = encodeURIComponent(`${item.artist} ${item.title} ${item.format} ${item.catno}`.trim());
@@ -4679,7 +4930,7 @@ Return ONLY valid JSON:
   }
 
   function buildSpotifyHowYouKnowHtml(item, localMatch, includeSetupHint = false) {
-    const wrap = (bodyHtml) => `<div class="spotify-know-card"><div class="spotify-know-title">🎧 HOW YOU KNOW THEM</div><div class="spotify-know-body">${bodyHtml}</div></div>`;
+    const wrap = (bodyHtml) => `<div class="spotify-know-card"><div class="spotify-know-title">💚 HOW YOU KNOW THEM</div><div class="spotify-know-body">${bodyHtml}</div></div>`;
     if (!spotifyProfile) {
       const hasDna = Boolean(document.getElementById('cfgTasteDna')?.value?.trim());
       if (includeSetupHint && !hasDna) {
@@ -4699,20 +4950,64 @@ Return ONLY valid JSON:
     const q = (s) => `&ldquo;${esc(s)}&rdquo;`;
     const isCompilation = Boolean(lm.isVarious || (artistMatches.length > 1 && /^various/i.test(String(item?.artist || '').trim())));
 
-    // Various Artists / Compilation narrative
+    // Helper: Priority #1 "On this release" lead sentence highlighting Liked Songs first, then Top / Saved-Album / Playlist tracks
+    const buildOnReleaseSentence = (includeArtistPrefix) => {
+      if (!albumHits.length) return '';
+      const fmtHit = (h) => (includeArtistPrefix && h.artist) ? `${esc(h.artist)} &mdash; ${q(h.title)}` : q(h.title);
+      const likedOnRel = albumHits.filter(h => h.liked);
+      const topOrAlbOnRel = albumHits.filter(h => !h.liked && (h.top || h.album));
+      const plOnlyOnRel = albumHits.filter(h => !h.liked && !h.top && !h.album);
+
+      const clauses = [];
+      if (likedOnRel.length) {
+        const list = joinHumanList(likedOnRel.slice(0, 4).map(fmtHit));
+        const more = likedOnRel.length > 4 ? ` (+${likedOnRel.length - 4} more)` : '';
+        clauses.push(`You have <strong>${likedOnRel.length} liked song${likedOnRel.length === 1 ? '' : 's'}</strong> right on this media — ${list}${more}`);
+      }
+      if (topOrAlbOnRel.length) {
+        const list = joinHumanList(topOrAlbOnRel.slice(0, 3).map(fmtHit));
+        const more = topOrAlbOnRel.length > 3 ? ` (+${topOrAlbOnRel.length - 3} more)` : '';
+        clauses.push(`${clauses.length ? 'plus ' : ''}${topOrAlbOnRel.length} top/saved-album track${topOrAlbOnRel.length === 1 ? '' : 's'} (${list}${more})`);
+      }
+      if (plOnlyOnRel.length) {
+        const list = joinHumanList(plOnlyOnRel.slice(0, 3).map(fmtHit));
+        const more = plOnlyOnRel.length > 3 ? ` (+${plOnlyOnRel.length - 3} more)` : '';
+        clauses.push(`${clauses.length ? 'and ' : 'you have '}${plOnlyOnRel.length} playlist track${plOnlyOnRel.length === 1 ? '' : 's'} (${list}${more})`);
+      }
+      if (!clauses.length) {
+        const list = joinHumanList(albumHits.slice(0, 4).map(fmtHit));
+        const more = albumHits.length > 4 ? ` (+${albumHits.length - 4} more)` : '';
+        clauses.push(`You already have <strong>${albumHits.length}</strong> track${albumHits.length === 1 ? '' : 's'} from this media in Spotify — ${list}${more}`);
+      }
+      return `⭐ <strong>On this release:</strong> ${clauses.join(', ')}.`;
+    };
+
+    // Various Artists / Compilation narrative — lead with On-Release hits, and NEVER list 0-liked artists as "liked songs"!
     if (isCompilation) {
       const sentences = [];
-      if (albumHits.length) {
-        const hitStrs = albumHits.slice(0, 4).map(h => h.artist ? `${esc(h.artist)} &mdash; ${q(h.title)}` : q(h.title));
-        const more = albumHits.length > 4 ? ` (+${albumHits.length - 4} more)` : '';
-        sentences.push(`You already have <strong>${albumHits.length}</strong> track${albumHits.length === 1 ? '' : 's'} from this compilation in your Spotify: ${joinHumanList(hitStrs)}${more}.`);
-      }
-      const likedArts = artistMatches.filter(a => a.likedSongs.length > 0 || a.isFollowed || a.isTopArtist);
-      const plOnlyArts = artistMatches.filter(a => !likedArts.includes(a));
+      const onRel = buildOnReleaseSentence(true);
+      if (onRel) sentences.push(onRel);
+
+      const likedArts = artistMatches.filter(a => (a.likedSongs || []).length > 0);
+      const followedOrTopZeroLiked = artistMatches.filter(a => (a.likedSongs || []).length === 0 && (a.isFollowed || a.isTopArtist || (a.topTracks || []).length > 0 || (a.albumTracks || []).length > 0));
+      const plOnlyArts = artistMatches.filter(a => !likedArts.includes(a) && !followedOrTopZeroLiked.includes(a));
+
       if (likedArts.length) {
-        const names = likedArts.slice(0, 4).map(a => `<strong>${esc(a.name)}</strong>${a.likedSongs.length ? ` (${a.likedSongs.length} liked)` : ''}`);
+        const names = likedArts.slice(0, 4).map(a => `<strong>${esc(a.name)}</strong> (${a.likedSongs.length} liked)`);
         const extra = likedArts.length > 4 ? ` and ${likedArts.length - 4} more` : '';
         sentences.push(`Featured artists you have liked songs from: ${joinHumanList(names)}${extra}.`);
+      }
+      if (followedOrTopZeroLiked.length) {
+        const names = followedOrTopZeroLiked.slice(0, 4).map(a => {
+          const tags = [];
+          if (a.isFollowed) tags.push('followed');
+          if (a.isTopArtist) tags.push('top artist');
+          if ((a.topTracks || []).length) tags.push(`${a.topTracks.length} top`);
+          if ((a.albumTracks || []).length) tags.push(`${a.albumTracks.length} saved-album`);
+          return `<strong>${esc(a.name)}</strong>${tags.length ? ` (${tags.join(', ')})` : ''}`;
+        });
+        const extra = followedOrTopZeroLiked.length > 4 ? ` +${followedOrTopZeroLiked.length - 4} more` : '';
+        sentences.push(`Followed / top artists (0 liked songs): ${joinHumanList(names)}${extra}.`);
       }
       if (plOnlyArts.length) {
         const names = plOnlyArts.slice(0, 4).map(a => esc(a.name));
@@ -4722,14 +5017,17 @@ Return ONLY valid JSON:
       return wrap(sentences.join(' '));
     }
 
-    // Standard single/primary artist narrative
+    // Standard single/primary artist narrative — Priority #1 leads with On-Release track hits!
     const sentences = [];
+    const onRel = buildOnReleaseSentence(false);
+    if (onRel) sentences.push(onRel);
+
     const primary = artistMatches[0];
     if (primary) {
       const nameHtml = `<strong>${esc(primary.name)}</strong>`;
       const liked = primary.likedSongs || [];
-      const topTrs = (primary.topTracks || []).filter(t => !liked.some(l => norm(l) === norm(t)));
-      const albTrs = (primary.albumTracks || []).filter(t => !liked.some(l => norm(l) === norm(t)) && !topTrs.some(x => norm(x) === norm(t)));
+      const topTrs = (primary.topTracks || []).filter(t => !liked.some(l => CC.normTrackBase(l) === CC.normTrackBase(t)));
+      const albTrs = (primary.albumTracks || []).filter(t => !liked.some(l => CC.normTrackBase(l) === CC.normTrackBase(t)) && !topTrs.some(x => CC.normTrackBase(x) === CC.normTrackBase(t)));
       const pls = primary.playlists || [];
       const plMap = primary.playlistTrackMap || {};
       const followParts = [];
@@ -4747,9 +5045,8 @@ Return ONLY valid JSON:
       }
 
       if (liked.length >= 1 && liked.length <= 3) {
-        // 1–3 liked songs: explicitly name EVERY liked song title + separate top/saved-album tracks & playlists
         const songList = joinHumanList(liked.map(q));
-        let s = `You have <strong>${liked.length}</strong> liked song${liked.length === 1 ? '' : 's'} by ${nameHtml}: ${songList}`;
+        let s = `Across Spotify, you have <strong>${liked.length}</strong> liked song${liked.length === 1 ? '' : 's'} by ${nameHtml}: ${songList}`;
         if (extraSources.length) s += `, plus ${joinHumanList(extraSources)}`;
         if (pls.length) {
           s += `, and they appear on ${joinHumanList(pls.slice(0, 3).map(p => `<em>${esc(p)}</em>`))}`;
@@ -4759,15 +5056,13 @@ Return ONLY valid JSON:
         }
         sentences.push(s + '.');
       } else if (liked.length >= 4) {
-        // 4+ liked songs: exact count, 2–3 examples, separate top/saved-album tracks, followed status / playlists
         const examples = joinHumanList(liked.slice(0, 3).map(q));
-        let s = `You have <strong>${liked.length}</strong> liked songs by ${nameHtml} (including ${examples})`;
+        let s = `Across Spotify, you have <strong>${liked.length}</strong> liked songs by ${nameHtml} (including ${examples})`;
         if (extraSources.length) s += `, plus ${joinHumanList(extraSources)}`;
         if (followParts.length) s += ` and ${followParts.join(' — ')}`;
         if (pls.length) s += `, across ${joinHumanList(pls.slice(0, 3).map(p => `<em>${esc(p)}</em>`))}`;
         sentences.push(s + '.');
       } else {
-        // 0 liked songs: explicitly state 0 liked songs + separate top tracks, saved-album tracks, and/or playlists!
         const plEntries = [];
         Object.entries(plMap).slice(0, 3).forEach(([plName, trs]) => {
           const uniqTrs = dedupeStringsCI(trs).slice(0, 3);
@@ -4796,19 +5091,6 @@ Return ONLY valid JSON:
       }
     }
 
-    // Exact album-track hits called out by name
-    if (albumHits.length) {
-      const hitNames = albumHits.slice(0, 4).map(h => q(h.title));
-      const extra = albumHits.length > 4 ? ` (+${albumHits.length - 4} more)` : '';
-      const singleAlreadyNamed = primary && primary.likedSongs.length === 1 && albumHits.length === 1
-        && norm(primary.likedSongs[0]) === norm(albumHits[0].title);
-      if (singleAlreadyNamed) {
-        sentences.push(`That song is right on this release.`);
-      } else {
-        sentences.push(`On this release, you already know ${joinHumanList(hitNames)}${extra}.`);
-      }
-    }
-
     return wrap(sentences.join(' '));
   }
 
@@ -4822,6 +5104,23 @@ Return ONLY valid JSON:
     return norm(s).replace(/^the\s+/, '').trim();
   }
 
+  function mergeTrackSourceProv(prev, incoming) {
+    if (!prev) {
+      return {
+        liked: Boolean(incoming?.liked),
+        top: Boolean(incoming?.top),
+        album: Boolean(incoming?.album),
+        playlists: Array.isArray(incoming?.playlists) ? dedupeStringsCI(incoming.playlists) : []
+      };
+    }
+    return {
+      liked: Boolean(prev.liked || incoming?.liked),
+      top: Boolean(prev.top || incoming?.top),
+      album: Boolean(prev.album || incoming?.album),
+      playlists: dedupeStringsCI([...(prev.playlists || []), ...(Array.isArray(incoming?.playlists) ? incoming.playlists : [])])
+    };
+  }
+
   function getSpotifyLookup(profile) {
     if (!profile) return null;
     if (spLookupCache.has(profile)) return spLookupCache.get(profile);
@@ -4831,37 +5130,47 @@ Return ONLY valid JSON:
     const trackSourceByPair = new Map();
     const hasProvenance = Boolean(profile.provenanceVersion >= 2 || profile.trackSources);
 
+    const indexTrackPair = (na, rawTitle, src = null) => {
+      if (!na || !rawTitle) return;
+      const keys = new Set();
+      const nt = norm(rawTitle);
+      const nb = CC.normTrackBase(rawTitle);
+      if (nt) keys.add(`${na}|${nt}`);
+      if (nb) keys.add(`${na}|${nb}`);
+      keys.forEach(k => {
+        pairSet.add(k);
+        if (src) {
+          trackSourceByPair.set(k, mergeTrackSourceProv(trackSourceByPair.get(k), src));
+        }
+      });
+    };
+
     Object.entries(profile.allArtists || {}).forEach(([rawKey, rec]) => {
       const k1 = norm(rec?.name || rawKey);
       const k2 = normArtistKey(rec?.name || rawKey);
       if (k1 && !artistByKey.has(k1)) artistByKey.set(k1, rec);
       if (k2 && !artistByKey.has(k2)) artistByKey.set(k2, rec);
       if (Array.isArray(rec?.tracks)) {
-        rec.tracks.forEach(tr => {
-          const nt = norm(tr);
-          if (k2 && nt) pairSet.add(`${k2}|${nt}`);
-        });
+        rec.tracks.forEach(tr => indexTrackPair(k2, tr, null));
+      }
+      if (hasProvenance) {
+        (Array.isArray(rec?.likedTracks) ? rec.likedTracks : []).forEach(tr => indexTrackPair(k2, tr, { liked: true }));
+        (Array.isArray(rec?.topTracks) ? rec.topTracks : []).forEach(tr => indexTrackPair(k2, tr, { top: true }));
+        (Array.isArray(rec?.albumTracks) ? rec.albumTracks : []).forEach(tr => indexTrackPair(k2, tr, { album: true }));
       }
     });
 
     (profile.trackPairs || []).forEach(pair => {
       const sep = String(pair || '').indexOf('|');
       if (sep <= 0) return;
-      const na = normArtistKey(pair.slice(0, sep));
-      const nt = norm(pair.slice(sep + 1));
-      if (na && nt) pairSet.add(`${na}|${nt}`);
+      indexTrackPair(normArtistKey(pair.slice(0, sep)), pair.slice(sep + 1), null);
     });
 
     if (profile.trackSources && typeof profile.trackSources === 'object') {
       Object.entries(profile.trackSources).forEach(([pair, src]) => {
         const sep = String(pair || '').indexOf('|');
         if (sep <= 0 || !src) return;
-        const na = normArtistKey(pair.slice(0, sep));
-        const nt = norm(pair.slice(sep + 1));
-        if (na && nt) {
-          pairSet.add(`${na}|${nt}`);
-          trackSourceByPair.set(`${na}|${nt}`, src);
-        }
+        indexTrackPair(normArtistKey(pair.slice(0, sep)), pair.slice(sep + 1), src);
       });
     }
 
@@ -4983,30 +5292,41 @@ Return ONLY valid JSON:
         candidates.push({ artStr: dashParts[0].trim(), titleStr: dashParts.slice(1).join(' - ').trim() });
       }
 
-      let matchedPairKey = '';
+      let matchedPairKeys = [];
       let matchedCand = null;
       for (const c of candidates) {
-        const nt = norm(c.titleStr);
-        if (!nt) continue;
+        const titleVariants = Array.from(new Set([norm(c.titleStr), CC.normTrackBase(c.titleStr)].filter(Boolean)));
+        if (!titleVariants.length) continue;
         const artParts = String(c.artStr)
           .split(/,|&|\band\b|feat\.?/i)
           .map(normArtistKey)
           .filter(Boolean);
-        const hitArt = artParts.find(na => pairSet.has(`${na}|${nt}`));
-        if (hitArt) {
-          matchedPairKey = `${hitArt}|${nt}`;
+        const hits = [];
+        for (const na of artParts) {
+          for (const tv of titleVariants) {
+            const pk = `${na}|${tv}`;
+            if (pairSet.has(pk) && !hits.includes(pk)) hits.push(pk);
+          }
+        }
+        if (hits.length) {
+          matchedPairKeys = hits;
           matchedCand = c;
           break;
         }
       }
 
-      if (matchedPairKey) {
+      if (matchedPairKeys.length) {
         const label = t.artist ? `${t.artist} - ${t.title}` : t.title;
-        const dedup = norm(label);
+        const dedup = CC.normTrackBase(label) || norm(label);
         if (!seenTrackKey.has(dedup)) {
           seenTrackKey.add(dedup);
           matchedTracks.push(label);
-          const src = trackSourceByPair.get(matchedPairKey) || null;
+          let mergedSrc = null;
+          for (const pk of matchedPairKeys) {
+            const s = trackSourceByPair.get(pk);
+            if (s) mergedSrc = mergeTrackSourceProv(mergedSrc, s);
+          }
+          const src = mergedSrc;
           albumTrackHits.push({
             title: matchedCand?.titleStr || rawTitle,
             artist: t.artist || (isItemVarious ? (matchedCand?.artStr || '') : ''),
@@ -5018,7 +5338,7 @@ Return ONLY valid JSON:
 
           if (hasProvenance) {
             if (src && (src.liked || src.top || src.album)) {
-              const tag = src.top ? 'Top Track' : (src.liked ? 'Liked' : 'Saved Album');
+              const tag = src.liked ? 'Liked' : (src.top ? 'Top Track' : 'Saved Album');
               likedTrackMatches.push(`${label} (${tag})`);
             } else {
               const pls = Array.isArray(src?.playlists) && src.playlists.length ? src.playlists.slice(0, 2).join(', ') : 'Playlist';
@@ -5131,7 +5451,7 @@ Return ONLY valid JSON:
       btn.disabled = true;
       btn.textContent = '⏳ Grading photos...';
     }
-    const labeledImgParts = buildLabeledGradingImageParts('scan', targetItem);
+    const labeledImgParts = await buildLabeledGradingImageParts('scan', targetItem);
     const photoCount = labeledImgParts.filter(p => p.inline_data).length || stagedPhotos.length;
     setStatus(`✨ AI grading ${photoCount} labeled photo(s) on ${aiEngineLabel()}...`, true, { cancellable: true });
 
@@ -5215,25 +5535,31 @@ Return ONLY valid JSON:
     if (!currentInspected) return;
     document.getElementById('tasteScore').textContent = '...';
     document.getElementById('tasteBody').textContent = 'Retrying Taste analysis...';
-    runTasteAnalysis(currentInspected, scanRunId);
+    runTasteAnalysis(currentInspected, scanRunId, inspectSeq);
   };
 
-  async function runTasteAnalysis(item, myRunId) {
+  async function runTasteAnalysis(item, myRunId, myInspectSeq = inspectSeq) {
     if (!CC.isAiReady()) {
       document.getElementById('tasteScore').textContent = '—';
       document.getElementById('tasteBody').textContent = 'Add your Gemini API Key in Settings to enable Taste & Context.';
       return;
     }
 
-    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v216`;
-    if (tasteCache.has(cacheKey)) { applyTasteUI(item, tasteCache.get(cacheKey), myRunId); return; }
+    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v220`;
+    if (tasteCache.has(cacheKey)) {
+      if (myRunId !== scanRunId || myInspectSeq !== inspectSeq || currentInspected !== item) return;
+      applyTasteUI(item, tasteCache.get(cacheKey), myRunId);
+      return;
+    }
 
     const tracksStr = (item.tracklist || []).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title).join('; ');
     const dna = spotifyProfile?.tasteDna || '';
     const softSpots = spotifyProfile?.softSpots || '';
     const sm = item.spotify_matches || {};
+    const onReleaseLiked = (sm.albumTrackHits || []).filter(h => h.liked || h.top).map(h => h.artist ? `${h.artist} - ${h.title}` : h.title);
     const spEvidenceBlock = sm.hasProvenance
-      ? `- HIGH-WEIGHT Liked / Top / Saved-Album Artists: ${(sm.likedArtistDetails || []).join('; ') || 'None'}
+      ? `- PRIORITY #1 LIKED / TOP SONGS LITERALLY ON THIS RELEASE: ${onReleaseLiked.join(', ') || 'None'}
+- HIGH-WEIGHT Liked / Top / Saved-Album Artists: ${(sm.likedArtistDetails || []).join('; ') || 'None'}
 - HIGH-WEIGHT Liked / Top / Saved-Album Songs: ${(sm.likedTrackMatches || []).join(', ') || 'None'}
 - CASUAL Playlist-Only Artists (0 Liked Songs): ${(sm.playlistOnlyArtistDetails || []).join('; ') || 'None'}
 - CASUAL Playlist-Only Songs (0 Liked Songs): ${(sm.playlistOnlyTrackMatches || []).join(', ') || 'None'}`
@@ -5254,6 +5580,7 @@ User's Explicit Soft Spots & Niche Pockets (FIRST-CLASS WEIGHT — treat these w
 ${softSpots || 'None specified yet.'}
 
 HARD RULES:
+0. PRIORITY #1 — ON-RELEASE LIKED SONGS: If 1 or more of the user's Liked Songs (or Top Tracks) is literally on this physical release's tracklist, treat that as the #1 highest-priority KEEP signal (strong 9–10 KEEP when it aligns with their taste/favorite artists, or solid 7–8+ KEEP even on compilations) and explicitly name the matched on-release Liked Song(s) in "summary"!
 1. PROVENANCE WEIGHTING (LIKED SONGS > SAVED ALBUMS > PLAYLIST-ONLY):
    - Liked Songs, Top Tracks, Top Artists, and Saved Albums are STRONG personal favorites — boost the score and NEVER dismiss them as outside the user's taste!
    - Playlist-Only matches (0 Liked Songs / 0 Top / 0 Saved Albums) indicate CASUAL familiarity, NOT a core obsession. State this honestly in "summary" (e.g., "You haven't Liked any Joe Walsh songs, though you have a track in your 'Classic Rock' playlist...") and judge the album fairly against the Taste Profile instead of inflating it to an automatic 9–10.
@@ -5268,7 +5595,7 @@ Return ONLY valid JSON:
 {
   "score": 1 to 10 integer (honest personal taste match based on Taste Profile, Soft Spots & exact library hits),
   "verdict": "KEEP" | "LISTEN" | "SELL / SKIP",
-  "summary": "1-2 punchy sentences speaking directly to 'you' explaining why you will or won't enjoy this, referencing specific library hits, Soft Spots, or Taste Profile traits.",
+  "summary": "1-2 punchy sentences speaking directly to 'you' explaining why you will or won't enjoy this, referencing specific on-release Liked Songs, library hits, Soft Spots, or Taste Profile traits.",
   "context_note": "1-2 neutral sentences of useful context: notable album history, why a song on it is widely recognizable in pop culture, or collector context (plain description, no hype). Empty string if obscure/unremarkable.",
   "litmus_track": "exact song title from Full Tracklist (WITHOUT artist prefix) of the single best/most representative track to preview",
   "litmus_artist": "performing artist of litmus_track",
@@ -5282,11 +5609,11 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
       const res = await CC.callAI([{ text: prompt }], null, { retryLabel: 'Taste Check' });
       setStatus('', false);
       tasteCache.set(cacheKey, res);
-      if (myRunId !== scanRunId || currentInspected !== item) return;
+      if (myRunId !== scanRunId || myInspectSeq !== inspectSeq || currentInspected !== item) return;
       applyTasteUI(item, res, myRunId);
     } catch (err) {
       setStatus('', false);
-      if (myRunId !== scanRunId || currentInspected !== item) return;
+      if (myRunId !== scanRunId || myInspectSeq !== inspectSeq || currentInspected !== item) return;
       document.getElementById('tasteScore').textContent = '⚠️';
       document.getElementById('tasteBody').innerHTML = `
         <div style="margin-bottom:8px; color:#fde68a;">${esc(err.name === 'AbortError' ? 'Cancelled.' : err.message)}</div>
@@ -6524,33 +6851,50 @@ Return ONLY valid JSON:
     const oldInfo = record?.pending_delete_old;
     if (!oldInfo || !oldInfo.releaseId || !cfg.discogsUser) return { ok: true, warning: '' };
 
-    try {
-      let oldInst = oldInfo.instanceId || null;
-      let oldFolder = oldInfo.folderId || '1';
+    if (!isOwnedByActiveDiscogsAccount(oldInfo)) {
+      return {
+        ok: false,
+        warning: `Old pressing #${oldInfo.releaseId} belongs to Discogs @${oldInfo.account}, not @${cfg.discogsUser} — switch Discogs accounts before removing it.`
+      };
+    }
 
-      if (!oldInst) {
-        // throwOnError: true so transient network/HTTP failures NEVER wipe pending_delete_old!
-        const insts = await CC.findDiscogsInstances(oldInfo.releaseId, { throwOnError: true });
+    try {
+      let oldInst = oldInfo.instanceId ? Number(oldInfo.instanceId) : null;
+      let oldFolder = String(oldInfo.folderId || '1');
+
+      // Always verify live copies on Discogs (throwOnError: true so network outages never wipe pending_delete_old)
+      const insts = await CC.findDiscogsInstances(oldInfo.releaseId, { throwOnError: true });
+      if (oldInst) {
+        const exact = insts.find(r => Number(r.instance_id) === oldInst);
+        if (!exact) {
+          // That exact instance is already gone — NEVER guess another copy
+          record.pending_delete_old = null;
+          await CC.mutateStashItemIfAlive(record.id, record.sync_id, (live) => ({ ...live, pending_delete_old: null }), ['pending_delete_old']);
+          return { ok: true, warning: '' };
+        }
+        oldFolder = String(exact.folder_id || oldFolder);
+      } else {
         if (insts.length === 0) {
           record.pending_delete_old = null;
-          await CC.idbPut('stash', record);
+          await CC.mutateStashItemIfAlive(record.id, record.sync_id, (live) => ({ ...live, pending_delete_old: null }), ['pending_delete_old']);
           return { ok: true, warning: '' };
         }
         if (insts.length > 1) {
-          record.pending_delete_old = { ...oldInfo, ambiguous: true, copyCount: insts.length };
-          await CC.idbPut('stash', record);
+          const amb = { ...oldInfo, ambiguous: true, copyCount: insts.length };
+          record.pending_delete_old = amb;
+          await CC.mutateStashItemIfAlive(record.id, record.sync_id, (live) => ({ ...live, pending_delete_old: amb }), ['pending_delete_old']);
           return {
             ok: false,
             warning: `You own ${insts.length} copies of old pressing #${oldInfo.releaseId} on Discogs — kept untouched so the wrong copy isn't deleted. Please remove the duplicate manually on Discogs.`
           };
         }
-        oldInst = insts[0].instance_id;
+        oldInst = Number(insts[0].instance_id);
         oldFolder = String(insts[0].folder_id || oldFolder);
       }
 
       await CC.deleteDiscogsInstance(oldFolder, oldInfo.releaseId, oldInst);
       record.pending_delete_old = null;
-      await CC.idbPut('stash', record);
+      await CC.mutateStashItemIfAlive(record.id, record.sync_id, (live) => ({ ...live, pending_delete_old: null }), ['pending_delete_old']);
       return { ok: true, warning: '' };
     } catch (delErr) {
       return {
@@ -6575,9 +6919,13 @@ Return ONLY valid JSON:
       syncToDiscogs: Boolean(syncToDiscogs),
       inspected: JSON.parse(JSON.stringify(currentInspected)),
       editingItem: editingStashItem ? JSON.parse(JSON.stringify(editingStashItem)) : null,
-      // Slot index 2 is dedicated strictly to Spine — NEVER duplicate it into cover/extra thumbs
-      stagedWebps: stagedPhotos.filter((_, idx) => idx !== 2).map(p => p.saveWebp),
-      stagedSpineWebp: stagedPhotos[2]?.saveWebp || '',
+      // Named slot snapshot: Spine is dedicated strictly to spine_thumb_url and NEVER duplicated into cover/extra slots
+      stagedSlotSnap: {
+        front: stagedSlots.front?.saveWebp || '',
+        back: stagedSlots.back?.saveWebp || '',
+        spine: stagedSlots.spine?.saveWebp || '',
+        extras: (stagedSlots.extras || []).filter(Boolean).map(p => p.saveWebp)
+      },
       mediaCond: document.getElementById('gMediaCond').value || 'Not Graded',
       sleeveCond: document.getElementById('gSleeveCond').value || 'Not Graded',
       condNote: document.getElementById('gNotes').value.trim(),
@@ -6620,26 +6968,41 @@ Return ONLY valid JSON:
       let pendingDeleteOld = isEditing ? (oldItem.pending_delete_old || null) : null;
       let pendingFieldSync = isEditing ? Boolean(oldItem.pending_field_sync) : false;
       let attachedFromLedger = false;
+      let verifiedOnDiscogsNow = false;
 
       let fieldRes = { okCount: 0, failedCount: 0, errors: [] };
       let sameReleaseSkippedRemote = false;
       let sameReleaseRemoteCopies = 0;
 
-      const finalThumbs = snap.stagedWebps.length
-        ? snap.stagedWebps
-        : (isEditing ? (oldItem.thumbs || (oldItem.thumb_data_url ? [oldItem.thumb_data_url] : [])) : []);
+      // Per-slot merge during Edit/Re-Check so untouched Front / Back / Extras / Spine slots survive
+      const baseSlots = isEditing ? CC.normalizePhotoSlots(oldItem) : { front: '', back: '', extras: [] };
+      const mergedExtras = snap.stagedSlotSnap.extras.length
+        ? Array.from(new Set([...(baseSlots.extras || []), ...snap.stagedSlotSnap.extras]))
+        : (baseSlots.extras || []).slice();
+      const finalPhotoSlots = {
+        front: snap.stagedSlotSnap.front || baseSlots.front || '',
+        back: snap.stagedSlotSnap.back || baseSlots.back || '',
+        extras: mergedExtras
+      };
+      const derivedThumbs = CC.deriveThumbsFromSlots(finalPhotoSlots, snap.inspected.discogs_thumb || '');
 
       const buildRecord = () => {
         const cleanInspected = { ...snap.inspected };
         delete cleanInspected._pendingDiscogsAdd;
         const now = Date.now();
+        const resolvedAccount = synced
+          ? ((verifiedOnDiscogsNow || attachedFromLedger) ? (cfg.discogsUser || oldItem?.discogs_account || '') : (oldItem?.discogs_account || ''))
+          : (changedRelease ? '' : (oldItem?.discogs_account || ''));
+        const resolvedFolderVerifiedAt = synced
+          ? ((verifiedOnDiscogsNow || attachedFromLedger) ? now : (oldItem?.discogs_folder_verified_at || 0))
+          : (changedRelease ? 0 : (oldItem?.discogs_folder_verified_at || 0));
         const rawRec = {
           ...cleanInspected,
           sync_id: (isEditing && oldItem.sync_id) ? oldItem.sync_id : (snap.inspected.sync_id || CC.generateSyncId()),
           is_conservative_tiebreak: Boolean(snap.inspected.is_conservative_tiebreak),
           tiebreak_confirmed: Boolean(!snap.inspected.is_conservative_tiebreak || snap.tiebreakChecked),
           synced_to_discogs: synced,
-          discogs_account: synced ? (cfg.discogsUser || oldItem?.discogs_account || '') : (oldItem?.discogs_account || ''),
+          discogs_account: resolvedAccount,
           discogs_removed: synced ? false : Boolean(oldItem?.discogs_removed),
           discogs_removed_at: synced ? null : (oldItem?.discogs_removed_at || null),
           intended_discogs_folder_id: synced ? null : (oldItem?.intended_discogs_folder_id || snap.defaultFolderId || '1'),
@@ -6647,12 +7010,13 @@ Return ONLY valid JSON:
           pending_field_sync: pendingFieldSync,
           pending_delete_old: pendingDeleteOld,
           discogs_folder_id: synced ? String(folderId || '1') : null,
-          discogs_folder_verified_at: synced ? now : (oldItem?.discogs_folder_verified_at || 0),
+          discogs_folder_verified_at: resolvedFolderVerifiedAt,
           discogs_instance_id: synced ? instanceId : null,
-          thumbs: finalThumbs,
-          thumb_data_url: finalThumbs[0] || snap.inspected.discogs_thumb || '',
-          spine_thumb_url: snap.inspected.spine_thumb_url || snap.stagedSpineWebp || (isEditing ? (oldItem.spine_thumb_url || '') : ''),
-          spine_source_url: snap.inspected.spine_source_url || snap.stagedSpineWebp || (isEditing ? (oldItem.spine_source_url || '') : ''),
+          photo_slots: finalPhotoSlots,
+          thumbs: derivedThumbs.thumbs,
+          thumb_data_url: derivedThumbs.thumb_data_url,
+          spine_thumb_url: snap.inspected.spine_thumb_url || snap.stagedSlotSnap.spine || (isEditing ? (oldItem.spine_thumb_url || '') : ''),
+          spine_source_url: snap.inspected.spine_source_url || snap.stagedSlotSnap.spine || (isEditing ? (oldItem.spine_source_url || '') : ''),
           spine_flipped: Boolean(snap.inspected.spine_flipped ?? (isEditing ? oldItem.spine_flipped : false)),
           created_at: isEditing ? (oldItem.created_at || now) : now,
           updated_at: now
@@ -6664,12 +7028,18 @@ Return ONLY valid JSON:
       if (snap.syncToDiscogs) {
         try {
           if (sameRelease) {
+            if (!isOwnedByActiveDiscogsAccount(oldItem)) {
+              setStatus('', false);
+              toast(`⚠️ Cannot update Discogs — this copy belongs to @${oldItem.discogs_account}, not @${cfg.discogsUser}. Use Save Local instead.`, 5200);
+              return;
+            }
             setStatus('Updating grades & notes on your existing Discogs item...', true);
             if (!instanceId) {
               const insts = await CC.findDiscogsInstances(oldItem.discogs_id, { throwOnError: true });
               if (insts.length === 1) {
                 instanceId = insts[0].instance_id;
                 folderId = String(insts[0].folder_id || folderId);
+                verifiedOnDiscogsNow = true;
               } else {
                 sameReleaseSkippedRemote = true;
                 sameReleaseRemoteCopies = insts.length;
@@ -6678,6 +7048,7 @@ Return ONLY valid JSON:
             if (instanceId) {
               fieldRes = await CC.syncDiscogsInstanceFields(folderId, snap.inspected.discogs_id, instanceId, snap.mediaCond, snap.sleeveCond, snap.condNote);
               pendingFieldSync = fieldRes.failedCount > 0;
+              verifiedOnDiscogsNow = true;
             }
             synced = true;
             pendingDiscogsSync = false;
@@ -6686,6 +7057,7 @@ Return ONLY valid JSON:
             const added = await ensureDiscogsInstanceDurable(ledgerKey, snap.inspected.discogs_id, snap.defaultFolderId, relKey ? [relKey] : []);
             folderId = added.folderId;
             instanceId = added.instanceId;
+            verifiedOnDiscogsNow = true;
 
             // 2. Sync Media/Sleeve/Notes fields on the new instance
             setStatus('Saving Media/Sleeve grade & notes to Discogs...', true);
@@ -6699,7 +7071,8 @@ Return ONLY valid JSON:
               pendingDeleteOld = {
                 releaseId: oldItem.discogs_id,
                 folderId: oldItem.discogs_folder_id || '1',
-                instanceId: oldItem.discogs_instance_id || null
+                instanceId: oldItem.discogs_instance_id || null,
+                account: oldItem.discogs_account || cfg.discogsUser || ''
               };
             }
           }
@@ -6714,7 +7087,8 @@ Return ONLY valid JSON:
             pendingDeleteOld = {
               releaseId: oldItem.discogs_id,
               folderId: oldItem.discogs_folder_id || '1',
-              instanceId: oldItem.discogs_instance_id || null
+              instanceId: oldItem.discogs_instance_id || null,
+              account: oldItem.discogs_account || cfg.discogsUser || ''
             };
           }
           instanceId = null;
@@ -6837,12 +7211,16 @@ Return ONLY valid JSON:
 
   window.resetScanner = () => {
     scanRunId++;
+    stageSeq++;
+    inspectSeq++;
+    batchAutoCropCancelled = true;
     deepSearchCancelled = true;
     CC.cancelAI();
     stopHighlightAudio();
     setStatus('', false);
     pendingVoiceRetry = null;
-    stagedPhotos = [];
+    stagedSlots = { front: null, back: null, spine: null, extras: [] };
+    syncStagedPhotosCompat();
     stagedSpineThumbUrl = '';
     stagedSpineSourceUrl = '';
     stagedSpineFlipped = false;
@@ -7054,7 +7432,7 @@ Return ONLY valid JSON:
           return `
             <div class="spine-row" onclick="openStashDetail(${it.id})">
               <div class="spine-img-wrap">
-                <img class="spine-img" src="${esc(it.spine_thumb_url)}" alt="${esc(it.artist)} — ${esc(it.title)}" />
+                ${renderPhotoImgOrPlaceholder(it.spine_thumb_url, 'spine-img', `alt="${esc(it.artist)} — ${esc(it.title)}"`)}
                 ${(tasteTxt || priceTxt) ? `<div class="spine-img-tag">${priceTxt ? `<span>${esc(priceTxt)}</span>` : ''}${tasteTxt ? `<span style="color:var(--spotify);">${esc(tasteTxt)}</span>` : ''}</div>` : ''}
               </div>
             </div>
@@ -7106,7 +7484,7 @@ Return ONLY valid JSON:
       return `
         <div class="stash-item" onclick="openStashDetail(${it.id})">
           <div class="stash-top">
-            <img class="stash-thumb" src="${esc(it.thumb_data_url || '')}" onerror="this.style.visibility='hidden'" />
+            ${renderPhotoImgOrPlaceholder(it.thumb_data_url || '', 'stash-thumb', `onerror="this.style.visibility='hidden'"`)}
             <div class="stash-body">
               <div class="candidate-title">${esc(it.artist)} — ${esc(it.title)}</div>
               <div class="stash-sub">${esc(it.format)} · ${esc(it.country || '?')} · ${esc(it.year || '?')} · ${esc(it.catno || 'No Cat#')}</div>
@@ -7144,8 +7522,10 @@ Return ONLY valid JSON:
     const tracksStr = (it.tracklist || []).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title).join('; ');
     const dna = spotifyProfile?.tasteDna || '';
     const softSpots = spotifyProfile?.softSpots || '';
+    const onRelLiked = (localMatch.albumTrackHits || []).filter(h => h.liked || h.top).map(h => h.artist ? `${h.artist} - ${h.title}` : h.title);
     const spBlock = localMatch.hasProvenance
-      ? `- HIGH-WEIGHT Liked / Top / Saved-Album Artists: ${(localMatch.likedArtistDetails || []).join('; ') || 'None'}
+      ? `- PRIORITY #1 LIKED / TOP SONGS LITERALLY ON THIS RELEASE: ${onRelLiked.join(', ') || 'None'}
+- HIGH-WEIGHT Liked / Top / Saved-Album Artists: ${(localMatch.likedArtistDetails || []).join('; ') || 'None'}
 - HIGH-WEIGHT Liked / Top / Saved-Album Songs: ${(localMatch.likedTrackMatches || []).join(', ') || 'None'}
 - CASUAL Playlist-Only Artists (0 Liked Songs): ${(localMatch.playlistOnlyArtistDetails || []).join('; ') || 'None'}
 - CASUAL Playlist-Only Songs (0 Liked Songs): ${(localMatch.playlistOnlyTrackMatches || []).join(', ') || 'None'}`
@@ -7166,6 +7546,7 @@ User's Explicit Soft Spots & Niche Pockets (FIRST-CLASS WEIGHT — treat these w
 ${softSpots || 'None specified yet.'}
 
 HARD RULES:
+0. PRIORITY #1 — ON-RELEASE LIKED SONGS: If 1 or more of the user's Liked Songs (or Top Tracks) is literally on this physical release's tracklist, treat that as the #1 highest-priority KEEP signal (strong 9–10 KEEP when it aligns with their taste/favorite artists, or solid 7–8+ KEEP even on compilations) and explicitly name the matched on-release Liked Song(s) in "summary"!
 1. PROVENANCE WEIGHTING (LIKED SONGS > SAVED ALBUMS > PLAYLIST-ONLY):
    - Liked Songs, Top Tracks, Top Artists, and Saved Albums are STRONG personal favorites — boost the score and NEVER dismiss them as outside the user's taste!
    - Playlist-Only matches (0 Liked Songs) indicate CASUAL familiarity only; state this explicitly in "summary" rather than inflating to a 9–10.
@@ -7207,7 +7588,7 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
         'notable_songs', 'litmus_track', 'litmus_artist', 'taste_scored_at'
       ]);
 
-      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v216`);
+      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v220`);
       await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
       await loadStashCache();
       renderStash();
@@ -7275,6 +7656,7 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
             format: it.format || '',
             genres: (it.genres || []).slice(0, 6),
             sample_tracks: (it.tracklist || []).slice(0, 24).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title),
+            liked_songs_literally_on_this_release: (lm.albumTrackHits || []).filter(h => h.liked || h.top).map(h => h.artist ? `${h.artist} - ${h.title}` : h.title),
             liked_artists_in_spotify: lm.hasProvenance ? lm.likedArtistDetails : (lm.details !== 'None' ? [lm.details] : []),
             liked_tracks_in_spotify: lm.hasProvenance ? lm.likedTrackMatches : lm.matchedTracks,
             playlist_only_artists: lm.hasProvenance ? lm.playlistOnlyArtistDetails : [],
@@ -7291,6 +7673,7 @@ User's Explicit Soft Spots & Niche Pockets (FIRST-CLASS WEIGHT — treat these w
 ${softSpots}
 
 HARD RULES:
+0. PRIORITY #1 — ON-RELEASE LIKED SONGS: If "liked_songs_literally_on_this_release" is non-empty, treat that as the #1 highest-priority KEEP signal (strong 9–10 KEEP when it aligns with their taste/favorite artists, or solid 7–8+ KEEP even on compilations) and explicitly name the matched on-release Liked Song(s) in "summary"!
 1. PROVENANCE WEIGHTING: Liked/Top/Saved-Album matches deserve a strong boost; Playlist-Only matches (0 Liked Songs) indicate casual familiarity only — state that clearly instead of inflating to 9–10.
 2. Evaluate BOTH the specific album/release (era, genre, studio album vs compilation) AND the artist.
 3. Verdict rules: "KEEP" if score >= 7, "LISTEN" if 5-6, "SELL / SKIP" if <= 4.
@@ -7375,23 +7758,53 @@ Return ONLY valid JSON:
     }
   };
 
+  function getStashPhotoSlots(it) {
+    return CC.normalizePhotoSlots(it);
+  }
+
+  function getStashCoverSlotTiles(it) {
+    if (!it) return [];
+    const slots = getStashPhotoSlots(it);
+    const tiles = [];
+    if (slots.front) tiles.push({ slotKey: 'front', extraIdx: -1, label: 'FRONT', src: slots.front });
+    if (slots.back) tiles.push({ slotKey: 'back', extraIdx: -1, label: 'BACK', src: slots.back });
+    (slots.extras || []).forEach((src, i) => {
+      if (src) tiles.push({ slotKey: 'extra', extraIdx: i, label: i === 0 ? 'EXTRA' : `EXTRA ${i + 1}`, src });
+    });
+    return tiles;
+  }
+
   function getStashCoverPhotos(it) {
     if (!it) return [];
-    if (Array.isArray(it.thumbs) && it.thumbs.length) return it.thumbs.filter(Boolean);
+    const tiles = getStashCoverSlotTiles(it);
+    if (tiles.length) return tiles.map(t => t.src);
     return it.thumb_data_url ? [it.thumb_data_url] : [];
   }
 
   window.openStashLightbox = (idx) => {
     if (!activeStashItem) return;
-    openLightbox(getStashCoverPhotos(activeStashItem), idx);
+    const photos = getStashCoverPhotos(activeStashItem);
+    const target = photos[idx];
+    if (isUnresolvedDriveRef(target)) {
+      toast('☁️ Photo is still on Google Drive — tap Sync with Cloud to download it first', 3600);
+      return;
+    }
+    const resolved = photos.filter(p => p && !isUnresolvedDriveRef(p));
+    const adjIdx = Math.max(0, resolved.indexOf(target));
+    if (!resolved.length) return;
+    openLightbox(resolved, adjIdx);
   };
 
   window.openStashSpineLightbox = () => {
     if (!activeStashItem?.spine_thumb_url) return;
+    if (isUnresolvedDriveRef(activeStashItem.spine_thumb_url)) {
+      toast('☁️ Spine photo is still on Google Drive — tap Sync with Cloud to download it first', 3600);
+      return;
+    }
     openLightbox([activeStashItem.spine_thumb_url], 0);
   };
 
-  let stashReplaceThumbIdx = -1;
+  let stashReplaceTarget = null;
 
   window.toggleStashPhotoManager = (id) => {
     stashPhotoManagerOpen = !stashPhotoManagerOpen;
@@ -7411,58 +7824,70 @@ Return ONLY valid JSON:
     stashAddPhotoMenuOpen = false;
     const m = document.getElementById('sdAddSlotMenu');
     if (m) m.classList.add('hidden');
-    stashReplaceThumbIdx = -1;
+    stashReplaceTarget = null;
     const map = { front: 'sdPhotoFront', back: 'sdPhotoBack', spine: 'sdPhotoSpine', extra: 'sdPhotoExtra' };
     document.getElementById(map[slot])?.click();
   };
 
-  window.triggerStashPhotoReplace = (idx, ev) => {
+  window.triggerStashPhotoReplace = (slotKey, extraIdx = -1, ev = null) => {
     if (ev) ev.stopPropagation();
     stashAddPhotoMenuOpen = false;
     const m = document.getElementById('sdAddSlotMenu');
     if (m) m.classList.add('hidden');
-    stashReplaceThumbIdx = Number(idx);
-    if (idx === 0) document.getElementById('sdPhotoFront')?.click();
-    else if (idx === 1) document.getElementById('sdPhotoBack')?.click();
+    stashReplaceTarget = { slotKey, extraIdx: Number(extraIdx) };
+    if (slotKey === 'front') document.getElementById('sdPhotoFront')?.click();
+    else if (slotKey === 'back') document.getElementById('sdPhotoBack')?.click();
     else document.getElementById('sdPhotoReplaceExtra')?.click();
   };
 
-  // Direct Stash Detail photo add/replace/remove — supports immediate Gemini Auto-Crop + pre-save #cropModal preview,
-  // saving strictly at cfg.photoQuality (zero Discogs writes, zero grade changes).
+  // Direct Stash Detail photo add/replace/remove — uses stable named photo_slots & atomic live-row mutation
+  // (never resurrects a deleted item; saves strictly at cfg.photoQuality; zero Discogs writes, zero grade changes).
   window.handleStashPhotoFiles = async (id, slot, fileList) => {
     const files = Array.from(fileList || []);
     if (!files.length) return;
     const it = stashCache.find(x => x.id === id);
     if (!it) return;
+    const targetSyncId = it.sync_id || '';
 
     const spec = getPhotoQualitySpec();
-    const replaceIdx = stashReplaceThumbIdx;
-    stashReplaceThumbIdx = -1;
+    const replaceTarget = stashReplaceTarget;
+    stashReplaceTarget = null;
+
+    const handleAborted = async () => {
+      await loadStashCache();
+      renderStash();
+      if (activeStashItem?.id === id) closeStashDetail();
+      toast('Item was deleted while editing — photo change discarded', 3800);
+    };
 
     const commitCoverWebp = async (webpDataUrl) => {
-      const latest = stashCache.find(x => x.id === id);
-      if (!latest) return;
-      const prev = { ...latest };
-      const nextThumbs = getStashCoverPhotos(latest).slice();
-      if (slot === 'replace_idx' && replaceIdx >= 0 && replaceIdx < nextThumbs.length) {
-        nextThumbs[replaceIdx] = webpDataUrl;
-      } else if (slot === 'front') {
-        if (nextThumbs.length === 0) nextThumbs.push(webpDataUrl);
-        else nextThumbs[0] = webpDataUrl;
-      } else if (slot === 'back') {
-        if (nextThumbs.length === 0) nextThumbs.push(webpDataUrl);
-        else if (nextThumbs.length === 1) nextThumbs.push(webpDataUrl);
-        else nextThumbs[1] = webpDataUrl;
-      } else {
-        nextThumbs.push(webpDataUrl);
-      }
-      const updated = {
-        ...latest,
-        thumbs: nextThumbs,
-        thumb_data_url: nextThumbs[0] || latest.discogs_thumb || ''
-      };
-      const stamped = CC.stampStashRevision(updated, prev, ['thumbs', 'thumb_data_url']);
-      await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+      const res = await CC.mutateStashItemIfAlive(id, targetSyncId, (liveRow) => {
+        const slots = CC.normalizePhotoSlots(liveRow);
+        if (slot === 'replace_idx' && replaceTarget) {
+          if (replaceTarget.slotKey === 'front') slots.front = webpDataUrl;
+          else if (replaceTarget.slotKey === 'back') slots.back = webpDataUrl;
+          else if (replaceTarget.slotKey === 'extra' && replaceTarget.extraIdx >= 0 && replaceTarget.extraIdx < slots.extras.length) {
+            slots.extras[replaceTarget.extraIdx] = webpDataUrl;
+          } else {
+            slots.extras.push(webpDataUrl);
+          }
+        } else if (slot === 'front') {
+          slots.front = webpDataUrl;
+        } else if (slot === 'back') {
+          slots.back = webpDataUrl;
+        } else {
+          slots.extras.push(webpDataUrl);
+        }
+        const derived = CC.deriveThumbsFromSlots(slots, liveRow.discogs_thumb || '');
+        return {
+          ...liveRow,
+          photo_slots: slots,
+          thumbs: derived.thumbs,
+          thumb_data_url: derived.thumb_data_url
+        };
+      }, ['photo_slots', 'thumbs', 'thumb_data_url']);
+
+      if (res.aborted) { await handleAborted(); return; }
       await loadStashCache();
       renderStash();
       updateCloudUI();
@@ -7474,7 +7899,15 @@ Return ONLY valid JSON:
     // Single-file Front / Back / Spine / single Extra / Replace -> immediate auto-crop (if enabled) + interactive #cropModal preview!
     if (slot === 'spine' || files.length === 1) {
       const isSpine = slot === 'spine';
-      const slotTitle = isSpine ? 'Spine' : (slot === 'front' ? 'Front' : (slot === 'back' ? 'Back' : (slot === 'replace_idx' ? (replaceIdx === 0 ? 'Front' : (replaceIdx === 1 ? 'Back' : `Extra ${replaceIdx - 1}`)) : 'Extra')));
+      const slotTitle = isSpine ? 'Spine' : (
+        slot === 'front' ? 'Front' : (
+          slot === 'back' ? 'Back' : (
+            slot === 'replace_idx' && replaceTarget
+              ? (replaceTarget.slotKey === 'front' ? 'Front' : (replaceTarget.slotKey === 'back' ? 'Back' : `Extra ${replaceTarget.extraIdx + 1}`))
+              : 'Extra'
+          )
+        )
+      );
       setStatus(`Loading ${slotTitle.toLowerCase()} photo...`, true);
       try {
         const pair = await decodeBlobToPhotoPair(files[0], {
@@ -7511,17 +7944,13 @@ Return ONLY valid JSON:
           initialRotation,
           onApply: async (croppedWebp, workingSourceWebp, appliedRect, wasRotated) => {
             if (isSpine) {
-              const latest = stashCache.find(x => x.id === id);
-              if (!latest) return;
-              const prev = { ...latest };
-              const updated = {
-                ...latest,
+              const res = await CC.mutateStashItemIfAlive(id, targetSyncId, (liveRow) => ({
+                ...liveRow,
                 spine_source_url: workingSourceWebp || fullSrc,
                 spine_thumb_url: croppedWebp,
                 spine_flipped: false
-              };
-              const stamped = CC.stampStashRevision(updated, prev, ['spine_source_url', 'spine_thumb_url', 'spine_flipped']);
-              await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+              }), ['spine_source_url', 'spine_thumb_url', 'spine_flipped']);
+              if (res.aborted) { await handleAborted(); return; }
               await loadStashCache();
               renderStash();
               updateCloudUI();
@@ -7539,17 +7968,19 @@ Return ONLY valid JSON:
         });
       } catch (err) {
         setStatus('', false);
+        if (err?.name === 'AbortError') return;
         toast('Photo error: ' + (err?.message || 'Failed'), 4200);
       }
       return;
     }
 
-    // Multi-file Extra upload (2+ files at once): decode at cfg.photoQuality, batch auto-crop if enabled, and save directly
-    const prev = { ...it };
-    const nextThumbs = getStashCoverPhotos(it).slice();
+    // Multi-file Extra upload (2+ files at once): decode at cfg.photoQuality, batch auto-crop if enabled, and save atomically
+    batchAutoCropCancelled = false;
+    const processedExtras = [];
     setStatus(`Processing ${files.length} photo(s) (${spec.label})...`, true, { cancellable: true });
     try {
       for (let i = 0; i < files.length; i++) {
+        if (batchAutoCropCancelled) { setStatus('', false); return; }
         const file = files[i];
         const pair = await decodeBlobToPhotoPair(file, {
           aiMaxDim: 2048,
@@ -7562,8 +7993,10 @@ Return ONLY valid JSON:
         });
         let finalWebp = pair.saveWebp;
         if (cfg.autoCropPhotos && CC.isAiReady()) {
+          if (batchAutoCropCancelled) { setStatus('', false); return; }
           setStatus(`✂️ Auto-cropping Extra ${i + 1}/${files.length}...`, true, { cancellable: true });
           const ac = await autoCropImageWithGemini(pair.origDataUrl || pair.saveWebp, 'cover');
+          if (batchAutoCropCancelled) { setStatus('', false); return; }
           if (ac.box_2d) {
             const cropped = await cropImageByBox(pair.origDataUrl || pair.saveWebp, ac.box_2d, {
               minBoxSpan: 150,
@@ -7576,54 +8009,66 @@ Return ONLY valid JSON:
             if (cropped) finalWebp = cropped;
           }
         }
-        nextThumbs.push(finalWebp);
+        processedExtras.push(finalWebp);
       }
 
-      const updated = {
-        ...it,
-        thumbs: nextThumbs,
-        thumb_data_url: nextThumbs[0] || it.discogs_thumb || ''
-      };
-      const stamped = CC.stampStashRevision(updated, prev, ['thumbs', 'thumb_data_url']);
-      await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+      const res = await CC.mutateStashItemIfAlive(id, targetSyncId, (liveRow) => {
+        const slots = CC.normalizePhotoSlots(liveRow);
+        slots.extras.push(...processedExtras);
+        const derived = CC.deriveThumbsFromSlots(slots, liveRow.discogs_thumb || '');
+        return {
+          ...liveRow,
+          photo_slots: slots,
+          thumbs: derived.thumbs,
+          thumb_data_url: derived.thumb_data_url
+        };
+      }, ['photo_slots', 'thumbs', 'thumb_data_url']);
+
+      setStatus('', false);
+      if (res.aborted) { await handleAborted(); return; }
       await loadStashCache();
       renderStash();
       updateCloudUI();
       scheduleGoogleAutoSync();
-      setStatus('', false);
       if (activeStashItem?.id === id) openStashDetail(id, true);
-      toast(`📷 ${files.length} photos saved to Stash!`);
+      toast(`📷 ${processedExtras.length} photos saved to Stash!`);
     } catch (err) {
       setStatus('', false);
+      if (err?.name === 'AbortError' || batchAutoCropCancelled) return;
       toast('Photo error: ' + (err?.message || 'Failed'), 4200);
     }
   };
 
-  window.openStashPhotoCrop = (id, slot, idx = 0, ev = null) => {
+  window.openStashPhotoCrop = (id, slotKey, extraIdx = -1, ev = null) => {
     if (ev) ev.stopPropagation();
     const it = stashCache.find(x => x.id === id);
     if (!it) return;
-    if (slot === 'spine') {
+    const targetSyncId = it.sync_id || '';
+    if (slotKey === 'spine') {
       const src = it.spine_source_url || it.spine_thumb_url || '';
       if (!src) return;
+      if (isUnresolvedDriveRef(src)) {
+        toast('☁️ Spine photo is still on Google Drive — tap Sync with Cloud first', 3600);
+        return;
+      }
       openCropModal({
         dataUrl: src,
         title: '✂️ Crop & Rotate Spine',
         mode: 'spine',
         onApply: async (croppedWebp, workingSourceWebp) => {
-          const latest = stashCache.find(x => x.id === id);
-          if (!latest) return;
-          const prev = { ...latest };
-          const updated = {
-            ...latest,
+          const res = await CC.mutateStashItemIfAlive(id, targetSyncId, (liveRow) => ({
+            ...liveRow,
             spine_source_url: workingSourceWebp || src,
             spine_thumb_url: croppedWebp,
             spine_flipped: false
-          };
-          const stamped = CC.stampStashRevision(updated, prev, ['spine_source_url', 'spine_thumb_url', 'spine_flipped']);
-          await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+          }), ['spine_source_url', 'spine_thumb_url', 'spine_flipped']);
           await loadStashCache();
           renderStash();
+          if (res.aborted) {
+            if (activeStashItem?.id === id) closeStashDetail();
+            toast('Item was deleted while editing — spine crop discarded', 3800);
+            return;
+          }
           updateCloudUI();
           scheduleGoogleAutoSync();
           if (activeStashItem?.id === id) openStashDetail(id, true);
@@ -7633,29 +8078,43 @@ Return ONLY valid JSON:
       return;
     }
 
-    const photos = getStashCoverPhotos(it);
-    const src = photos[idx] || '';
+    const slots = getStashPhotoSlots(it);
+    let src = '';
+    let slotTitle = 'Photo';
+    if (slotKey === 'front') { src = slots.front; slotTitle = 'Front'; }
+    else if (slotKey === 'back') { src = slots.back; slotTitle = 'Back'; }
+    else if (slotKey === 'extra') { src = (slots.extras || [])[extraIdx] || ''; slotTitle = extraIdx === 0 ? 'Extra' : `Extra ${extraIdx + 1}`; }
     if (!src) return;
-    const slotTitle = idx === 0 ? 'Front' : (idx === 1 ? 'Back' : `Extra ${idx - 1}`);
+    if (isUnresolvedDriveRef(src)) {
+      toast('☁️ Photo is still on Google Drive — tap Sync with Cloud first', 3600);
+      return;
+    }
     openCropModal({
       dataUrl: src,
       title: `✂️ Crop & Rotate ${slotTitle}`,
       mode: 'cover',
       onApply: async (croppedWebp) => {
-        const latest = stashCache.find(x => x.id === id);
-        if (!latest) return;
-        const prev = { ...latest };
-        const nextThumbs = getStashCoverPhotos(latest).slice();
-        if (idx >= 0 && idx < nextThumbs.length) nextThumbs[idx] = croppedWebp;
-        const updated = {
-          ...latest,
-          thumbs: nextThumbs,
-          thumb_data_url: nextThumbs[0] || latest.discogs_thumb || ''
-        };
-        const stamped = CC.stampStashRevision(updated, prev, ['thumbs', 'thumb_data_url']);
-        await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+        const res = await CC.mutateStashItemIfAlive(id, targetSyncId, (liveRow) => {
+          const liveSlots = CC.normalizePhotoSlots(liveRow);
+          if (slotKey === 'front') liveSlots.front = croppedWebp;
+          else if (slotKey === 'back') liveSlots.back = croppedWebp;
+          else if (slotKey === 'extra' && extraIdx >= 0 && extraIdx < liveSlots.extras.length) liveSlots.extras[extraIdx] = croppedWebp;
+          else return null;
+          const derived = CC.deriveThumbsFromSlots(liveSlots, liveRow.discogs_thumb || '');
+          return {
+            ...liveRow,
+            photo_slots: liveSlots,
+            thumbs: derived.thumbs,
+            thumb_data_url: derived.thumb_data_url
+          };
+        }, ['photo_slots', 'thumbs', 'thumb_data_url']);
         await loadStashCache();
         renderStash();
+        if (res.aborted) {
+          if (activeStashItem?.id === id) closeStashDetail();
+          toast('Item was deleted while editing — crop discarded', 3800);
+          return;
+        }
         updateCloudUI();
         scheduleGoogleAutoSync();
         if (activeStashItem?.id === id) openStashDetail(id, true);
@@ -7664,23 +8123,30 @@ Return ONLY valid JSON:
     });
   };
 
-  window.removeStashPhotoSlot = async (id, idx, ev) => {
+  window.removeStashPhotoSlot = async (id, slotKey, extraIdx = -1, ev = null) => {
     if (ev) ev.stopPropagation();
     const it = stashCache.find(x => x.id === id);
     if (!it) return;
     if (!confirm('Remove this photo from this Stash item?')) return;
-    const prev = { ...it };
-    const nextThumbs = getStashCoverPhotos(it).slice();
-    if (idx >= 0 && idx < nextThumbs.length) nextThumbs.splice(idx, 1);
-    const updated = {
-      ...it,
-      thumbs: nextThumbs,
-      thumb_data_url: nextThumbs[0] || it.discogs_thumb || ''
-    };
-    const stamped = CC.stampStashRevision(updated, prev, ['thumbs', 'thumb_data_url']);
-    await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+    const res = await CC.mutateStashItemIfAlive(id, it.sync_id || '', (liveRow) => {
+      const slots = CC.normalizePhotoSlots(liveRow);
+      if (slotKey === 'front') slots.front = '';
+      else if (slotKey === 'back') slots.back = '';
+      else if (slotKey === 'extra' && extraIdx >= 0 && extraIdx < slots.extras.length) slots.extras.splice(extraIdx, 1);
+      const derived = CC.deriveThumbsFromSlots(slots, liveRow.discogs_thumb || '');
+      return {
+        ...liveRow,
+        photo_slots: slots,
+        thumbs: derived.thumbs,
+        thumb_data_url: derived.thumb_data_url
+      };
+    }, ['photo_slots', 'thumbs', 'thumb_data_url']);
     await loadStashCache();
     renderStash();
+    if (res.aborted) {
+      if (activeStashItem?.id === id) closeStashDetail();
+      return;
+    }
     updateCloudUI();
     scheduleGoogleAutoSync();
     if (activeStashItem?.id === id) openStashDetail(id, true);
@@ -7692,12 +8158,18 @@ Return ONLY valid JSON:
     const it = stashCache.find(x => x.id === id);
     if (!it) return;
     if (!confirm('Remove spine photo from this item?')) return;
-    const prev = { ...it };
-    const updated = { ...it, spine_thumb_url: '', spine_source_url: '', spine_flipped: false };
-    const stamped = CC.stampStashRevision(updated, prev, ['spine_thumb_url', 'spine_source_url', 'spine_flipped']);
-    await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+    const res = await CC.mutateStashItemIfAlive(id, it.sync_id || '', (liveRow) => ({
+      ...liveRow,
+      spine_thumb_url: '',
+      spine_source_url: '',
+      spine_flipped: false
+    }), ['spine_thumb_url', 'spine_source_url', 'spine_flipped']);
     await loadStashCache();
     renderStash();
+    if (res.aborted) {
+      if (activeStashItem?.id === id) closeStashDetail();
+      return;
+    }
     updateCloudUI();
     scheduleGoogleAutoSync();
     if (activeStashItem?.id === id) openStashDetail(id, true);
@@ -7709,19 +8181,25 @@ Return ONLY valid JSON:
     if (ev) ev.stopPropagation();
     const it = stashCache.find(x => x.id === id);
     if (!it || !it.spine_thumb_url) return;
-    const prev = { ...it };
+    if (isUnresolvedDriveRef(it.spine_thumb_url)) {
+      toast('☁️ Spine photo is still on Google Drive — tap Sync with Cloud first', 3600);
+      return;
+    }
     const sourceUrl = it.spine_source_url || it.spine_thumb_url;
     const rotated = await rotateDataUrlByDeg(it.spine_thumb_url, 90, 'image/webp', 0.82, 960);
-    const updated = {
-      ...it,
-      spine_source_url: sourceUrl,
+    const res = await CC.mutateStashItemIfAlive(id, it.sync_id || '', (liveRow) => ({
+      ...liveRow,
+      spine_source_url: liveRow.spine_source_url || sourceUrl,
       spine_thumb_url: rotated,
-      spine_flipped: !Boolean(it.spine_flipped)
-    };
-    const stamped = CC.stampStashRevision(updated, prev, ['spine_source_url', 'spine_thumb_url', 'spine_flipped']);
-    await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+      spine_flipped: !Boolean(liveRow.spine_flipped)
+    }), ['spine_source_url', 'spine_thumb_url', 'spine_flipped']);
     await loadStashCache();
     renderStash();
+    if (res.aborted) {
+      if (activeStashItem?.id === id) closeStashDetail();
+      toast('Item was deleted while rotating spine', 3400);
+      return;
+    }
     updateCloudUI();
     scheduleGoogleAutoSync();
     if (activeStashItem?.id === id) openStashDetail(id, true);
@@ -7751,6 +8229,10 @@ Return ONLY valid JSON:
     }
     if (!cfg.discogsToken || !cfg.discogsUser) {
       toast('Verify your Discogs account in Settings first');
+      return;
+    }
+    if (!isOwnedByActiveDiscogsAccount(it)) {
+      toast(`⚠️ Cannot move on Discogs — this copy belongs to @${it.discogs_account}, not @${cfg.discogsUser}.`, 4800);
       return;
     }
     const sel = document.getElementById('sdMoveFolderSel');
@@ -8004,8 +8486,8 @@ Return ONLY valid JSON:
 
     const contextTxt = it.context_note || it.cultural_reason || '';
 
-    // Build responsive Stash Detail Photo Gallery (clean in normal view; compact overlay controls + inline Add Photo menu in Manage Mode)
-    const slotLabels = ['FRONT', 'BACK'];
+    // Build responsive Stash Detail Photo Gallery using stable named photo_slots + unresolved Drive ref placeholders
+    const coverTiles = getStashCoverSlotTiles(it);
     let galleryHtml = '<div class="photo-gallery" style="margin-bottom:12px;">';
     galleryHtml += `
       <input id="sdPhotoFront" class="hidden-file" type="file" accept="image/*" onchange="handleStashPhotoFiles(${it.id}, 'front', this.files); this.value='';" />
@@ -8014,15 +8496,22 @@ Return ONLY valid JSON:
       <input id="sdPhotoExtra" class="hidden-file" type="file" accept="image/*" multiple onchange="handleStashPhotoFiles(${it.id}, 'extra', this.files); this.value='';" />
       <input id="sdPhotoReplaceExtra" class="hidden-file" type="file" accept="image/*" onchange="handleStashPhotoFiles(${it.id}, 'replace_idx', this.files); this.value='';" />
     `;
-    if (photos.length) {
-      const singleCls = photos.length === 1 ? 'single-cover' : '';
-      galleryHtml += `<div class="photo-gallery-covers ${singleCls}">${photos.map((src, i) => `
+    if (coverTiles.length) {
+      const singleCls = coverTiles.length === 1 ? 'single-cover' : '';
+      galleryHtml += `<div class="photo-gallery-covers ${singleCls}">${coverTiles.map((tile, i) => `
         <div class="photo-tile" onclick="openStashLightbox(${i})" title="Tap to zoom fullscreen">
-          <img src="${esc(src)}" alt="" />
-          <span class="photo-tile-label">${slotLabels[i] || `EXTRA ${i - 1}`}</span>
-          ${stashPhotoManagerOpen ? `<div class="photo-tile-actions"><button type="button" class="photo-tile-btn" onclick="triggerStashPhotoReplace(${i}, event)" title="Replace photo">🔄</button><button type="button" class="photo-tile-btn" onclick="openStashPhotoCrop(${it.id}, 'cover', ${i}, event)" title="Crop or rotate photo">✂️</button><button type="button" class="photo-tile-btn danger" onclick="removeStashPhotoSlot(${it.id}, ${i}, event)" title="Delete photo">✕</button></div>` : ''}
+          ${renderPhotoImgOrPlaceholder(tile.src, '', 'alt=""')}
+          <span class="photo-tile-label">${tile.label}</span>
+          ${stashPhotoManagerOpen ? `<div class="photo-tile-actions"><button type="button" class="photo-tile-btn" onclick="triggerStashPhotoReplace('${tile.slotKey}', ${tile.extraIdx}, event)" title="Replace photo">🔄</button><button type="button" class="photo-tile-btn" onclick="openStashPhotoCrop(${it.id}, '${tile.slotKey}', ${tile.extraIdx}, event)" title="Crop or rotate photo">✂️</button><button type="button" class="photo-tile-btn danger" onclick="removeStashPhotoSlot(${it.id}, '${tile.slotKey}', ${tile.extraIdx}, event)" title="Delete photo">✕</button></div>` : ''}
         </div>
       `).join('')}</div>`;
+    } else if (it.thumb_data_url) {
+      galleryHtml += `<div class="photo-gallery-covers single-cover">
+        <div class="photo-tile" onclick="openStashLightbox(0)" title="Tap to zoom fullscreen">
+          ${renderPhotoImgOrPlaceholder(it.thumb_data_url, '', 'alt=""')}
+          <span class="photo-tile-label">DISCOGS</span>
+        </div>
+      </div>`;
     }
     if (it.spine_thumb_url) {
       galleryHtml += `
@@ -8032,14 +8521,14 @@ Return ONLY valid JSON:
             ${stashPhotoManagerOpen ? `
               <div class="inline-actions" style="gap:4px;">
                 <button type="button" class="photo-tile-btn" onclick="triggerStashPhotoAdd('spine', event)" title="Replace spine photo">🔄</button>
-                <button type="button" class="photo-tile-btn" onclick="openStashPhotoCrop(${it.id}, 'spine', 0, event)" title="Crop & rotate spine">✂️</button>
+                <button type="button" class="photo-tile-btn" onclick="openStashPhotoCrop(${it.id}, 'spine', -1, event)" title="Crop & rotate spine">✂️</button>
                 <button type="button" class="photo-tile-btn" onclick="rotateStashSpine90(${it.id}, event)" title="Rotate spine 90°">↻</button>
                 <button type="button" class="photo-tile-btn danger" onclick="removeStashSpine(${it.id}, event)" title="Delete spine photo">✕</button>
               </div>
             ` : ''}
           </div>
           <div class="photo-gallery-spine-imgwrap" onclick="openStashSpineLightbox()" title="Tap to zoom spine">
-            <img src="${esc(it.spine_thumb_url)}" alt="" />
+            ${renderPhotoImgOrPlaceholder(it.spine_thumb_url, '', 'alt=""')}
           </div>
         </div>
       `;
@@ -8311,11 +8800,15 @@ Return ONLY valid JSON:
 
     // Finish failed field writes on the NEW pressing FIRST before deleting the old copy
     if (it.pending_field_sync && it.discogs_id && it.discogs_instance_id) {
+      if (!isOwnedByActiveDiscogsAccount(it)) {
+        toast(`⚠️ Cannot sync grades to Discogs — this copy belongs to @${it.discogs_account}, not @${cfg.discogsUser || '(none)'}.`, 5200);
+        return;
+      }
       setStatus(`Retrying grade & notes sync on new pressing #${it.discogs_id}...`, true);
       const fId = it.discogs_folder_id || cfg.discogsFolderId || '1';
       const fieldRes = await CC.syncDiscogsInstanceFields(fId, it.discogs_id, it.discogs_instance_id, it.media_condition, it.sleeve_condition, it.condition_note);
       it.pending_field_sync = fieldRes.failedCount > 0;
-      await CC.idbPut('stash', it);
+      await CC.mutateStashItemIfAlive(it.id, it.sync_id, (live) => ({ ...live, pending_field_sync: it.pending_field_sync }), ['pending_field_sync']);
 
       if (fieldRes.failedCount > 0) {
         await loadStashCache();
@@ -8339,8 +8832,7 @@ Return ONLY valid JSON:
   window.dismissPendingDeleteOld = async (id) => {
     const it = stashCache.find(x => x.id === id);
     if (!it) return;
-    it.pending_delete_old = null;
-    await CC.idbPut('stash', it);
+    await CC.mutateStashItemIfAlive(it.id, it.sync_id, (live) => ({ ...live, pending_delete_old: null }), ['pending_delete_old']);
     await loadStashCache();
     renderStash();
     if (activeStashItem?.id === id) openStashDetail(id, true);
@@ -8362,42 +8854,73 @@ Return ONLY valid JSON:
     };
     const changedFields = ['media_condition', 'sleeve_condition', 'condition_note'];
 
+    let remoteOutcome = 'local_only'; // 'local_only' | 'wrong_account' | 'synced' | 'partial_fields' | 'ambiguous_copies' | 'remote_error'
+    let remoteMsg = '';
+
     if (updated.synced_to_discogs && updated.discogs_id && cfg.discogsUser) {
-      let instId = updated.discogs_instance_id;
-      let fId = updated.discogs_folder_id || cfg.discogsFolderId || '1';
-      let remoteCopies = 0;
-      if (!instId) {
-        const insts = await CC.findDiscogsInstances(updated.discogs_id);
-        remoteCopies = insts.length;
-        if (insts.length === 1) {
-          instId = insts[0].instance_id;
-          fId = String(insts[0].folder_id || fId);
-          updated.discogs_instance_id = instId;
-          updated.discogs_folder_id = fId;
-          updated.discogs_account = cfg.discogsUser;
-          updated.discogs_folder_verified_at = Date.now();
-          changedFields.push('discogs_instance_id', 'discogs_folder_id', 'discogs_account', 'discogs_folder_verified_at');
+      if (!isOwnedByActiveDiscogsAccount(updated)) {
+        remoteOutcome = 'wrong_account';
+        remoteMsg = `💾 Saved locally only — this copy belongs to @${updated.discogs_account}, not @${cfg.discogsUser}.`;
+      } else {
+        try {
+          let instId = updated.discogs_instance_id;
+          let fId = updated.discogs_folder_id || cfg.discogsFolderId || '1';
+          let remoteCopies = 0;
+          if (!instId) {
+            const insts = await CC.findDiscogsInstances(updated.discogs_id, { throwOnError: true });
+            remoteCopies = insts.length;
+            if (insts.length === 1) {
+              instId = insts[0].instance_id;
+              fId = String(insts[0].folder_id || fId);
+              updated.discogs_instance_id = instId;
+              updated.discogs_folder_id = fId;
+              updated.discogs_account = cfg.discogsUser;
+              updated.discogs_folder_verified_at = Date.now();
+              changedFields.push('discogs_instance_id', 'discogs_folder_id', 'discogs_account', 'discogs_folder_verified_at');
+            }
+          }
+          if (instId) {
+            const fieldRes = await CC.syncDiscogsInstanceFields(fId, updated.discogs_id, instId, updated.media_condition, updated.sleeve_condition, updated.condition_note);
+            updated.pending_field_sync = fieldRes.failedCount > 0;
+            changedFields.push('pending_field_sync');
+            if (fieldRes.failedCount > 0) {
+              remoteOutcome = 'partial_fields';
+              remoteMsg = `⚠️ Saved locally, but ${fieldRes.failedCount} Discogs field(s) failed: ${fieldRes.errors[0] || ''}`;
+            } else {
+              remoteOutcome = 'synced';
+              remoteMsg = '✅ Updated Stash & Discogs grades!';
+            }
+          } else {
+            remoteOutcome = 'ambiguous_copies';
+            remoteMsg = `💾 Saved locally — found ${remoteCopies} Discogs cop${remoteCopies === 1 ? 'y' : 'ies'}, so remote grades were not overwritten.`;
+          }
+        } catch (err) {
+          updated.pending_field_sync = true;
+          changedFields.push('pending_field_sync');
+          remoteOutcome = 'remote_error';
+          remoteMsg = `⚠️ Saved locally, but Discogs update failed (${err?.message || 'Error'})`;
         }
       }
-      if (instId) {
-        const fieldRes = await CC.syncDiscogsInstanceFields(fId, updated.discogs_id, instId, updated.media_condition, updated.sleeve_condition, updated.condition_note);
-        updated.pending_field_sync = fieldRes.failedCount > 0;
-        changedFields.push('pending_field_sync');
-        if (fieldRes.failedCount > 0) {
-          toast(`⚠️ Saved locally, but ${fieldRes.failedCount} Discogs field(s) failed: ${fieldRes.errors[0] || ''}`, 5000);
-        } else {
-          toast('✅ Updated Stash & Discogs grades!');
-        }
-      } else toast(`💾 Saved locally — found ${remoteCopies} Discogs cop${remoteCopies === 1 ? 'y' : 'ies'}, so remote grades were not overwritten.`, 5000);
-    } else toast('💾 Grade & notes saved!');
+    }
 
-    const stamped = CC.stampStashRevision(updated, prev, changedFields);
-    await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
-    await loadStashCache();
-    renderStash();
-    updateCloudUI();
-    scheduleGoogleAutoSync();
-    if (activeStashItem?.id === id) openStashDetail(id, true);
+    // Commit locally BEFORE declaring full success so storage failures are always reported accurately!
+    try {
+      const stamped = CC.stampStashRevision(updated, prev, changedFields);
+      await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+      await loadStashCache();
+      renderStash();
+      updateCloudUI();
+      scheduleGoogleAutoSync();
+      if (activeStashItem?.id === id) openStashDetail(id, true);
+      if (remoteMsg) toast(remoteMsg, remoteOutcome === 'synced' ? 3000 : 5200);
+      else toast('💾 Grade & notes saved!');
+    } catch (localErr) {
+      if (remoteOutcome === 'synced') {
+        toast(`⚠️ Discogs updated, but local Stash save failed: ${localErr?.message || 'Storage error'}`, 5600);
+      } else {
+        toast(`Save failed: ${localErr?.message || 'Storage error'}`, 5200);
+      }
+    }
   };
 
   window.pushStashToDiscogs = async (id) => {
@@ -8546,39 +9069,108 @@ Return ONLY valid JSON:
     dl([cols.join(','), ...stashCache.map(it => cols.map(k => c(it[k])).join(','))].join('\n'), `softspot-stash-${new Date().toISOString().slice(0, 10)}.csv`, 'text/csv');
   };
 
-  window.exportJSON = () => {
-    dl(JSON.stringify({ version: 10, exportedAt: new Date().toISOString(), stash: stashCache, spotifyProfile }), `softspot-backup-${new Date().toISOString().slice(0, 10)}.json`, 'application/json');
-    toast('JSON backup downloaded');
+  function countUnresolvedDrivePhotoRefs(items) {
+    let n = 0;
+    const seen = new Set();
+    const check = (v) => {
+      if (isUnresolvedDriveRef(v) && !seen.has(v)) { seen.add(v); n++; }
+    };
+    (items || []).forEach(it => {
+      check(it?.thumb_data_url);
+      check(it?.spine_thumb_url);
+      check(it?.spine_source_url);
+      (it?.thumbs || []).forEach(check);
+      if (it?.photo_slots) {
+        check(it.photo_slots.front);
+        check(it.photo_slots.back);
+        (it.photo_slots.extras || []).forEach(check);
+      }
+    });
+    return n;
+  }
+
+  window.exportJSON = async () => {
+    try {
+      let unresolvedCount = countUnresolvedDrivePhotoRefs(stashCache);
+      if (unresolvedCount > 0 && CC.isGoogleSignedIn()) {
+        setStatus(`☁️ Downloading ${unresolvedCount} Drive photo(s) for self-contained export...`, true);
+        try {
+          await CC.pullFromGoogleDrive({ quiet: true });
+          await loadStashCache();
+        } catch (_) {}
+        setStatus('', false);
+        unresolvedCount = countUnresolvedDrivePhotoRefs(stashCache);
+      }
+
+      const deletedRec = await CC.idbGet('meta', 'deleted_sync_ids');
+      const aliasesRec = await CC.idbGet('meta', 'sync_id_aliases_v1');
+      const payload = {
+        version: 11,
+        exportedAt: new Date().toISOString(),
+        unresolvedDrivePhotos: unresolvedCount,
+        stash: stashCache,
+        deleted_sync_ids: deletedRec?.value || {},
+        sync_id_aliases: aliasesRec?.value || {},
+        spotifyProfile
+      };
+      dl(JSON.stringify(payload), `softspot-backup-${new Date().toISOString().slice(0, 10)}.json`, 'application/json');
+      if (unresolvedCount > 0) {
+        toast(`⚠️ JSON backup downloaded (${unresolvedCount} unresolved Drive photo ref${unresolvedCount === 1 ? '' : 's'} — sync Google Drive first for 100% offline photos)`, 5600);
+      } else {
+        toast('✅ Self-contained JSON backup downloaded!');
+      }
+    } catch (e) {
+      setStatus('', false);
+      toast('Export failed: ' + (e?.message || 'Error'), 4500);
+    }
   };
 
   window.importJSON = async (file) => {
     if (!file) return;
+    let data = null;
+    // 1. Parse & validate JSON/schema strictly before touching IndexedDB
     try {
-      const data = JSON.parse(await file.text());
-      if (Array.isArray(data.stash)) {
-        for (const item of data.stash) {
-          const copy = { ...item };
-          delete copy.id;
-          if (!copy.sync_id) copy.sync_id = CC.generateSyncId();
-          const stamped = CC.stampStashRevision(copy, null);
-          await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
-        }
+      const text = await file.text();
+      data = JSON.parse(text);
+      if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        throw new Error('Root backup value must be a JSON object');
       }
-      if (data.spotifyProfile) {
-        spotifyProfile = data.spotifyProfile;
-        await CC.commitLocalMutation({
-          metaPuts: [{ key: 'spotify_profile', value: spotifyProfile }],
-          extraOps: [{ type: 'spotify_profile', profile: spotifyProfile }],
-          queueOutbox: true
-        });
-        document.getElementById('cfgTasteDna').value = spotifyProfile.tasteDna || '';
-        document.getElementById('cfgSoftSpots').value = spotifyProfile.softSpots || '';
+      if (data.stash !== undefined && !Array.isArray(data.stash)) {
+        throw new Error('"stash" field must be an array');
+      }
+      if (data.spotifyProfile !== undefined && data.spotifyProfile !== null && typeof data.spotifyProfile !== 'object') {
+        throw new Error('"spotifyProfile" field must be an object');
+      }
+      if (data.deleted_sync_ids !== undefined && (typeof data.deleted_sync_ids !== 'object' || Array.isArray(data.deleted_sync_ids))) {
+        throw new Error('"deleted_sync_ids" field must be an object');
+      }
+      if (data.sync_id_aliases !== undefined && (typeof data.sync_id_aliases !== 'object' || Array.isArray(data.sync_id_aliases))) {
+        throw new Error('"sync_id_aliases" field must be an object');
+      }
+    } catch (e) {
+      toast('Invalid JSON: ' + (e?.message || 'Parse error'), 4800);
+      return;
+    }
+
+    // 2. Atomic idempotent merge inside ONE readwrite IndexedDB transaction (no partial commits on failure)
+    try {
+      const res = await CC.importJsonBackupAtomic(data);
+      if (res.spotifyProfile) {
+        spotifyProfile = res.spotifyProfile;
+        const dnaEl = document.getElementById('cfgTasteDna');
+        const ssEl = document.getElementById('cfgSoftSpots');
+        if (dnaEl) dnaEl.value = spotifyProfile.tasteDna || '';
+        if (ssEl) ssEl.value = spotifyProfile.softSpots || '';
         updateSpotifyUI();
       }
-      await loadStashCache(); renderStash();
+      await loadStashCache();
+      renderStash();
       updateCloudUI();
-      toast('Backup restored!');
-    } catch (e) { toast('Invalid JSON: ' + e.message); }
+      scheduleGoogleAutoSync();
+      toast(`✅ Backup restored atomically (${res.totalStashCount} item${res.totalStashCount === 1 ? '' : 's'})!`);
+    } catch (e) {
+      toast('Restore failed (storage/write error — no partial changes committed): ' + (e?.message || 'Error'), 5600);
+    }
   };
 
   // ==================== GOOGLE DRIVE V2 CLOUD SYNC UI ====================
