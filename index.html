@@ -7,13 +7,13 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>Soft Spot — Physical Media Scanner</title>
-  <link rel="stylesheet" href="style.css?v=2.0.1" />
+  <link rel="stylesheet" href="style.css?v=2.0.2" />
   <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
 <header>
-  <div class="brand">📼 Soft Spot <span class="ver-tag">v2.0.1</span></div>
+  <div class="brand">📼 Soft Spot <span class="ver-tag">v2.0.2</span></div>
   <div class="status-pills">
     <span id="cloudPill" class="pill" title="Google Drive Cloud Sync" onclick="handleCloudPillClick()">Cloud: Off</span>
     <span id="aiPill" class="pill" title="Gemini Cloud AI status" onclick="switchView('settings')">Gemini: Off</span>
@@ -84,8 +84,8 @@
 
         <div id="stagedSummary" class="staged-box hidden">
           <div id="stagedUpcRow" class="hidden" style="margin-bottom:8px;"></div>
-          <div id="previewStrip" class="preview-strip"></div>
-          <div style="font-size:0.72rem; color:var(--muted); margin-top:5px;">Tap any photo to inspect fullscreen · AI 2048px JPEG · Stash 1200px WebP</div>
+          <div id="previewStrip" class="photo-gallery"></div>
+          <div style="font-size:0.72rem; color:var(--muted); margin-top:6px;">Tap any photo to inspect fullscreen · AI 2048px JPEG · Preview 1600×1600 WebP</div>
         </div>
 
         <div id="singleActionRow" class="search-action-row hidden">
@@ -334,11 +334,16 @@
         <button class="chip" data-filter="lowconf">⚠️ Low-Have (&lt;15)</button>
         <button class="chip" data-filter="localonly">Local Only</button>
       </div>
+      <div id="stashFolderRow" class="chip-row hidden" aria-label="Discogs Folders"></div>
+      <div id="stashDiscogsSyncLine" style="font-size:0.74rem; color:var(--muted); margin-bottom:8px;"></div>
+      <div class="btn-row" style="margin-top:0; margin-bottom:8px;">
+        <button id="btnStashSyncDiscogs" type="button" class="btn btn-green btn-sm" style="width:100%;" onclick="syncWithDiscogsUI(true)">🔄 Sync with Discogs</button>
+        <button id="btnRecalibrateStash" type="button" class="btn btn-purple btn-sm" style="width:100%;" onclick="recalibrateStashBatch()">🔄 Recalibrate Taste</button>
+      </div>
       <div class="btn-row" style="margin-top:0;">
         <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="exportCSV()">⬇️ Export CSV</button>
         <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="exportJSON()">💾 Backup JSON</button>
       </div>
-      <button id="btnRecalibrateStash" type="button" class="btn btn-purple btn-sm" style="width:100%; margin-top:8px;" onclick="recalibrateStashBatch()">🔄 Recalibrate Taste</button>
     </div>
     <div id="stashList"></div>
   </section>
@@ -349,32 +354,39 @@
     <details id="accCloud" class="acc-card">
       <summary class="acc-summary">
         <span>1. ☁️ Google Drive Cloud Sync</span>
-        <span id="pillCloud" class="pill">Sign In</span>
+        <span id="pillCloud" class="pill">Connect</span>
       </summary>
       <div class="acc-body">
         <p style="font-size:0.82rem; margin-bottom:10px;">
-          Sign in with Google to back up and sync your Stash, photos, cropped spines, and Taste Profile across your phone and PC. Uses strictly private app-only Drive storage — Soft Spot cannot see your normal Drive files.
+          Connect Google Drive to keep your Stash, photos, spines, Taste Profile, and Soft Spots synced across phone and PC. Uses strictly private <code>drive.appdata</code> storage — Soft Spot cannot see your normal Drive files.
         </p>
 
-        <div id="googleSyncSummary" style="font-size:0.82rem; color:var(--muted); margin-bottom:10px;">Not signed in. Tap Sign in with Google &amp; Sync to keep your devices in sync.</div>
+        <div id="googleSyncSummary" style="font-size:0.82rem; color:var(--muted); margin-bottom:10px;">Not connected. Tap Connect Google Drive to sign in and pull your cloud profile.</div>
+        <div id="googleAccountMismatchBox" class="alert-box alert-dup hidden" style="margin-bottom:10px;"></div>
+        <div id="googleConflictsBox" class="alert-box alert-other-pressing hidden" style="margin-bottom:10px;"></div>
 
         <div class="inline-actions" style="margin-bottom:10px;">
-          <button id="btnGoogleSignIn" type="button" class="btn btn-green btn-sm" onclick="googleSignInAndSync()">☁️ Sign in with Google &amp; Sync</button>
-          <button id="btnGoogleSyncNow" type="button" class="btn btn-secondary btn-sm hidden" onclick="syncGoogleDriveNow()">🔄 Sync Now</button>
+          <button id="btnGoogleSignIn" type="button" class="btn btn-green btn-sm" onclick="googleConnectAndLoad()">☁️ Connect Google Drive</button>
+          <button id="btnGoogleLoad" type="button" class="btn btn-secondary btn-sm hidden" onclick="loadFromGoogleDriveUI()">⬇️ Load from Google Drive</button>
+          <button id="btnGoogleSyncNow" type="button" class="btn btn-green btn-sm hidden" onclick="syncGoogleDriveNow()">🔄 Sync Now</button>
           <button id="btnGoogleSignOut" type="button" class="btn btn-danger btn-sm hidden" onclick="googleSignOut()">Sign Out</button>
+        </div>
+
+        <div style="font-size:0.74rem; color:var(--muted); margin-bottom:10px;">
+          <strong>Connect:</strong> signs in and immediately loads your cloud data. <strong>Load:</strong> pulls cloud updates locally with zero Drive writes. <strong>Sync Now:</strong> pulls, merges, and uploads your pending changes &amp; photos.
         </div>
 
         <div class="toggle-row">
           <div>
             <div style="font-size:0.88rem; font-weight:700;">Auto-Sync after Stash saves</div>
-            <div style="font-size:0.74rem; color:var(--muted);">Quiet background sync after adding, editing, or deleting items</div>
+            <div style="font-size:0.74rem; color:var(--muted);">Runs quietly after edits once connected and bound to your Google account</div>
           </div>
           <input id="cfgGoogleAutoSync" type="checkbox" style="width:20px; height:20px;" onchange="saveSettings(true)" />
         </div>
         <div class="toggle-row">
           <div>
             <div style="font-size:0.88rem; font-weight:700;">Sync API Keys &amp; Tokens across my devices</div>
-            <div style="font-size:0.74rem; color:var(--muted);">Opt-in: syncs Gemini key, Discogs token &amp; Spotify Client ID inside your own private Drive appDataFolder</div>
+            <div style="font-size:0.74rem; color:var(--muted);">Opt-in (OFF by default): stores Gemini key, Discogs token &amp; Spotify Client ID in a separate private file inside your appDataFolder</div>
           </div>
           <input id="cfgGoogleSyncSecrets" type="checkbox" style="width:20px; height:20px;" onchange="saveSettings(true)" />
         </div>
@@ -387,7 +399,7 @@
               <ol style="margin:6px 0 0; padding-left:18px;">
                 <li>Open <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noopener">Google Cloud Console ↗</a> → create/select a project → enable <strong>Google Drive API</strong>.</li>
                 <li>Open <strong>OAuth consent screen</strong> → <strong>Credentials</strong> → <strong>Create OAuth Client ID</strong> → <strong>Web application</strong>.</li>
-                <li>Add your exact <strong>Authorized JavaScript Origin</strong> below, paste your custom Client ID (or leave blank to use Soft Spot's built-in Client ID), and tap <strong>Sign in with Google &amp; Sync</strong>.</li>
+                <li>Add your exact <strong>Authorized JavaScript Origin</strong> below, paste your custom Client ID (or leave blank to use Soft Spot's built-in Client ID), and tap <strong>Connect Google Drive</strong>.</li>
               </ol>
             </div>
 
@@ -488,10 +500,10 @@
         <div class="sub-panel" style="margin-bottom:10px;">
           <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
             <div>
-              <div style="font-size:0.84rem; font-weight:700;">📀 Collection Index (Another-Pressing Alert)</div>
-              <div id="discogsCollectionSummary" style="font-size:0.75rem; color:var(--muted);">Not synced yet — detects when you already own an album in a different pressing/format.</div>
+              <div style="font-size:0.84rem; font-weight:700;">📀 Discogs Collection &amp; Folders</div>
+              <div id="discogsCollectionSummary" style="font-size:0.75rem; color:var(--muted);">Not synced yet — updates owned copies, mirrors your Discogs folders in Stash, and enables duplicate alerts.</div>
             </div>
-            <button id="btnSyncDiscogsIndex" type="button" class="btn btn-secondary btn-sm" onclick="syncDiscogsCollectionUI()">🔄 Sync Discogs Collection Index</button>
+            <button id="btnSyncDiscogsIndex" type="button" class="btn btn-secondary btn-sm" onclick="syncWithDiscogsUI(true)">🔄 Sync with Discogs</button>
           </div>
         </div>
 
@@ -574,10 +586,15 @@
           </div>
 
           <div id="spotifySummary" style="font-size:0.84rem; color:var(--spotify); font-weight:700; margin:8px 0 4px;">Not synced yet.</div>
+          <div id="spotifyResumeBox" class="hidden" style="margin:6px 0 8px; padding:8px 10px; background:#141414; border:1px solid var(--yellow); border-left:3px solid var(--yellow); font-size:0.78rem; color:#fde68a;"></div>
           <div id="dnaSummary" style="font-size:0.78rem; color:var(--muted); margin-bottom:10px;"></div>
 
           <div class="btn-row" style="margin-top:0; margin-bottom:8px;">
-            <button class="btn btn-spotify btn-sm" style="width:100%;" onclick="startSpotifyAuth()">🎧 Sync Spotify Locally</button>
+            <button class="btn btn-spotify btn-sm" style="width:100%;" onclick="startSpotifyAuth('liked')">💚 Sync Liked Songs</button>
+            <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="startSpotifyAuth('full')">🎧 Full Library Pass</button>
+          </div>
+          <div class="btn-row" style="margin-top:0; margin-bottom:8px;">
+            <button id="btnResumeSpotify" type="button" class="btn btn-green btn-sm hidden" style="width:100%;" onclick="resumeSpotifySyncUI()">▶ Resume Spotify Sync</button>
             <button id="btnAnalyzeDna" class="btn btn-secondary btn-sm" style="width:100%;" onclick="analyzeFullSpotifyDNA()">🧠 Auto-Draft Profile</button>
           </div>
           <div style="font-size:0.73rem; color:var(--muted); margin-bottom:8px;">
@@ -815,7 +832,7 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="apis.js?v=2.0.1"></script>
-<script src="app.js?v=2.0.1"></script>
+<script src="apis.js?v=2.0.2"></script>
+<script src="app.js?v=2.0.2"></script>
 </body>
 </html>

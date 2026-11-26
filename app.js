@@ -22,18 +22,31 @@
   const RAW_MIME_RX = /(raw|x-sony-arw|x-canon-cr2|x-nikon-nef|x-adobe-dng)/i;
 
   let spotifyProfile = null;
+  let spotifyCheckpoint = null;
   let discogsCollectionIndex = null;
   let stashCache = [];
   let currentView = 'scan';
   let scanMode = 'single';
   let activeFormat = 'Auto';
   let activeStashFilter = 'all';
+  let activeDiscogsFolderFilter = null;
   let activeStashView = 'list';
   let googleSyncInFlight = false;
   let googleAutoSyncTimer = null;
+  let cloudFollowupNeeded = false;
+  let cloudAccountMismatch = null;
+  let cloudEmptyAwaitingPublish = false;
+  let activeDiscogsRefreshPromise = null;
+  let activeDiscogsRefreshAccount = '';
+  const DISCOGS_FRESH_MS = 5 * 60 * 1000;
 
   let stagedPhotos = [];
+  let stagedSpineThumbUrl = '';
+  let stagedSpineSourceUrl = '';
+  let stagedSpineFlipped = false;
   let stagedUpc = '';
+  let stashPhotoManagerOpen = false;
+  let activeFolderMoveConflict = null;
   let currentExtracted = null;
   let currentCandidates = [];
   let visibleCandidateIds = null;
@@ -336,7 +349,10 @@
     document.getElementById('view-' + name).classList.add('active');
 
     if (viewChanged) {
-      if (name === 'stash') renderStash();
+      if (name === 'stash') {
+        renderStash();
+        maybeAutoRefreshDiscogs();
+      }
       window.scrollTo({ top: 0, behavior: 'instant' });
     }
   };
@@ -486,6 +502,88 @@
     return canvasToDataUrl(c, mime, quality);
   }
 
+  // Fit entire uncropped image inside a square (default 1600x1600) with neutral #0d0d0d padding — NEVER crop or stretch
+  function renderSquareFittedPreview(srcEl, w, h, size = 1600, mime = 'image/webp', quality = 0.84) {
+    const rect = CC.computeSquareFitRect(w, h, size);
+    const c = document.createElement('canvas');
+    c.width = rect.size;
+    c.height = rect.size;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#0d0d0d';
+    ctx.fillRect(0, 0, rect.size, rect.size);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(srcEl, rect.dx, rect.dy, rect.drawW, rect.drawH);
+    return canvasToDataUrl(c, mime, quality);
+  }
+
+  function rotateDataUrlByDeg(dataUrl, angleDeg = 180, mime = 'image/webp', quality = 0.84, maxLongEdge = 1600) {
+    return new Promise((resolve) => {
+      if (!dataUrl) { resolve(''); return; }
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const nw = img.naturalWidth || img.width;
+          const nh = img.naturalHeight || img.height;
+          if (!nw || !nh) { resolve(dataUrl); return; }
+          const normDeg = ((Number(angleDeg) % 360) + 360) % 360;
+          const swap = normDeg === 90 || normDeg === 270;
+          const rawW = swap ? nh : nw;
+          const rawH = swap ? nw : nh;
+          const { width: dstW, height: dstH } = fitDims(rawW, rawH, maxLongEdge);
+          const c = document.createElement('canvas');
+          c.width = dstW;
+          c.height = dstH;
+          const ctx = c.getContext('2d');
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
+          ctx.translate(dstW / 2, dstH / 2);
+          ctx.rotate((normDeg * Math.PI) / 180);
+          if (swap) ctx.drawImage(img, -dstH / 2, -dstW / 2, dstH, dstW);
+          else ctx.drawImage(img, -dstW / 2, -dstH / 2, dstW, dstH);
+          resolve(canvasToDataUrl(c, mime, quality));
+        } catch (_) {
+          resolve(dataUrl);
+        }
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    });
+  }
+
+  function normalizeSpineDataUrl(dataUrl, rotationHint = '') {
+    return new Promise((resolve) => {
+      if (!dataUrl) { resolve(''); return; }
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const nw = img.naturalWidth || img.width;
+          const nh = img.naturalHeight || img.height;
+          if (!nw || !nh) { resolve(dataUrl); return; }
+          const tr = CC.resolveSpineTransform(nw, nh, rotationHint);
+          const rawW = tr.swapDims ? nh : nw;
+          const rawH = tr.swapDims ? nw : nh;
+          const { width: dstW, height: dstH } = fitDims(rawW, rawH, 1200);
+          const c = document.createElement('canvas');
+          c.width = dstW;
+          c.height = dstH;
+          const ctx = c.getContext('2d');
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
+          ctx.translate(dstW / 2, dstH / 2);
+          ctx.rotate((tr.angleDeg * Math.PI) / 180);
+          if (tr.swapDims) ctx.drawImage(img, -dstH / 2, -dstW / 2, dstH, dstW);
+          else ctx.drawImage(img, -dstW / 2, -dstH / 2, dstW, dstH);
+          resolve(canvasToDataUrl(c, 'image/webp', 0.84));
+        } catch (_) {
+          resolve(dataUrl);
+        }
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    });
+  }
+
   async function readJpegDimensions(blob) {
     if (!blob || typeof blob.slice !== 'function') return null;
     const buf = await blob.slice(0, 131072).arrayBuffer();
@@ -553,7 +651,7 @@
   }
 
   async function decodeViaImageBitmap(blob, opts) {
-    const { aiMaxDim, aiQuality, saveMaxDim, saveQuality } = opts;
+    const { aiMaxDim, aiQuality, saveMaxDim, saveQuality, squarePreview = false } = opts;
     const dims = await readJpegDimensions(blob).catch(() => null);
     const isLargeFile = (blob.size || 0) > 3.5 * 1024 * 1024;
 
@@ -606,12 +704,16 @@
           resizeQuality: 'high'
         });
         try {
-          saveWebp = renderSourceToDataUrl(saveBmp, saveBmp.width, saveBmp.height, saveMaxDim, 'image/webp', saveQuality);
+          saveWebp = squarePreview
+            ? renderSquareFittedPreview(saveBmp, saveBmp.width, saveBmp.height, saveMaxDim, 'image/webp', saveQuality)
+            : renderSourceToDataUrl(saveBmp, saveBmp.width, saveBmp.height, saveMaxDim, 'image/webp', saveQuality);
         } finally {
           if (typeof saveBmp.close === 'function') saveBmp.close();
         }
       } else {
-        saveWebp = renderSourceToDataUrl(probe, srcW, srcH, saveMaxDim, 'image/webp', saveQuality);
+        saveWebp = squarePreview
+          ? renderSquareFittedPreview(probe, srcW, srcH, saveMaxDim, 'image/webp', saveQuality)
+          : renderSourceToDataUrl(probe, srcW, srcH, saveMaxDim, 'image/webp', saveQuality);
       }
 
       return { apiB64: apiDataUrl.split(',')[1], saveWebp };
@@ -621,7 +723,7 @@
   }
 
   function decodeViaImgElement(blob, opts) {
-    const { aiMaxDim, aiQuality, saveMaxDim, saveQuality } = opts;
+    const { aiMaxDim, aiQuality, saveMaxDim, saveQuality, squarePreview = false } = opts;
     const meta = describeBlob(blob);
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -636,7 +738,9 @@
             return;
           }
           const apiDataUrl = renderSourceToDataUrl(img, w, h, aiMaxDim, 'image/jpeg', aiQuality);
-          const saveWebp = renderSourceToDataUrl(img, w, h, saveMaxDim, 'image/webp', saveQuality);
+          const saveWebp = squarePreview
+            ? renderSquareFittedPreview(img, w, h, saveMaxDim, 'image/webp', saveQuality)
+            : renderSourceToDataUrl(img, w, h, saveMaxDim, 'image/webp', saveQuality);
           resolve({ apiB64: apiDataUrl.split(',')[1], saveWebp });
         } catch (err) {
           reject(new Error(`Failed to render ${meta}: ${err?.message || 'Canvas memory limit exceeded'}`));
@@ -663,8 +767,9 @@
     const opts = Object.assign({
       aiMaxDim: 2048,
       aiQuality: 0.90,
-      saveMaxDim: 1200,
-      saveQuality: 0.80
+      saveMaxDim: 1600,
+      saveQuality: 0.84,
+      squarePreview: false
     }, customOpts);
 
     if (typeof window.createImageBitmap === 'function') {
@@ -1135,9 +1240,10 @@
     flash.classList.add('flash');
     setTimeout(() => flash.classList.remove('flash'), 160);
 
+    const isSingleCoverSlot = camMode === 'single' && stagedPhotos.length < 2;
     const decodeOpts = camMode === 'pile'
-      ? { aiMaxDim: 3072, aiQuality: 0.92, saveMaxDim: 2048, saveQuality: 0.82 }
-      : { aiMaxDim: 2048, aiQuality: 0.90, saveMaxDim: 1200, saveQuality: 0.80 };
+      ? { aiMaxDim: 3072, aiQuality: 0.92, saveMaxDim: 2048, saveQuality: 0.82, squarePreview: false }
+      : { aiMaxDim: 2048, aiQuality: 0.90, saveMaxDim: 1600, saveQuality: 0.84, squarePreview: isSingleCoverSlot };
 
     try {
       let pair = null;
@@ -1154,7 +1260,9 @@
 
       if (!pair && video.videoWidth) {
         const apiDataUrl = renderSourceToDataUrl(video, video.videoWidth, video.videoHeight, decodeOpts.aiMaxDim, 'image/jpeg', decodeOpts.aiQuality);
-        const saveWebp = renderSourceToDataUrl(video, video.videoWidth, video.videoHeight, decodeOpts.saveMaxDim, 'image/webp', decodeOpts.saveQuality);
+        const saveWebp = decodeOpts.squarePreview
+          ? renderSquareFittedPreview(video, video.videoWidth, video.videoHeight, decodeOpts.saveMaxDim, 'image/webp', decodeOpts.saveQuality)
+          : renderSourceToDataUrl(video, video.videoWidth, video.videoHeight, decodeOpts.saveMaxDim, 'image/webp', decodeOpts.saveQuality);
         pair = { apiB64: apiDataUrl.split(',')[1], saveWebp };
       }
 
@@ -1164,12 +1272,19 @@
           updateCameraOverlayUI();
           toast(`Shot ${pilePhotos.length} captured — tap thumb to check sharpness, or Finish & Analyze`);
         } else {
+          const slotIdx = stagedPhotos.length;
           stagedPhotos.push(pair);
+          if (slotIdx === 2) {
+            // Normalize uploaded/captured spine immediately without requiring AI
+            stagedSpineSourceUrl = pair.saveWebp;
+            stagedSpineThumbUrl = await normalizeSpineDataUrl(pair.saveWebp, '');
+            stagedSpineFlipped = false;
+          }
           updateStageUI();
           updateCameraOverlayUI();
           if (stagedPhotos.length === 1) toast('Front + Side A captured! Flip for Back + Side B');
           else if (stagedPhotos.length === 2) toast('Back + Side B captured! Snap Spine (optional) or Finish & Search');
-          else if (stagedPhotos.length === 3) toast('Spine captured (auto-crops)! Tap 🔍 Finish & Search');
+          else if (stagedPhotos.length === 3) toast('Spine captured! Review orientation or tap 🔍 Finish & Search');
         }
       }
     } catch (err) {
@@ -1215,12 +1330,25 @@
   async function stagePhotoFiles(fileList) {
     const files = Array.from(fileList || []);
     if (!files.length) return;
-    setStatus(`Processing ${files.length} photo(s) at 2048px AI / 1200px WebP...`, true);
+    setStatus(`Processing ${files.length} photo(s) (2048px AI / 1600×1600 WebP)...`, true);
     try {
       for (const file of files) {
         if (stagedPhotos.length >= 4) { toast('Max 4 photos per scan'); break; }
-        const pair = await decodeBlobToPhotoPair(file, { aiMaxDim: 2048, aiQuality: 0.90, saveMaxDim: 1200, saveQuality: 0.80 });
+        const slotIdx = stagedPhotos.length;
+        const isCover = slotIdx < 2;
+        const pair = await decodeBlobToPhotoPair(file, {
+          aiMaxDim: 2048,
+          aiQuality: 0.90,
+          saveMaxDim: 1600,
+          saveQuality: 0.84,
+          squarePreview: isCover
+        });
         stagedPhotos.push(pair);
+        if (slotIdx === 2) {
+          stagedSpineSourceUrl = pair.saveWebp;
+          stagedSpineThumbUrl = await normalizeSpineDataUrl(pair.saveWebp, '');
+          stagedSpineFlipped = false;
+        }
       }
       updateStageUI();
       setStatus('', false);
@@ -1234,7 +1362,41 @@
   window.removeStagedPhoto = (idx, ev) => {
     if (ev) ev.stopPropagation();
     stagedPhotos.splice(idx, 1);
+    if (idx === 2 || stagedPhotos.length < 3) {
+      if (!currentExtracted?.spine_thumb_url) {
+        stagedSpineThumbUrl = '';
+        stagedSpineSourceUrl = '';
+        stagedSpineFlipped = false;
+      }
+    }
     updateStageUI();
+  };
+
+  window.flipStagedSpine180 = async (ev) => {
+    if (ev) ev.stopPropagation();
+    const cur = stagedSpineThumbUrl || currentExtracted?.spine_thumb_url || stagedPhotos[2]?.saveWebp || '';
+    if (!cur) return;
+    if (!stagedSpineSourceUrl) stagedSpineSourceUrl = cur;
+    const rotated = await rotateDataUrlByDeg(cur, 180, 'image/webp', 0.84, 1200);
+    stagedSpineThumbUrl = rotated;
+    stagedSpineFlipped = !stagedSpineFlipped;
+    if (currentExtracted) {
+      currentExtracted.spine_thumb_url = rotated;
+      currentExtracted.spine_source_url = stagedSpineSourceUrl;
+      currentExtracted.spine_flipped = stagedSpineFlipped;
+    }
+    if (currentInspected) {
+      currentInspected.spine_thumb_url = rotated;
+      currentInspected.spine_source_url = stagedSpineSourceUrl;
+      currentInspected.spine_flipped = stagedSpineFlipped;
+    }
+    updateStageUI();
+    toast('↻ Spine flipped 180°', 1600);
+  };
+
+  window.openStagedSpineLightbox = () => {
+    const src = stagedSpineThumbUrl || currentExtracted?.spine_thumb_url || stagedPhotos[2]?.saveWebp || '';
+    if (src) openLightbox([src], 0);
   };
 
   window.clearStagedUpc = () => {
@@ -1250,6 +1412,7 @@
       document.getElementById('fCatno').value.trim() ||
       document.getElementById('fBarcode').value.trim()
     );
+    const activeSpineUrl = stagedSpineThumbUrl || currentExtracted?.spine_thumb_url || '';
     const hasAnything = stagedPhotos.length > 0 || Boolean(stagedUpc) || manualReady;
 
     document.getElementById('singleActionRow').classList.toggle('hidden', !hasAnything && !currentInspected);
@@ -1257,7 +1420,7 @@
     document.getElementById('btnClearStage').classList.toggle('hidden', !hasAnything && !currentInspected);
 
     const box = document.getElementById('stagedSummary');
-    box.classList.toggle('hidden', stagedPhotos.length === 0 && !stagedUpc);
+    box.classList.toggle('hidden', stagedPhotos.length === 0 && !stagedUpc && !activeSpineUrl);
 
     const upcRow = document.getElementById('stagedUpcRow');
     if (stagedUpc) {
@@ -1268,14 +1431,45 @@
       upcRow.innerHTML = '';
     }
 
-    const tags = ['Front / A', 'Back / B', 'Spine', 'Detail'];
-    document.getElementById('previewStrip').innerHTML = stagedPhotos.map((p, i) => `
-      <div class="preview-item" onclick="openStagedLightbox(${i})">
-        <img src="${p.saveWebp}" />
-        <span class="preview-tag">${tags[i] || `Photo ${i + 1}`}</span>
-        <button class="preview-remove" onclick="removeStagedPhoto(${i}, event)" title="Remove">×</button>
-      </div>
-    `).join('');
+    // Responsive gallery: Front & Back side-by-side square tiles (1 cover capped at 420px), full-width Spine strip below
+    const coverIndices = [];
+    if (stagedPhotos[0]) coverIndices.push({ idx: 0, label: 'FRONT' });
+    if (stagedPhotos[1]) coverIndices.push({ idx: 1, label: 'BACK' });
+    if (stagedPhotos[3]) coverIndices.push({ idx: 3, label: 'EXTRA' });
+
+    let galleryHtml = '';
+    if (coverIndices.length > 0) {
+      const singleCls = coverIndices.length === 1 ? 'single-cover' : '';
+      galleryHtml += `<div class="photo-gallery-covers ${singleCls}">${coverIndices.map(c => `
+        <div class="photo-tile" onclick="openStagedLightbox(${c.idx})">
+          <img src="${stagedPhotos[c.idx].saveWebp}" alt="${c.label}" />
+          <span class="photo-tile-label">${c.label}</span>
+          <div class="photo-tile-actions">
+            <button type="button" class="photo-tile-btn danger" onclick="removeStagedPhoto(${c.idx}, event)" title="Remove ${c.label}">×</button>
+          </div>
+        </div>
+      `).join('')}</div>`;
+    }
+
+    const spinePreviewSrc = activeSpineUrl || stagedPhotos[2]?.saveWebp || '';
+    if (spinePreviewSrc) {
+      galleryHtml += `
+        <div class="photo-gallery-spine">
+          <div class="photo-gallery-spine-bar">
+            <span style="font-size:0.7rem; font-weight:800; letter-spacing:0.06em; color:var(--muted);">SPINE${stagedSpineFlipped ? ' (FLIPPED 180°)' : ''}</span>
+            <div class="inline-actions" style="gap:4px;">
+              <button type="button" class="photo-tile-btn" onclick="flipStagedSpine180(event)" title="Flip spine 180°">↻ Flip 180°</button>
+              ${stagedPhotos[2] ? `<button type="button" class="photo-tile-btn danger" onclick="removeStagedPhoto(2, event)" title="Remove spine">×</button>` : ''}
+            </div>
+          </div>
+          <div class="photo-gallery-spine-imgwrap" onclick="openStagedSpineLightbox()" title="Tap to zoom spine">
+            <img src="${spinePreviewSrc}" alt="Spine" />
+          </div>
+        </div>
+      `;
+    }
+
+    document.getElementById('previewStrip').innerHTML = galleryHtml;
   };
 
   window.openStagedLightbox = (idx) => openLightbox(stagedPhotos.map(p => p.saveWebp), idx);
@@ -1878,22 +2072,24 @@ Return ONLY valid JSON:
 
   async function cropSpineFromStagedPhoto(spineCrop) {
     if (!spineCrop || typeof spineCrop !== 'object' || !Array.isArray(spineCrop.box_2d) || spineCrop.box_2d.length !== 4) {
-      return '';
+      return { sourceUrl: '', thumbUrl: '', flipped: false };
     }
     const rawIdx = Number(spineCrop.photo_index);
     const pIdx = Number.isInteger(rawIdx) && rawIdx >= 0 && rawIdx < stagedPhotos.length
       ? rawIdx
       : (stagedPhotos.length >= 3 ? 2 : 0);
     const photo = stagedPhotos[pIdx];
-    if (!photo) return '';
+    if (!photo) return { sourceUrl: '', thumbUrl: '', flipped: false };
 
     const nums = spineCrop.box_2d.map(Number);
-    if (!nums.every(Number.isFinite)) return '';
+    if (!nums.every(Number.isFinite)) return { sourceUrl: '', thumbUrl: '', flipped: false };
     const isUnit = Math.max(...nums) > 0 && Math.max(...nums) <= 1.01;
     let [y1, x1, y2, x2] = nums.map(v => Math.max(0, Math.min(1000, isUnit ? v * 1000 : v)));
     if (y1 > y2) [y1, y2] = [y2, y1];
     if (x1 > x2) [x1, x2] = [x2, x1];
-    if ((y2 - y1) < 15 || (x2 - x1) < 15) return '';
+    if ((y2 - y1) < 15 || (x2 - x1) < 15) return { sourceUrl: '', thumbUrl: '', flipped: false };
+
+    const rotationHint = String(spineCrop.rotation_hint || '').trim();
 
     return new Promise((resolve) => {
       const img = new Image();
@@ -1901,16 +2097,28 @@ Return ONLY valid JSON:
         try {
           const nw = img.naturalWidth || img.width;
           const nh = img.naturalHeight || img.height;
-          if (!nw || !nh) { resolve(''); return; }
+          if (!nw || !nh) { resolve({ sourceUrl: '', thumbUrl: '', flipped: false }); return; }
           const sx = Math.max(0, Math.floor((x1 / 1000) * nw));
           const sy = Math.max(0, Math.floor((y1 / 1000) * nh));
           const sw = Math.max(10, Math.min(nw - sx, Math.ceil(((x2 - x1) / 1000) * nw)));
           const sh = Math.max(10, Math.min(nh - sy, Math.ceil(((y2 - y1) / 1000) * nh)));
 
-          const rotate = sh > sw;
-          const rawDstW = rotate ? sh : sw;
-          const rawDstH = rotate ? sw : sh;
-          const maxW = 960;
+          // Keep unrotated tight crop as spine_source_url so Flip 180° / re-orientation never loses quality
+          const srcScale = Math.max(sw, sh) > 1200 ? (1200 / Math.max(sw, sh)) : 1;
+          const srcCanvas = document.createElement('canvas');
+          srcCanvas.width = Math.max(1, Math.round(sw * srcScale));
+          srcCanvas.height = Math.max(1, Math.round(sh * srcScale));
+          const sctx = srcCanvas.getContext('2d');
+          sctx.imageSmoothingEnabled = true;
+          sctx.imageSmoothingQuality = 'high';
+          sctx.drawImage(img, sx, sy, sw, sh, 0, 0, srcCanvas.width, srcCanvas.height);
+          const sourceUrl = canvasToDataUrl(srcCanvas, 'image/webp', 0.86);
+
+          // Normalize to upright horizontal landscape using rotation_hint when confident
+          const tr = CC.resolveSpineTransform(sw, sh, rotationHint);
+          const rawDstW = tr.swapDims ? sh : sw;
+          const rawDstH = tr.swapDims ? sw : sh;
+          const maxW = 1200;
           const scale = rawDstW > maxW ? (maxW / rawDstW) : 1;
           const dstW = Math.max(1, Math.round(rawDstW * scale));
           const dstH = Math.max(1, Math.round(rawDstH * scale));
@@ -1921,20 +2129,19 @@ Return ONLY valid JSON:
           const ctx = c.getContext('2d');
           ctx.imageSmoothingEnabled = true;
           ctx.imageSmoothingQuality = 'high';
-
-          if (rotate) {
-            ctx.translate(dstW, 0);
-            ctx.rotate(Math.PI / 2);
-            ctx.drawImage(img, sx, sy, sw, sh, 0, 0, dstH, dstW);
+          ctx.translate(dstW / 2, dstH / 2);
+          ctx.rotate((tr.angleDeg * Math.PI) / 180);
+          if (tr.swapDims) {
+            ctx.drawImage(img, sx, sy, sw, sh, -dstH / 2, -dstW / 2, dstH, dstW);
           } else {
-            ctx.drawImage(img, sx, sy, sw, sh, 0, 0, dstW, dstH);
+            ctx.drawImage(img, sx, sy, sw, sh, -dstW / 2, -dstH / 2, dstW, dstH);
           }
-          resolve(canvasToDataUrl(c, 'image/webp', 0.84));
+          resolve({ sourceUrl, thumbUrl: canvasToDataUrl(c, 'image/webp', 0.84), flipped: false });
         } catch (_) {
-          resolve('');
+          resolve({ sourceUrl: '', thumbUrl: '', flipped: false });
         }
       };
-      img.onerror = () => resolve('');
+      img.onerror = () => resolve({ sourceUrl: '', thumbUrl: '', flipped: false });
       img.src = photo.apiB64 ? `data:image/jpeg;base64,${photo.apiB64}` : photo.saveWebp;
     });
   }
@@ -2004,7 +2211,7 @@ Return ONLY valid JSON:
   "club_edition": "None" | "CRC" | "BMG" | "Unknown",
   "club_evidence": "exact quoted club text visible in photo (e.g. 'CRC', 'BMG Direct', 'Columbia House'), or empty string",
   "physical_details": "detailed plain-English list of EVERY visible physical pressing identifier (mention loose media if no case/insert; shell color, window markings, plant codes, paper label vs direct print, barcode presence, spine cut-out saw cuts/hole punches/notches, promo stamps)",
-  "spine_crop": null or { "photo_index": 0-based photo index containing the clearest spine, "box_2d": [ymin, xmin, ymax, xmax] on 0-1000 scale tightly hugging the spine },
+  "spine_crop": null or { "photo_index": 0-based photo index containing the clearest spine, "box_2d": [ymin, xmin, ymax, xmax] on 0-1000 scale tightly hugging the spine, "rotation_hint": "0" | "90cw" | "90ccw" | "180" (rotation needed to make spine text read horizontally upright left-to-right) },
   "media_defects": ["list every flaw on cassette/disc, or empty array if spotless"],
   "sleeve_defects": ["list every flaw on case/insert/spine including cut-out holes/saw cuts, or empty array if spotless or no cover"],
   "media_condition": "exact Discogs media grade",
@@ -2043,7 +2250,7 @@ Return ONLY valid JSON:
   "club_edition": "None" | "CRC" | "BMG" | "Unknown",
   "club_evidence": "exact quoted club text visible in photo (e.g. 'CRC', 'BMG Direct', 'Columbia House'), or empty string",
   "physical_details": "detailed plain-English list of EVERY visible physical pressing identifier (mention loose media if no case/insert; shell color, window markings, plant codes, paper label vs direct print, barcode presence, spine cut-out saw cuts/hole punches/notches, promo stamps)",
-  "spine_crop": null or { "photo_index": 0-based photo index containing the clearest spine, "box_2d": [ymin, xmin, ymax, xmax] on 0-1000 scale tightly hugging the spine },
+  "spine_crop": null or { "photo_index": 0-based photo index containing the clearest spine, "box_2d": [ymin, xmin, ymax, xmax] on 0-1000 scale tightly hugging the spine, "rotation_hint": "0" | "90cw" | "90ccw" | "180" (rotation needed to make spine text read horizontally upright left-to-right) },
   "visible_tracks": ["every song title clearly visible on shell/insert"]
 }`;
 
@@ -2076,10 +2283,21 @@ Return ONLY valid JSON:
         ext.graded_by_ai = true;
       }
 
-      // Auto-crop spine if Gemini returned a valid spine_crop box
-      ext.spine_thumb_url = '';
+      // Auto-crop & upright-normalize spine if Gemini returned a valid spine_crop box
+      ext.spine_thumb_url = stagedSpineThumbUrl || '';
+      ext.spine_source_url = stagedSpineSourceUrl || '';
+      ext.spine_flipped = Boolean(stagedSpineFlipped);
       if (ext.spine_crop) {
-        ext.spine_thumb_url = await cropSpineFromStagedPhoto(ext.spine_crop);
+        const cropRes = await cropSpineFromStagedPhoto(ext.spine_crop);
+        if (cropRes.thumbUrl) {
+          ext.spine_thumb_url = cropRes.thumbUrl;
+          ext.spine_source_url = cropRes.sourceUrl;
+          ext.spine_flipped = false;
+          stagedSpineThumbUrl = cropRes.thumbUrl;
+          stagedSpineSourceUrl = cropRes.sourceUrl;
+          stagedSpineFlipped = false;
+          updateStageUI();
+        }
       }
 
       currentExtracted = ext;
@@ -2916,14 +3134,16 @@ Return ONLY valid JSON:
       const condNote = keepOldGrades
         ? (editingStashItem.condition_note || '')
         : (currentExtracted?.condition_note || '');
-      const spineThumb = currentExtracted?.spine_thumb_url || (editingStashItem?.spine_thumb_url || '');
+      const spineThumb = stagedSpineThumbUrl || currentExtracted?.spine_thumb_url || (editingStashItem?.spine_thumb_url || '');
+      const spineSource = stagedSpineSourceUrl || currentExtracted?.spine_source_url || (editingStashItem?.spine_source_url || '');
+      const spineFlipped = stagedSpineThumbUrl ? Boolean(stagedSpineFlipped) : Boolean(currentExtracted?.spine_flipped ?? editingStashItem?.spine_flipped);
 
       currentInspected = {
         discogs_id: release.id, master_id: masterId, title: albumTitle, artist: artistName, catno, format,
         year: release.year || cand.year || '', label, country: release.country || cand.country || '',
         genres: [...(release.genres || []), ...(release.styles || [])],
         media_condition: mediaCond, sleeve_condition: sleeveCond, condition_note: condNote,
-        spine_thumb_url: spineThumb,
+        spine_thumb_url: spineThumb, spine_source_url: spineSource, spine_flipped: spineFlipped,
         lowest_price: lowestPrice, lowest_currency: lowestCurrency,
         vg_plus_price: vgPlusPrice, vg_plus_currency: vgPlusCurrency,
         est_price: estPrice, est_currency: estCurrency, est_usd: estUsd,
@@ -2977,7 +3197,9 @@ Return ONLY valid JSON:
       media_condition: keepOldGrades ? (editingStashItem.media_condition || 'Not Graded') : normalizeGrade(currentExtracted?.media_condition, MEDIA_GRADES, 'Not Graded'),
       sleeve_condition: keepOldGrades ? (editingStashItem.sleeve_condition || 'Not Graded') : normalizeGrade(currentExtracted?.sleeve_condition, SLEEVE_GRADES, 'Not Graded'),
       condition_note: keepOldGrades ? (editingStashItem.condition_note || '') : (currentExtracted?.condition_note || ''),
-      spine_thumb_url: currentExtracted?.spine_thumb_url || (editingStashItem?.spine_thumb_url || ''),
+      spine_thumb_url: stagedSpineThumbUrl || currentExtracted?.spine_thumb_url || (editingStashItem?.spine_thumb_url || ''),
+      spine_source_url: stagedSpineSourceUrl || currentExtracted?.spine_source_url || (editingStashItem?.spine_source_url || ''),
+      spine_flipped: stagedSpineThumbUrl ? Boolean(stagedSpineFlipped) : Boolean(currentExtracted?.spine_flipped ?? editingStashItem?.spine_flipped),
       lowest_price: null, lowest_currency: 'USD',
       vg_plus_price: null, vg_plus_currency: 'USD',
       est_price: null, est_currency: 'USD', est_usd: null, num_for_sale: null,
@@ -3598,7 +3820,7 @@ Return ONLY valid JSON:
       return;
     }
 
-    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v201`;
+    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v202`;
     if (tasteCache.has(cacheKey)) { applyTasteUI(item, tasteCache.get(cacheKey), myRunId); return; }
 
     const tracksStr = (item.tracklist || []).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title).join('; ');
@@ -3736,12 +3958,17 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
       spotifyProfile.tasteDna = finalDna;
       spotifyProfile.softSpots = userSoftSpots;
       spotifyProfile.dnaUpdatedAt = Date.now();
-      await CC.idbPut('meta', { key: 'spotify_profile', value: spotifyProfile });
+      await CC.commitLocalMutation({
+        metaPuts: [{ key: 'spotify_profile', value: spotifyProfile }],
+        extraOps: [{ type: 'taste_profile', tasteDna: finalDna, softSpots: userSoftSpots, dnaUpdatedAt: spotifyProfile.dnaUpdatedAt }],
+        queueOutbox: true
+      });
       tasteCache.clear();
       document.getElementById('cfgTasteDna').value = finalDna;
       updateSpotifyUI();
       setStatus('', false);
-      await markCloudChangeAndAutoSync();
+      updateCloudUI();
+      scheduleGoogleAutoSync();
       toast(`🧠 Taste Profile drafted from ${spotifyProfile.totalArtists} artists & ${spotifyProfile.totalTracks} tracks!`, 4200);
     } catch (err) {
       setStatus('', false);
@@ -3758,10 +3985,15 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
     spotifyProfile.tasteDna = document.getElementById('cfgTasteDna').value.trim();
     spotifyProfile.softSpots = document.getElementById('cfgSoftSpots').value.trim();
     spotifyProfile.dnaUpdatedAt = Date.now();
-    await CC.idbPut('meta', { key: 'spotify_profile', value: spotifyProfile });
+    await CC.commitLocalMutation({
+      metaPuts: [{ key: 'spotify_profile', value: spotifyProfile }],
+      extraOps: [{ type: 'taste_profile', tasteDna: spotifyProfile.tasteDna, softSpots: spotifyProfile.softSpots, dnaUpdatedAt: spotifyProfile.dnaUpdatedAt }],
+      queueOutbox: true
+    });
     tasteCache.clear();
     updateSpotifyUI();
-    await markCloudChangeAndAutoSync();
+    updateCloudUI();
+    scheduleGoogleAutoSync();
     if (!silent) toast('Taste Profile & Soft Spots saved!');
   };
 
@@ -4987,25 +5219,33 @@ Return ONLY valid JSON:
       const buildRecord = () => {
         const cleanInspected = { ...snap.inspected };
         delete cleanInspected._pendingDiscogsAdd;
-        const rec = {
+        const now = Date.now();
+        const rawRec = {
           ...cleanInspected,
           sync_id: (isEditing && oldItem.sync_id) ? oldItem.sync_id : (snap.inspected.sync_id || CC.generateSyncId()),
           is_conservative_tiebreak: Boolean(snap.inspected.is_conservative_tiebreak),
           tiebreak_confirmed: Boolean(!snap.inspected.is_conservative_tiebreak || snap.tiebreakChecked),
           synced_to_discogs: synced,
+          discogs_account: synced ? (cfg.discogsUser || oldItem?.discogs_account || '') : (oldItem?.discogs_account || ''),
+          discogs_removed: synced ? false : Boolean(oldItem?.discogs_removed),
+          discogs_removed_at: synced ? null : (oldItem?.discogs_removed_at || null),
+          intended_discogs_folder_id: synced ? null : (oldItem?.intended_discogs_folder_id || snap.defaultFolderId || '1'),
           pending_discogs_sync: pendingDiscogsSync,
           pending_field_sync: pendingFieldSync,
           pending_delete_old: pendingDeleteOld,
-          discogs_folder_id: synced ? folderId : null,
+          discogs_folder_id: synced ? String(folderId || '1') : null,
+          discogs_folder_verified_at: synced ? now : (oldItem?.discogs_folder_verified_at || 0),
           discogs_instance_id: synced ? instanceId : null,
           thumbs: finalThumbs,
           thumb_data_url: finalThumbs[0] || snap.inspected.discogs_thumb || '',
           spine_thumb_url: snap.inspected.spine_thumb_url || (isEditing ? (oldItem.spine_thumb_url || '') : ''),
-          created_at: isEditing ? (oldItem.created_at || Date.now()) : Date.now(),
-          updated_at: Date.now()
+          spine_source_url: snap.inspected.spine_source_url || (isEditing ? (oldItem.spine_source_url || '') : ''),
+          spine_flipped: Boolean(snap.inspected.spine_flipped ?? (isEditing ? oldItem.spine_flipped : false)),
+          created_at: isEditing ? (oldItem.created_at || now) : now,
+          updated_at: now
         };
-        if (isEditing) rec.id = oldItem.id;
-        return rec;
+        if (isEditing) rawRec.id = oldItem.id;
+        return CC.stampStashRevision(rawRec, isEditing ? oldItem : null);
       };
 
       if (snap.syncToDiscogs) {
@@ -5086,11 +5326,11 @@ Return ONLY valid JSON:
         }
       }
 
-      // 3. IMMEDIATELY persist updated Stash record to IndexedDB BEFORE deleting any old Discogs copy
+      // 3. IMMEDIATELY persist updated Stash record + outbox entry atomically to IndexedDB BEFORE deleting any old Discogs copy
       const record = buildRecord();
       try {
-        const savedKey = await CC.idbPut('stash', record);
-        if (!record.id) record.id = savedKey;
+        const commitRes = await CC.commitLocalMutation({ upsertStash: record, queueOutbox: true });
+        if (!record.id && commitRes.assignedId) record.id = commitRes.assignedId;
         if (snap.syncToDiscogs || attachedFromLedger) {
           clearPendingDiscogsOp(ledgerKey);
           if (relKey && relKey !== ledgerKey) clearPendingDiscogsOp(relKey);
@@ -5115,7 +5355,8 @@ Return ONLY valid JSON:
 
       await loadStashCache();
       setStatus('', false);
-      await markCloudChangeAndAutoSync(record.sync_id, false);
+      updateCloudUI();
+      scheduleGoogleAutoSync();
 
       if (oldDeleteWarning) {
         toast(`⚠️ ${oldDeleteWarning}`, 6000);
@@ -5189,6 +5430,9 @@ Return ONLY valid JSON:
     setStatus('', false);
     pendingVoiceRetry = null;
     stagedPhotos = [];
+    stagedSpineThumbUrl = '';
+    stagedSpineSourceUrl = '';
+    stagedSpineFlipped = false;
     stagedUpc = '';
     currentExtracted = null;
     currentCandidates = [];
@@ -5262,16 +5506,104 @@ Return ONLY valid JSON:
       : '🔄 Recalibrate Taste';
   }
 
+  function getDiscogsFoldersList() {
+    const raw = Array.isArray(cfg.discogsFolders) && cfg.discogsFolders.length
+      ? cfg.discogsFolders
+      : [{ id: 1, name: 'Uncategorized', count: 0 }];
+    const out = raw.filter(f => Number(f.id) !== 0).map(f => ({
+      id: Number(f.id),
+      name: String(f.name || `Folder ${f.id}`),
+      count: Number(f.count || 0)
+    }));
+    if (!out.some(f => f.id === 1)) out.unshift({ id: 1, name: 'Uncategorized', count: 0 });
+    return out;
+  }
+
+  function getFolderNameById(folderId) {
+    if (folderId === null || folderId === undefined || folderId === '') return 'Local Only';
+    const found = getDiscogsFoldersList().find(f => String(f.id) === String(folderId));
+    return found ? found.name : (String(folderId) === '1' ? 'Uncategorized' : `Folder ${folderId}`);
+  }
+
+  window.selectStashFolderFilter = (folderId) => {
+    const next = (folderId === null || folderId === '' || String(activeDiscogsFolderFilter) === String(folderId))
+      ? null
+      : String(folderId);
+    activeDiscogsFolderFilter = next;
+    if (next !== null && activeStashFilter === 'localonly') {
+      activeStashFilter = 'all';
+      document.querySelectorAll('#stashFilters .chip').forEach(c => c.classList.toggle('active', c.dataset.filter === 'all'));
+    }
+    renderStash();
+  };
+
+  function renderStashFolderChips() {
+    const row = document.getElementById('stashFolderRow');
+    if (!row) return;
+    const folders = getDiscogsFoldersList();
+    const hasLinkedOrFolders = Boolean(cfg.discogsUser || stashCache.some(it => it.synced_to_discogs) || folders.length > 1);
+    if (!hasLinkedOrFolders) {
+      row.classList.add('hidden');
+      row.innerHTML = '';
+      return;
+    }
+
+    const countsByFolder = {};
+    let localOnlyCount = 0;
+    stashCache.forEach(it => {
+      if (it.synced_to_discogs && !it.discogs_removed) {
+        const fid = String(it.discogs_folder_id || '1');
+        countsByFolder[fid] = (countsByFolder[fid] || 0) + 1;
+      } else {
+        localOnlyCount++;
+      }
+    });
+
+    row.classList.remove('hidden');
+    const chips = folders.map(f => {
+      const fid = String(f.id);
+      const localCnt = countsByFolder[fid] || 0;
+      const isActive = activeDiscogsFolderFilter === fid;
+      return `<button type="button" class="chip ${isActive ? 'active' : ''}" onclick="selectStashFolderFilter('${esc(fid)}')">📁 ${esc(f.name)} (${localCnt})</button>`;
+    });
+    const localChipActive = activeStashFilter === 'localonly' && activeDiscogsFolderFilter === null;
+    chips.push(`<button type="button" class="chip ${localChipActive ? 'active' : ''}" onclick="selectLocalOnlyQuickFilter()">💾 Local Only (${localOnlyCount})</button>`);
+    row.innerHTML = chips.join('');
+  }
+
+  window.selectLocalOnlyQuickFilter = () => {
+    activeDiscogsFolderFilter = null;
+    activeStashFilter = activeStashFilter === 'localonly' ? 'all' : 'localonly';
+    document.querySelectorAll('#stashFilters .chip').forEach(c => c.classList.toggle('active', c.dataset.filter === activeStashFilter));
+    renderStash();
+  };
+
   window.renderStash = () => {
+    renderStashFolderChips();
+
+    const syncLine = document.getElementById('stashDiscogsSyncLine');
+    if (syncLine) {
+      if (cfg.discogsUser) {
+        const lastTxt = cfg.discogsLastSyncAt ? `Last synced ${new Date(cfg.discogsLastSyncAt).toLocaleString()}` : 'Not synced yet';
+        syncLine.textContent = `Discogs @${cfg.discogsUser} · ${lastTxt}`;
+      } else {
+        syncLine.textContent = 'Connect Discogs in Settings to mirror your collection copies & folders.';
+      }
+    }
+
     const q = norm(document.getElementById('stashSearch').value);
     const filtered = stashCache.filter(it => {
       if (['Cassette', 'CD', 'Vinyl'].includes(activeStashFilter) && it.format !== activeStashFilter) return false;
       if (activeStashFilter === 'highvalue' && !it.is_high_value && !it.is_scarce) return false;
       if (activeStashFilter === 'keep' && (it.taste_score || 0) < 7) return false;
       if (activeStashFilter === 'lowconf' && !(it.discogs_id && (it.have ?? 0) < 15)) return false;
-      if (activeStashFilter === 'localonly' && it.synced_to_discogs) return false;
+      if (activeStashFilter === 'localonly' && (it.synced_to_discogs && !it.discogs_removed)) return false;
+      if (activeDiscogsFolderFilter !== null) {
+        if (!it.synced_to_discogs || it.discogs_removed) return false;
+        if (String(it.discogs_folder_id || '1') !== String(activeDiscogsFolderFilter)) return false;
+      }
       if (!q) return true;
-      return norm(`${it.artist} ${it.title} ${it.catno} ${it.label} ${it.condition_note} ${(it.tracklist || []).map(t => `${t.artist || ''} ${t.title}`).join(' ')}`).includes(q);
+      return norm(`${it.artist} ${it.title} ${it.catno} ${it.label} ${it.condition_note} ${getFolderNameById(it.discogs_folder_id)} ${(it.tracklist || []).map(t => `${t.artist || ''} ${t.title}`).join(' ')}`).includes(q);
     });
 
     updateRecalibrateStashBtn();
@@ -5283,7 +5615,16 @@ Return ONLY valid JSON:
     document.getElementById('stashStats').textContent = `${filtered.length} items · ~$${Math.round(totalValUsd)}`;
 
     const list = document.getElementById('stashList');
-    if (!filtered.length) { list.innerHTML = `<div class="card"><p>No matching items yet.</p></div>`; return; }
+    if (!filtered.length) {
+      const emptyAction = cfg.discogsUser
+        ? `<button type="button" class="btn btn-green btn-sm" style="margin-top:8px;" onclick="syncWithDiscogsUI(true)">🔄 Sync with Discogs</button>`
+        : `<button type="button" class="btn btn-secondary btn-sm" style="margin-top:8px;" onclick="switchView('settings')">⚙️ Connect Discogs or Google Drive</button>`;
+      const emptyMsg = activeDiscogsFolderFilter !== null
+        ? `No copies in folder "${esc(getFolderNameById(activeDiscogsFolderFilter))}" yet.`
+        : (stashCache.length ? 'No matching items in this filter.' : 'Your Stash is empty. Scan an item, connect Google Drive, or sync your Discogs collection.');
+      list.innerHTML = `<div class="card"><p>${emptyMsg}</p>${!stashCache.length ? emptyAction : ''}</div>`;
+      return;
+    }
 
     if (activeStashView === 'spines') {
       list.innerHTML = `<div class="spine-shelf">${filtered.map(it => {
@@ -5323,9 +5664,11 @@ Return ONLY valid JSON:
 
       let syncText = 'LOCAL';
       let syncCls = 'c-muted';
-      if (it.synced_to_discogs) {
+      if (it.discogs_removed) {
+        syncText = 'REMOVED'; syncCls = 'c-yellow';
+      } else if (it.synced_to_discogs) {
         if (it.pending_delete_old) { syncText = 'OLD COPY'; syncCls = 'c-yellow'; }
-        else { syncText = 'DISCOGS'; syncCls = 'c-green'; }
+        else { syncText = getFolderNameById(it.discogs_folder_id || '1').toUpperCase(); syncCls = 'c-green'; }
       } else if (it.pending_discogs_sync) {
         syncText = 'PENDING'; syncCls = 'c-red';
       }
@@ -5333,6 +5676,9 @@ Return ONLY valid JSON:
       const flags = [
         it.is_high_value ? `<span class="badge badge-yellow">🔥 VALUE</span>` : '',
         it.is_scarce ? `<span class="badge badge-purple">💎 SCARCE</span>` : '',
+        it.discogs_removed ? `<span class="badge badge-yellow">Removed from Discogs</span>` : '',
+        it.discogs_link_ambiguous ? `<span class="badge badge-yellow">⚠️ Link Copy</span>` : '',
+        (Array.isArray(it.conflicts) && it.conflicts.length) ? `<span class="badge badge-purple">⚠️ Sync Conflict</span>` : '',
         isStashTasteStale(it) ? `<span class="badge badge-purple">🔄 TASTE</span>` : '',
         it.spine_thumb_url ? `<span class="badge badge-mono">SPINE</span>` : ''
       ].filter(Boolean).join('');
@@ -5427,6 +5773,7 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
     setStatus(`🔄 Re-scoring "${it.artist} — ${it.title}"...`, true, { cancellable: true });
     try {
       const res = await CC.callAI([{ text: prompt }], null, { retryLabel: 'Stash Re-Score' });
+      const prev = { ...it };
       it.taste_score = res.score;
       it.taste_verdict = res.verdict;
       it.taste_summary = res.summary || '';
@@ -5435,15 +5782,19 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
       it.litmus_track = res.litmus_track || it.tracklist?.[0]?.title || it.litmus_track || '';
       it.litmus_artist = res.litmus_artist || '';
       it.taste_scored_at = Date.now();
-      it.updated_at = Date.now();
+      const stamped = CC.stampStashRevision(it, prev, [
+        'taste_score', 'taste_verdict', 'taste_summary', 'context_note',
+        'notable_songs', 'litmus_track', 'litmus_artist', 'taste_scored_at'
+      ]);
 
-      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v201`);
-      await CC.idbPut('stash', it);
+      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v202`);
+      await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
       await loadStashCache();
       renderStash();
       setStatus('', false);
       rescoringStashItemId = null;
-      await markCloudChangeAndAutoSync(it.sync_id, false);
+      updateCloudUI();
+      scheduleGoogleAutoSync();
       if (activeStashItem?.id === id) openStashDetail(id, true);
       toast(`✅ Re-scored: ${it.taste_score}/10 (${it.taste_verdict})`, 3200);
     } catch (err) {
@@ -5546,13 +5897,13 @@ Return ONLY valid JSON:
           const verdict = ['KEEP', 'LISTEN', 'SELL / SKIP'].includes(sc.verdict)
             ? sc.verdict
             : (score >= 7 ? 'KEEP' : score >= 5 ? 'LISTEN' : 'SELL / SKIP');
+          const prev = { ...it };
           it.taste_score = score;
           it.taste_verdict = verdict;
           if (sc.summary) it.taste_summary = sc.summary.trim();
           it.taste_scored_at = now;
-          it.updated_at = now;
-          await CC.idbPut('stash', it);
-          if (it.sync_id) await CC.recordLocalCloudChange(it.sync_id, false);
+          const stamped = CC.stampStashRevision(it, prev, ['taste_score', 'taste_verdict', 'taste_summary', 'taste_scored_at']);
+          await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
           updatedTotal++;
         }
 
@@ -5577,11 +5928,15 @@ Return ONLY valid JSON:
     }
   };
 
+  function getStashCoverPhotos(it) {
+    if (!it) return [];
+    if (Array.isArray(it.thumbs) && it.thumbs.length) return it.thumbs.filter(Boolean);
+    return it.thumb_data_url ? [it.thumb_data_url] : [];
+  }
+
   window.openStashLightbox = (idx) => {
     if (!activeStashItem) return;
-    const photos = (Array.isArray(activeStashItem.thumbs) && activeStashItem.thumbs.length)
-      ? activeStashItem.thumbs : (activeStashItem.thumb_data_url ? [activeStashItem.thumb_data_url] : []);
-    openLightbox(photos, idx);
+    openLightbox(getStashCoverPhotos(activeStashItem), idx);
   };
 
   window.openStashSpineLightbox = () => {
@@ -5589,9 +5944,320 @@ Return ONLY valid JSON:
     openLightbox([activeStashItem.spine_thumb_url], 0);
   };
 
+  window.toggleStashPhotoManager = (id) => {
+    stashPhotoManagerOpen = !stashPhotoManagerOpen;
+    if (activeStashItem?.id === id) openStashDetail(id, true);
+  };
+
+  // Direct Stash Detail photo add/replace/remove — works offline, zero Gemini/Discogs calls, zero grade changes!
+  window.handleStashPhotoFiles = async (id, slot, fileList) => {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    const it = stashCache.find(x => x.id === id);
+    if (!it) return;
+
+    const prev = { ...it };
+    const nextThumbs = getStashCoverPhotos(it).slice();
+    let nextSpineThumb = it.spine_thumb_url || '';
+    let nextSpineSource = it.spine_source_url || '';
+    let nextSpineFlipped = Boolean(it.spine_flipped);
+    const changed = [];
+
+    setStatus(`Processing ${files.length} photo(s) locally...`, true);
+    try {
+      for (const file of files) {
+        if (slot === 'spine') {
+          const pair = await decodeBlobToPhotoPair(file, { aiMaxDim: 1600, aiQuality: 0.88, saveMaxDim: 1600, saveQuality: 0.84, squarePreview: false });
+          nextSpineSource = pair.saveWebp;
+          nextSpineThumb = await normalizeSpineDataUrl(pair.saveWebp, '');
+          nextSpineFlipped = false;
+          changed.push('spine_source_url', 'spine_thumb_url', 'spine_flipped');
+        } else if (slot === 'front') {
+          const pair = await decodeBlobToPhotoPair(file, { aiMaxDim: 1600, aiQuality: 0.88, saveMaxDim: 1600, saveQuality: 0.84, squarePreview: true });
+          if (nextThumbs.length === 0) nextThumbs.push(pair.saveWebp);
+          else nextThumbs[0] = pair.saveWebp;
+          changed.push('thumbs', 'thumb_data_url');
+        } else if (slot === 'back') {
+          const pair = await decodeBlobToPhotoPair(file, { aiMaxDim: 1600, aiQuality: 0.88, saveMaxDim: 1600, saveQuality: 0.84, squarePreview: true });
+          if (nextThumbs.length === 0) nextThumbs.push(pair.saveWebp);
+          else if (nextThumbs.length === 1) nextThumbs.push(pair.saveWebp);
+          else nextThumbs[1] = pair.saveWebp;
+          changed.push('thumbs', 'thumb_data_url');
+        } else {
+          // Append by default for Extra / general Add Photos
+          const pair = await decodeBlobToPhotoPair(file, { aiMaxDim: 1600, aiQuality: 0.88, saveMaxDim: 1600, saveQuality: 0.84, squarePreview: nextThumbs.length < 2 });
+          nextThumbs.push(pair.saveWebp);
+          changed.push('thumbs', 'thumb_data_url');
+        }
+      }
+
+      const updated = {
+        ...it,
+        thumbs: nextThumbs,
+        thumb_data_url: nextThumbs[0] || it.discogs_thumb || '',
+        spine_thumb_url: nextSpineThumb,
+        spine_source_url: nextSpineSource,
+        spine_flipped: nextSpineFlipped
+      };
+      const stamped = CC.stampStashRevision(updated, prev, Array.from(new Set(changed)));
+      await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+      await loadStashCache();
+      renderStash();
+      updateCloudUI();
+      scheduleGoogleAutoSync();
+      setStatus('', false);
+      if (activeStashItem?.id === id) openStashDetail(id, true);
+      toast(`📷 Photo${files.length > 1 ? 's' : ''} saved to Stash!`);
+    } catch (err) {
+      setStatus('', false);
+      toast('Photo error: ' + (err?.message || 'Failed'), 4200);
+    }
+  };
+
+  window.removeStashPhotoSlot = async (id, idx, ev) => {
+    if (ev) ev.stopPropagation();
+    const it = stashCache.find(x => x.id === id);
+    if (!it) return;
+    if (!confirm('Remove this photo from this Stash item?')) return;
+    const prev = { ...it };
+    const nextThumbs = getStashCoverPhotos(it).slice();
+    if (idx >= 0 && idx < nextThumbs.length) nextThumbs.splice(idx, 1);
+    const updated = {
+      ...it,
+      thumbs: nextThumbs,
+      thumb_data_url: nextThumbs[0] || it.discogs_thumb || ''
+    };
+    const stamped = CC.stampStashRevision(updated, prev, ['thumbs', 'thumb_data_url']);
+    await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+    await loadStashCache();
+    renderStash();
+    updateCloudUI();
+    scheduleGoogleAutoSync();
+    if (activeStashItem?.id === id) openStashDetail(id, true);
+    toast('Photo removed');
+  };
+
+  window.removeStashSpine = async (id, ev) => {
+    if (ev) ev.stopPropagation();
+    const it = stashCache.find(x => x.id === id);
+    if (!it) return;
+    if (!confirm('Remove spine photo from this item?')) return;
+    const prev = { ...it };
+    const updated = { ...it, spine_thumb_url: '', spine_source_url: '', spine_flipped: false };
+    const stamped = CC.stampStashRevision(updated, prev, ['spine_thumb_url', 'spine_source_url', 'spine_flipped']);
+    await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+    await loadStashCache();
+    renderStash();
+    updateCloudUI();
+    scheduleGoogleAutoSync();
+    if (activeStashItem?.id === id) openStashDetail(id, true);
+    toast('Spine removed');
+  };
+
+  // Manual 180° Spine Flip in Stash Detail (works on legacy spines without spine_source_url and without AI!)
+  window.flipStashSpine180 = async (id, ev) => {
+    if (ev) ev.stopPropagation();
+    const it = stashCache.find(x => x.id === id);
+    if (!it || !it.spine_thumb_url) return;
+    const prev = { ...it };
+    const sourceUrl = it.spine_source_url || it.spine_thumb_url;
+    const rotated = await rotateDataUrlByDeg(it.spine_thumb_url, 180, 'image/webp', 0.84, 1200);
+    const updated = {
+      ...it,
+      spine_source_url: sourceUrl,
+      spine_thumb_url: rotated,
+      spine_flipped: !Boolean(it.spine_flipped)
+    };
+    const stamped = CC.stampStashRevision(updated, prev, ['spine_source_url', 'spine_thumb_url', 'spine_flipped']);
+    await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+    await loadStashCache();
+    renderStash();
+    updateCloudUI();
+    scheduleGoogleAutoSync();
+    if (activeStashItem?.id === id) openStashDetail(id, true);
+    toast('↻ Spine flipped 180° & saved!', 2000);
+  };
+
+  window.updateLocalIntendedFolder = async (id, folderId) => {
+    const it = stashCache.find(x => x.id === id);
+    if (!it) return;
+    const prev = { ...it };
+    const updated = { ...it, intended_discogs_folder_id: String(folderId || '1') };
+    const stamped = CC.stampStashRevision(updated, prev, ['intended_discogs_folder_id']);
+    await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+    await loadStashCache();
+    updateCloudUI();
+    scheduleGoogleAutoSync();
+    toast(`Target Discogs folder set to "${getFolderNameById(folderId)}" (saved locally)`);
+  };
+
+  window.moveStashItemFolder = async (id, opts = {}) => {
+    const { force = false, explicitTarget = null } = opts || {};
+    const it = stashCache.find(x => x.id === id);
+    if (!it || !it.synced_to_discogs || !it.discogs_id || !it.discogs_instance_id) {
+      toast('Only Discogs-linked copies can be moved on Discogs');
+      return;
+    }
+    if (!cfg.discogsToken || !cfg.discogsUser) {
+      toast('Verify your Discogs account in Settings first');
+      return;
+    }
+    const sel = document.getElementById('sdMoveFolderSel');
+    const targetFolderId = String(explicitTarget ?? sel?.value ?? '1');
+    if (targetFolderId === '0') { toast('Cannot move into virtual "All" folder'); return; }
+
+    const expectedSource = it.pending_folder_move?.fromFolderId || it.discogs_folder_id || '1';
+    const moveBtn = document.getElementById('sdBtnMoveFolder');
+    if (moveBtn) moveBtn.disabled = true;
+
+    // Persist pending move intent BEFORE network call so uncertain timeouts can retry safely
+    const prevBeforeMove = { ...it };
+    const pendingRec = CC.stampStashRevision({
+      ...it,
+      pending_folder_move: {
+        fromFolderId: String(expectedSource),
+        targetFolderId,
+        startedAt: Date.now()
+      }
+    }, prevBeforeMove, ['pending_folder_move']);
+    await CC.commitLocalMutation({ upsertStash: pendingRec, queueOutbox: false });
+    await loadStashCache();
+
+    setStatus(`📁 Moving copy #${it.discogs_instance_id} to "${getFolderNameById(targetFolderId)}" on Discogs...`, true);
+    try {
+      const res = await CC.moveDiscogsInstanceFolder(it.discogs_id, it.discogs_instance_id, targetFolderId, {
+        expectedSourceFolderId: force ? '' : String(expectedSource),
+        force
+      });
+
+      if (res.status === 'conflict_third_folder') {
+        activeFolderMoveConflict = {
+          stashId: id,
+          actualFolderId: res.actualFolderId,
+          targetFolderId: res.targetFolderId,
+          expectedSourceFolderId: res.expectedSourceFolderId
+        };
+        setStatus('', false);
+        if (activeStashItem?.id === id) openStashDetail(id, true);
+        toast(`⚠️ Copy was moved to "${getFolderNameById(res.actualFolderId)}" on Discogs — choose how to proceed`, 4600);
+        return;
+      }
+
+      activeFolderMoveConflict = null;
+      const latest = stashCache.find(x => x.id === id) || pendingRec;
+      const now = Date.now();
+      const finalRec = CC.stampStashRevision({
+        ...latest,
+        discogs_folder_id: String(res.folderId),
+        discogs_folder_verified_at: now,
+        rating: Number(res.rating ?? latest.rating ?? 0),
+        pending_folder_move: null
+      }, latest, ['discogs_folder_id', 'discogs_folder_verified_at', 'rating', 'pending_folder_move']);
+
+      await CC.commitLocalMutation({ upsertStash: finalRec, queueOutbox: true });
+      await loadStashCache();
+      renderStash();
+      updateCloudUI();
+      scheduleGoogleAutoSync();
+      setStatus('', false);
+      if (activeStashItem?.id === id) openStashDetail(id, true);
+      toast(res.status === 'already_in_target'
+        ? `✅ Already in "${getFolderNameById(res.folderId)}" on Discogs`
+        : `✅ Moved to "${getFolderNameById(res.folderId)}" on Discogs!`);
+    } catch (err) {
+      setStatus('', false);
+      if (activeStashItem?.id === id) openStashDetail(id, true);
+      toast('Folder move failed: ' + (err?.message || 'Network error — tap Retry Move safely'), 5200);
+    } finally {
+      const b = document.getElementById('sdBtnMoveFolder');
+      if (b) b.disabled = false;
+    }
+  };
+
+  window.resolveFolderMoveConflict = async (id, choice) => {
+    const conf = activeFolderMoveConflict;
+    if (!conf || conf.stashId !== id) return;
+    if (choice === 'force_move') {
+      await moveStashItemFolder(id, { force: true, explicitTarget: conf.targetFolderId });
+      return;
+    }
+    // Keep Discogs' actual folder locally
+    const it = stashCache.find(x => x.id === id);
+    if (!it) return;
+    const now = Date.now();
+    const updated = CC.stampStashRevision({
+      ...it,
+      discogs_folder_id: String(conf.actualFolderId),
+      discogs_folder_verified_at: now,
+      pending_folder_move: null
+    }, it, ['discogs_folder_id', 'discogs_folder_verified_at', 'pending_folder_move']);
+    activeFolderMoveConflict = null;
+    await CC.commitLocalMutation({ upsertStash: updated, queueOutbox: true });
+    await loadStashCache();
+    renderStash();
+    updateCloudUI();
+    scheduleGoogleAutoSync();
+    if (activeStashItem?.id === id) openStashDetail(id, true);
+    toast(`✅ Kept Discogs folder "${getFolderNameById(conf.actualFolderId)}"`);
+  };
+
+  window.resolveAmbiguousDiscogsLink = async (id, instanceId, folderId) => {
+    const it = stashCache.find(x => x.id === id);
+    if (!it) return;
+    const now = Date.now();
+    const updated = CC.stampStashRevision({
+      ...it,
+      discogs_instance_id: Number(instanceId),
+      discogs_folder_id: String(folderId || '1'),
+      discogs_folder_verified_at: now,
+      discogs_link_ambiguous: false,
+      discogs_ambiguous_candidates: null,
+      synced_to_discogs: true,
+      discogs_removed: false,
+      discogs_removed_at: null
+    }, it, ['discogs_instance_id', 'discogs_folder_id', 'discogs_folder_verified_at', 'discogs_link_ambiguous', 'synced_to_discogs', 'discogs_removed', 'discogs_removed_at']);
+    await CC.commitLocalMutation({ upsertStash: updated, queueOutbox: true });
+    await loadStashCache();
+    renderStash();
+    updateCloudUI();
+    scheduleGoogleAutoSync();
+    if (activeStashItem?.id === id) openStashDetail(id, true);
+    toast(`✅ Linked to Discogs copy #${instanceId} (${getFolderNameById(folderId)})`);
+  };
+
+  window.resolveStashConflict = async (stashId, conflictId, applyRetained) => {
+    const it = stashCache.find(x => x.id === stashId);
+    if (!it || !Array.isArray(it.conflicts)) return;
+    const c = it.conflicts.find(x => x.id === conflictId);
+    const remaining = it.conflicts.filter(x => x.id !== conflictId);
+    const prev = { ...it };
+    const next = { ...it, conflicts: remaining };
+    const changed = [];
+    if (applyRetained && c && c.field) {
+      next[c.field] = c.retainedVal;
+      changed.push(c.field);
+    }
+    const stamped = CC.stampStashRevision(next, prev, changed);
+    await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+    // Also clean from cloud_sync_meta_v2
+    const meta = await CC.getCloudSyncMeta();
+    meta.conflicts = (meta.conflicts || []).filter(x => x.id !== conflictId);
+    await CC.idbPut('meta', { key: 'cloud_sync_meta_v2', value: meta });
+    await loadStashCache();
+    renderStash();
+    updateCloudUI();
+    scheduleGoogleAutoSync();
+    if (activeStashItem?.id === stashId) openStashDetail(stashId, true);
+    toast(applyRetained ? `✅ Restored alternate "${c?.field}" value` : 'Conflict dismissed');
+  };
+
   window.openStashDetail = (id, fromPop = false) => {
     const it = stashCache.find(x => x.id === id);
     if (!it) return;
+    if (activeStashItem?.id !== id) {
+      stashPhotoManagerOpen = false;
+      if (activeFolderMoveConflict?.stashId !== id) activeFolderMoveConflict = null;
+    }
     activeStashItem = it;
     pendingVoiceRetry = null;
 
@@ -5603,9 +6269,10 @@ Return ONLY valid JSON:
     }
 
     document.getElementById('sdHeaderTitle').textContent = `${it.artist} — ${it.title}`;
-    const photos = (Array.isArray(it.thumbs) && it.thumbs.length) ? it.thumbs : (it.thumb_data_url ? [it.thumb_data_url] : []);
+    const photos = getStashCoverPhotos(it);
     const localMatch = checkLocalSpotify(it);
     const hasDiscogs = Boolean(it.discogs_id);
+    const foldersList = getDiscogsFoldersList();
 
     const ebayQ = encodeURIComponent(`${it.artist} ${it.title} ${it.format} ${it.catno}`.trim());
     let links = `<a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="https://www.ebay.com/sch/i.html?_nkw=${ebayQ}&LH_Sold=1&LH_Complete=1">💸 eBay Sold</a>`;
@@ -5617,6 +6284,29 @@ Return ONLY valid JSON:
     links = `<button type="button" class="btn btn-purple btn-sm" onclick="startEditStashItem(${it.id})">🔄 Edit / Re-Check</button>` + links;
 
     let alerts = '';
+    if (it.discogs_removed) {
+      alerts += `<div class="alert-box alert-dup">⚠️ <strong>Removed from Discogs</strong> — this copy is no longer in your Discogs collection. Your local record, photos, spine, grades, and notes are safely preserved under <strong>Local Only</strong>.${hasDiscogs ? ' You can push it back to Discogs below if desired.' : ''}</div>`;
+    }
+    if (it.discogs_link_ambiguous && Array.isArray(it.discogs_ambiguous_candidates) && it.discogs_ambiguous_candidates.length) {
+      alerts += `<div class="alert-box alert-dup">
+        <div>⚠️ <strong>Multiple Discogs copies found for #${it.discogs_id}</strong> — pick which exact copy this Stash item represents:</div>
+        <div class="inline-actions" style="margin-top:8px;">
+          ${it.discogs_ambiguous_candidates.map(c => `<button type="button" class="btn btn-green btn-sm" onclick="resolveAmbiguousDiscogsLink(${it.id}, ${Number(c.instance_id)}, '${esc(c.folder_id)}')">Link Copy #${Number(c.instance_id)} (${esc(getFolderNameById(c.folder_id))})</button>`).join('')}
+        </div>
+      </div>`;
+    }
+    if (Array.isArray(it.conflicts) && it.conflicts.length) {
+      alerts += it.conflicts.map(c => `
+        <div class="alert-box alert-other-pressing">
+          <div>⚠️ <strong>Sync Conflict on "${esc(c.field)}"</strong></div>
+          <div style="font-size:0.78rem; margin-top:4px;">Current: <code>${esc(String(c.keptVal ?? ''))}</code> · Competing edit: <code>${esc(String(c.retainedVal ?? ''))}</code></div>
+          <div class="inline-actions" style="margin-top:8px;">
+            <button type="button" class="btn btn-secondary btn-sm" onclick="resolveStashConflict(${it.id}, '${esc(c.id)}', false)">Keep Current</button>
+            <button type="button" class="btn btn-purple btn-sm" onclick="resolveStashConflict(${it.id}, '${esc(c.id)}', true)">Use Competing Edit</button>
+          </div>
+        </div>
+      `).join('');
+    }
     if (it.pending_discogs_sync) {
       alerts += `<div class="alert-box alert-dup">⏳ Pressing was changed locally and is not synced to Discogs yet.${it.pending_delete_old ? ` Pushing will add #${it.discogs_id} first and then remove old #${it.pending_delete_old.releaseId}.` : ''} Tap <strong>Push to Discogs</strong> below.</div>`;
     } else if (it.synced_to_discogs && it.pending_delete_old) {
@@ -5643,10 +6333,121 @@ Return ONLY valid JSON:
 
     const contextTxt = it.context_note || it.cultural_reason || '';
 
+    // Build responsive Stash Detail Photo Gallery (Front + Back side-by-side square tiles, Spine full-width below with Flip 180°)
+    const slotLabels = ['FRONT', 'BACK'];
+    let galleryHtml = '<div class="photo-gallery" style="margin-bottom:12px;">';
+    if (photos.length) {
+      const singleCls = photos.length === 1 ? 'single-cover' : '';
+      galleryHtml += `<div class="photo-gallery-covers ${singleCls}">${photos.map((src, i) => `
+        <div class="photo-tile" onclick="openStashLightbox(${i})" title="Tap to zoom fullscreen">
+          <img src="${esc(src)}" alt="${slotLabels[i] || `Photo ${i + 1}`}" />
+          <span class="photo-tile-label">${slotLabels[i] || `EXTRA ${i - 1}`}</span>
+          ${stashPhotoManagerOpen ? `<div class="photo-tile-actions"><button type="button" class="photo-tile-btn danger" onclick="removeStashPhotoSlot(${it.id}, ${i}, event)" title="Remove photo">×</button></div>` : ''}
+        </div>
+      `).join('')}</div>`;
+    }
+    if (it.spine_thumb_url) {
+      galleryHtml += `
+        <div class="photo-gallery-spine">
+          <div class="photo-gallery-spine-bar">
+            <span style="font-size:0.7rem; font-weight:800; letter-spacing:0.06em; color:var(--muted);">SPINE${it.spine_flipped ? ' (FLIPPED 180°)' : ''}</span>
+            <div class="inline-actions" style="gap:4px;">
+              <button type="button" class="photo-tile-btn" onclick="flipStashSpine180(${it.id}, event)" title="Flip spine 180°">↻ Flip 180°</button>
+              ${stashPhotoManagerOpen ? `<button type="button" class="photo-tile-btn danger" onclick="removeStashSpine(${it.id}, event)" title="Remove spine">×</button>` : ''}
+            </div>
+          </div>
+          <div class="photo-gallery-spine-imgwrap" onclick="openStashSpineLightbox()" title="Tap to zoom spine">
+            <img src="${esc(it.spine_thumb_url)}" alt="Cropped spine" />
+          </div>
+        </div>
+      `;
+    }
+    galleryHtml += `
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
+        <span style="font-size:0.72rem; color:var(--muted);">${(photos.length || it.spine_thumb_url) ? 'Tap any photo to zoom fullscreen' : 'No photos saved yet'}</span>
+        <button type="button" class="btn btn-secondary btn-sm" style="min-height:30px; padding:3px 10px; font-size:0.74rem;" onclick="toggleStashPhotoManager(${it.id})">${stashPhotoManagerOpen ? '✕ Done Managing Photos' : '📷 Add Photos'}</button>
+      </div>
+    `;
+    if (stashPhotoManagerOpen) {
+      galleryHtml += `
+        <div class="sd-photo-panel">
+          <div style="font-size:0.78rem; color:var(--muted); margin-bottom:8px;">
+            Add or replace photos directly (saved locally at 1600×1600 WebP &amp; synced to Drive — zero AI or Discogs writes, grades stay untouched).
+          </div>
+          <input id="sdPhotoFrontCam" class="hidden-file" type="file" accept="image/*" capture="environment" onchange="handleStashPhotoFiles(${it.id}, 'front', this.files); this.value='';" />
+          <input id="sdPhotoFrontUp" class="hidden-file" type="file" accept="image/*" onchange="handleStashPhotoFiles(${it.id}, 'front', this.files); this.value='';" />
+          <input id="sdPhotoBackCam" class="hidden-file" type="file" accept="image/*" capture="environment" onchange="handleStashPhotoFiles(${it.id}, 'back', this.files); this.value='';" />
+          <input id="sdPhotoBackUp" class="hidden-file" type="file" accept="image/*" onchange="handleStashPhotoFiles(${it.id}, 'back', this.files); this.value='';" />
+          <input id="sdPhotoSpineCam" class="hidden-file" type="file" accept="image/*" capture="environment" onchange="handleStashPhotoFiles(${it.id}, 'spine', this.files); this.value='';" />
+          <input id="sdPhotoSpineUp" class="hidden-file" type="file" accept="image/*" onchange="handleStashPhotoFiles(${it.id}, 'spine', this.files); this.value='';" />
+          <input id="sdPhotoExtraUp" class="hidden-file" type="file" accept="image/*" multiple onchange="handleStashPhotoFiles(${it.id}, 'extra', this.files); this.value='';" />
+          <div class="inline-actions" style="gap:6px;">
+            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('sdPhotoFrontCam').click()">📷 ${photos[0] ? 'Replace' : 'Add'} Front</button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('sdPhotoFrontUp').click()">🖼️ Upload Front</button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('sdPhotoBackCam').click()">📷 ${photos[1] ? 'Replace' : 'Add'} Back</button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('sdPhotoBackUp').click()">🖼️ Upload Back</button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('sdPhotoSpineCam').click()">📷 ${it.spine_thumb_url ? 'Replace' : 'Add'} Spine</button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('sdPhotoSpineUp').click()">🖼️ Upload Spine</button>
+            <button type="button" class="btn btn-green btn-sm" onclick="document.getElementById('sdPhotoExtraUp').click()">➕ Append Extra Photo(s)</button>
+          </div>
+        </div>
+      `;
+    }
+    galleryHtml += '</div>';
+
+    // Build Discogs Folder / Move to Folder panel
+    let folderBoxHtml = '';
+    if (it.synced_to_discogs && !it.discogs_removed && it.discogs_id && it.discogs_instance_id) {
+      const curFid = String(it.discogs_folder_id || '1');
+      const conf = (activeFolderMoveConflict && activeFolderMoveConflict.stashId === it.id) ? activeFolderMoveConflict : null;
+      const pendingMove = it.pending_folder_move || null;
+      folderBoxHtml = `
+        <div class="sd-folder-box">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px;">
+            <strong style="font-size:0.86rem;">📁 Discogs Folder</strong>
+            <span class="badge badge-green" style="margin:0;">${esc(getFolderNameById(curFid))} · Copy #${Number(it.discogs_instance_id)}</span>
+          </div>
+          ${conf ? `
+            <div class="alert-box alert-dup" style="margin-bottom:8px;">
+              <div>⚠️ On Discogs, this copy is now in <strong>${esc(getFolderNameById(conf.actualFolderId))}</strong> (expected ${esc(getFolderNameById(conf.expectedSourceFolderId))}).</div>
+              <div class="inline-actions" style="margin-top:8px;">
+                <button type="button" class="btn btn-secondary btn-sm" onclick="resolveFolderMoveConflict(${it.id}, 'keep_discogs')">Keep "${esc(getFolderNameById(conf.actualFolderId))}"</button>
+                <button type="button" class="btn btn-green btn-sm" onclick="resolveFolderMoveConflict(${it.id}, 'force_move')">Move to "${esc(getFolderNameById(conf.targetFolderId))}"</button>
+              </div>
+            </div>
+          ` : ''}
+          ${pendingMove && !conf ? `
+            <div class="alert-box alert-dup" style="margin-bottom:8px;">
+              ⏳ Previous move to <strong>${esc(getFolderNameById(pendingMove.targetFolderId))}</strong> did not finish confirming. Tap Move to Folder again to verify live state and retry safely.
+            </div>
+          ` : ''}
+          <div style="display:flex; gap:8px; align-items:center;">
+            <select id="sdMoveFolderSel" style="flex:1;">
+              ${foldersList.map(f => `<option value="${f.id}" ${String(f.id) === (pendingMove ? String(pendingMove.targetFolderId) : curFid) ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}
+            </select>
+            <button id="sdBtnMoveFolder" type="button" class="btn btn-green btn-sm" style="flex:0 0 auto;" onclick="moveStashItemFolder(${it.id})">📁 Move to Folder</button>
+          </div>
+        </div>
+      `;
+    } else {
+      const intendedFid = String(it.intended_discogs_folder_id || cfg.discogsFolderId || '1');
+      folderBoxHtml = `
+        <div class="sd-folder-box">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px;">
+            <strong style="font-size:0.86rem;">📁 Target Discogs Folder (Local Only)</strong>
+            <span class="badge badge-mono" style="margin:0;">Local Only</span>
+          </div>
+          <div style="font-size:0.74rem; color:var(--muted); margin-bottom:6px;">Stored locally for when you push this copy to Discogs (no remote write yet).</div>
+          <select id="sdIntendedFolderSel" onchange="updateLocalIntendedFolder(${it.id}, this.value)">
+            ${foldersList.map(f => `<option value="${f.id}" ${String(f.id) === intendedFid ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}
+          </select>
+        </div>
+      `;
+    }
+
     const body = document.getElementById('sdBody');
     body.innerHTML = `
-      ${it.spine_thumb_url ? `<div class="detail-spine-bar" onclick="openStashSpineLightbox()" title="Tap to zoom cropped spine"><img src="${esc(it.spine_thumb_url)}" alt="Cropped spine" /></div>` : ''}
-      ${photos.length ? `<div class="detail-photos">${photos.map((src, i) => `<img src="${esc(src)}" onclick="openStashLightbox(${i})" title="Tap for fullscreen" />`).join('')}</div><div style="font-size:0.72rem; color:var(--muted); margin:-8px 0 10px;">Tap any photo to zoom fullscreen</div>` : ''}
+      ${galleryHtml}
 
       <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:8px;">
         <div>
@@ -5657,6 +6458,7 @@ Return ONLY valid JSON:
       </div>
 
       ${alerts}
+      ${folderBoxHtml}
 
       <div class="metrics-grid">
         <div class="metric-box"><div class="metric-label">Lowest Listed</div><div class="metric-val">${it.lowest_price != null ? esc(formatMoneyWithUsd(it.lowest_price, it.lowest_currency || 'USD')) : 'N/A'}</div></div>
@@ -5799,27 +6601,39 @@ Return ONLY valid JSON:
   window.saveStashEdits = async (id) => {
     const it = stashCache.find(x => x.id === id);
     if (!it) return;
-    it.media_condition = document.getElementById('sdMediaCond').value;
-    it.sleeve_condition = document.getElementById('sdSleeveCond').value;
-    it.condition_note = document.getElementById('sdNotes').value.trim();
+    const prev = { ...it };
+    const nextMedia = document.getElementById('sdMediaCond').value;
+    const nextSleeve = document.getElementById('sdSleeveCond').value;
+    const nextNote = document.getElementById('sdNotes').value.trim();
+    const updated = {
+      ...it,
+      media_condition: nextMedia,
+      sleeve_condition: nextSleeve,
+      condition_note: nextNote
+    };
+    const changedFields = ['media_condition', 'sleeve_condition', 'condition_note'];
 
-    if (it.synced_to_discogs && it.discogs_id && cfg.discogsUser) {
-      let instId = it.discogs_instance_id;
-      let fId = it.discogs_folder_id || cfg.discogsFolderId || '1';
+    if (updated.synced_to_discogs && updated.discogs_id && cfg.discogsUser) {
+      let instId = updated.discogs_instance_id;
+      let fId = updated.discogs_folder_id || cfg.discogsFolderId || '1';
       let remoteCopies = 0;
       if (!instId) {
-        const insts = await CC.findDiscogsInstances(it.discogs_id);
+        const insts = await CC.findDiscogsInstances(updated.discogs_id);
         remoteCopies = insts.length;
         if (insts.length === 1) {
           instId = insts[0].instance_id;
           fId = String(insts[0].folder_id || fId);
-          it.discogs_instance_id = instId;
-          it.discogs_folder_id = fId;
+          updated.discogs_instance_id = instId;
+          updated.discogs_folder_id = fId;
+          updated.discogs_account = cfg.discogsUser;
+          updated.discogs_folder_verified_at = Date.now();
+          changedFields.push('discogs_instance_id', 'discogs_folder_id', 'discogs_account', 'discogs_folder_verified_at');
         }
       }
       if (instId) {
-        const fieldRes = await CC.syncDiscogsInstanceFields(fId, it.discogs_id, instId, it.media_condition, it.sleeve_condition, it.condition_note);
-        it.pending_field_sync = fieldRes.failedCount > 0;
+        const fieldRes = await CC.syncDiscogsInstanceFields(fId, updated.discogs_id, instId, updated.media_condition, updated.sleeve_condition, updated.condition_note);
+        updated.pending_field_sync = fieldRes.failedCount > 0;
+        changedFields.push('pending_field_sync');
         if (fieldRes.failedCount > 0) {
           toast(`⚠️ Saved locally, but ${fieldRes.failedCount} Discogs field(s) failed: ${fieldRes.errors[0] || ''}`, 5000);
         } else {
@@ -5828,11 +6642,12 @@ Return ONLY valid JSON:
       } else toast(`💾 Saved locally — found ${remoteCopies} Discogs cop${remoteCopies === 1 ? 'y' : 'ies'}, so remote grades were not overwritten.`, 5000);
     } else toast('💾 Grade & notes saved!');
 
-    it.updated_at = Date.now();
-    await CC.idbPut('stash', it);
+    const stamped = CC.stampStashRevision(updated, prev, changedFields);
+    await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
     await loadStashCache();
     renderStash();
-    await markCloudChangeAndAutoSync(it.sync_id, false);
+    updateCloudUI();
+    scheduleGoogleAutoSync();
     if (activeStashItem?.id === id) openStashDetail(id, true);
   };
 
@@ -5857,39 +6672,49 @@ Return ONLY valid JSON:
     const pushBtn = document.getElementById('sdBtnPushDiscogs');
     if (pushBtn) pushBtn.disabled = true;
 
+    const prev = { ...it };
+    const updated = { ...it };
     if (activeStashItem?.id === id) {
-      it.media_condition = document.getElementById('sdMediaCond')?.value || it.media_condition;
-      it.sleeve_condition = document.getElementById('sdSleeveCond')?.value || it.sleeve_condition;
-      it.condition_note = document.getElementById('sdNotes')?.value.trim() ?? it.condition_note;
+      updated.media_condition = document.getElementById('sdMediaCond')?.value || updated.media_condition;
+      updated.sleeve_condition = document.getElementById('sdSleeveCond')?.value || updated.sleeve_condition;
+      updated.condition_note = document.getElementById('sdNotes')?.value.trim() ?? updated.condition_note;
     }
+    const targetFolder = updated.intended_discogs_folder_id || cfg.discogsFolderId || '1';
 
     try {
-      const added = await ensureDiscogsInstanceDurable(ledgerKey, it.discogs_id, cfg.discogsFolderId || '1', [relKey]);
-      const folderId = added.folderId;
+      const added = await ensureDiscogsInstanceDurable(ledgerKey, updated.discogs_id, targetFolder, [relKey]);
+      const folderId = String(added.folderId || targetFolder);
       const newInstId = added.instanceId;
+      const now = Date.now();
 
-      it.synced_to_discogs = true;
-      it.pending_discogs_sync = false;
-      it.tiebreak_confirmed = true;
-      it.discogs_folder_id = folderId;
-      it.discogs_instance_id = newInstId;
+      updated.synced_to_discogs = true;
+      updated.discogs_account = cfg.discogsUser;
+      updated.discogs_removed = false;
+      updated.discogs_removed_at = null;
+      updated.intended_discogs_folder_id = null;
+      updated.pending_discogs_sync = false;
+      updated.tiebreak_confirmed = true;
+      updated.discogs_folder_id = folderId;
+      updated.discogs_folder_verified_at = now;
+      updated.discogs_instance_id = newInstId;
 
       setStatus('Syncing grades & notes to Discogs...', true);
-      const fieldRes = await CC.syncDiscogsInstanceFields(folderId, it.discogs_id, newInstId, it.media_condition, it.sleeve_condition, it.condition_note);
-      it.pending_field_sync = fieldRes.failedCount > 0;
+      const fieldRes = await CC.syncDiscogsInstanceFields(folderId, updated.discogs_id, newInstId, updated.media_condition, updated.sleeve_condition, updated.condition_note);
+      updated.pending_field_sync = fieldRes.failedCount > 0;
 
-      // Persist immediately BEFORE removing any old swapped pressing; clear both ledger keys only after IDB succeeds
-      await CC.idbPut('stash', it);
+      // Persist immediately & atomically BEFORE removing any old swapped pressing; clear both ledger keys only after IDB succeeds
+      const stamped = CC.stampStashRevision(updated, prev);
+      await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
       clearPendingDiscogsOp(ledgerKey);
       clearPendingDiscogsOp(relKey);
 
       let oldWarn = '';
-      if (it.pending_delete_old) {
+      if (stamped.pending_delete_old) {
         if (fieldRes.failedCount > 0) {
-          oldWarn = `${fieldRes.failedCount} grade/note field(s) failed (${fieldRes.errors[0] || ''}) — old pressing #${it.pending_delete_old.releaseId} kept safely on Discogs.`;
+          oldWarn = `${fieldRes.failedCount} grade/note field(s) failed (${fieldRes.errors[0] || ''}) — old pressing #${stamped.pending_delete_old.releaseId} kept safely on Discogs.`;
         } else {
-          setStatus(`Removing old pressing #${it.pending_delete_old.releaseId}...`, true);
-          const delRes = await attemptDeleteOldCopy(it);
+          setStatus(`Removing old pressing #${stamped.pending_delete_old.releaseId}...`, true);
+          const delRes = await attemptDeleteOldCopy(stamped);
           if (!delRes.ok) oldWarn = delRes.warning;
         }
       }
@@ -5897,7 +6722,8 @@ Return ONLY valid JSON:
       await loadStashCache();
       renderStash();
       setStatus('', false);
-      await markCloudChangeAndAutoSync(it.sync_id, false);
+      updateCloudUI();
+      scheduleGoogleAutoSync();
       if (activeStashItem?.id === id) openStashDetail(id, true);
 
       if (oldWarn) {
@@ -5905,7 +6731,7 @@ Return ONLY valid JSON:
       } else if (fieldRes.failedCount > 0) {
         toast(`⚠️ Added to Discogs, but ${fieldRes.failedCount} field(s) failed: ${fieldRes.errors[0] || ''}`, 5000);
       } else {
-        toast('✅ Added to Discogs with grades!');
+        toast(`✅ Added to Discogs (${getFolderNameById(folderId)}) with grades!`);
       }
     } catch (e) {
       setStatus('', false);
@@ -5919,16 +6745,15 @@ Return ONLY valid JSON:
   window.deleteStashItem = async (id) => {
     if (!confirm('Remove from Local Stash?')) return;
     const it = stashCache.find(x => x.id === id);
-    if (it?.sync_id) {
-      const rec = (await CC.idbGet('meta', 'deleted_sync_ids'))?.value || {};
-      rec[it.sync_id] = Date.now();
-      await CC.idbPut('meta', { key: 'deleted_sync_ids', value: rec });
-    }
-    await CC.idbDelete('stash', id);
+    await CC.commitLocalMutation({
+      deleteStash: { id, sync_id: it?.sync_id || null },
+      queueOutbox: Boolean(it?.sync_id)
+    });
     closeStashDetail();
     await loadStashCache();
     renderStash();
-    await markCloudChangeAndAutoSync(it?.sync_id || null, true);
+    updateCloudUI();
+    scheduleGoogleAutoSync();
     toast('Deleted');
   };
 
@@ -5961,87 +6786,145 @@ Return ONLY valid JSON:
           const copy = { ...item };
           delete copy.id;
           if (!copy.sync_id) copy.sync_id = CC.generateSyncId();
-          await CC.idbPut('stash', copy);
+          const stamped = CC.stampStashRevision(copy, null);
+          await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
         }
       }
       if (data.spotifyProfile) {
         spotifyProfile = data.spotifyProfile;
-        await CC.idbPut('meta', { key: 'spotify_profile', value: spotifyProfile });
+        await CC.commitLocalMutation({
+          metaPuts: [{ key: 'spotify_profile', value: spotifyProfile }],
+          extraOps: [{ type: 'spotify_profile', profile: spotifyProfile }],
+          queueOutbox: true
+        });
         document.getElementById('cfgTasteDna').value = spotifyProfile.tasteDna || '';
         document.getElementById('cfgSoftSpots').value = spotifyProfile.softSpots || '';
         updateSpotifyUI();
       }
       await loadStashCache(); renderStash();
+      updateCloudUI();
       toast('Backup restored!');
     } catch (e) { toast('Invalid JSON: ' + e.message); }
   };
 
-  // ==================== GOOGLE DRIVE CLOUD SYNC UI ====================
+  // ==================== GOOGLE DRIVE V2 CLOUD SYNC UI ====================
   function updateCloudUI(customLabel = '') {
     const hPill = document.getElementById('cloudPill');
     const aPill = document.getElementById('pillCloud');
     const sum = document.getElementById('googleSyncSummary');
+    const mismatchBox = document.getElementById('googleAccountMismatchBox');
+    const conflictsBox = document.getElementById('googleConflictsBox');
     const btnIn = document.getElementById('btnGoogleSignIn');
+    const btnLoad = document.getElementById('btnGoogleLoad');
     const btnSync = document.getElementById('btnGoogleSyncNow');
     const btnOut = document.getElementById('btnGoogleSignOut');
 
     const signedIn = CC.isGoogleSignedIn();
     const hasClient = Boolean(CC.getGoogleClientId());
     const pending = CC.getPendingCloudChanges();
-    const lastStr = cfg.googleLastSyncAt ? new Date(cfg.googleLastSyncAt).toLocaleString() : 'Never';
+    const lastLoadStr = cfg.googleLastLoadAt ? new Date(cfg.googleLastLoadAt).toLocaleString() : 'Never';
+    const lastSyncStr = cfg.googleLastSyncAt ? new Date(cfg.googleLastSyncAt).toLocaleString() : 'Never';
+    const activeEmail = cfg.googleEmail || cfg.googleBoundEmail || '';
+
+    // Account mismatch warning box
+    if (mismatchBox) {
+      if (cloudAccountMismatch) {
+        mismatchBox.classList.remove('hidden');
+        mismatchBox.innerHTML = `
+          <div>⚠️ <strong>Different Google Account Detected</strong> — local data belongs to <strong>${esc(cloudAccountMismatch.previousEmail)}</strong>, but you signed in as <strong>${esc(cloudAccountMismatch.currentEmail)}</strong>. Automatic uploads are paused to protect your data.</div>
+          <div class="inline-actions" style="margin-top:8px;">
+            <button type="button" class="btn btn-secondary btn-sm" onclick="googleReconnectPreviousAccount()">↩️ Reconnect ${esc(cloudAccountMismatch.previousEmail)}</button>
+            <button type="button" class="btn btn-green btn-sm" onclick="googleImportLocalToNewAccount()">📦 Import Local Profile into ${esc(cloudAccountMismatch.currentEmail)}</button>
+          </div>
+        `;
+      } else {
+        mismatchBox.classList.add('hidden');
+        mismatchBox.innerHTML = '';
+      }
+    }
+
+    // Active sync conflicts summary in Settings
+    if (conflictsBox) {
+      const itemsWithConflicts = stashCache.filter(it => Array.isArray(it.conflicts) && it.conflicts.length > 0);
+      if (itemsWithConflicts.length > 0) {
+        const totalC = itemsWithConflicts.reduce((s, it) => s + it.conflicts.length, 0);
+        conflictsBox.classList.remove('hidden');
+        conflictsBox.innerHTML = `
+          <div>⚠️ <strong>${totalC} competing edit conflict(s) retained for review</strong> across ${itemsWithConflicts.length} Stash item(s). Open an item to compare or restore the competing value:</div>
+          <div class="inline-actions" style="margin-top:6px;">
+            ${itemsWithConflicts.slice(0, 4).map(it => `<button type="button" class="btn btn-secondary btn-sm" onclick="switchView('stash'); openStashDetail(${it.id})">${esc(it.artist)} — ${esc(it.title)}</button>`).join('')}
+          </div>
+        `;
+      } else {
+        conflictsBox.classList.add('hidden');
+        conflictsBox.innerHTML = '';
+      }
+    }
 
     if (customLabel) {
       if (hPill) { hPill.textContent = customLabel; hPill.className = 'pill warn'; }
-      if (aPill) { aPill.textContent = 'Syncing'; aPill.className = 'pill warn'; }
+      if (aPill) { aPill.textContent = 'Working'; aPill.className = 'pill warn'; }
       return;
     }
 
     if (signedIn) {
-      if (hPill) {
-        hPill.textContent = pending > 0 ? `☁️ Sync (${pending})` : '☁️ Synced';
-        hPill.className = pending > 0 ? 'pill warn' : 'pill ok';
-      }
-      if (aPill) {
-        aPill.textContent = pending > 0 ? `${pending} pending` : 'Synced';
-        aPill.className = pending > 0 ? 'pill warn' : 'pill ok';
-      }
-      if (sum) {
-        sum.textContent = pending > 0
-          ? `✅ Signed in${cfg.googleEmail ? ` as ${cfg.googleEmail}` : ''} · ${pending} change(s) pending · Last synced: ${lastStr}`
-          : `✅ Signed in${cfg.googleEmail ? ` as ${cfg.googleEmail}` : ''} · Last synced: ${lastStr}`;
+      if (cloudAccountMismatch) {
+        if (hPill) { hPill.textContent = '☁️ Account Check'; hPill.className = 'pill warn'; }
+        if (aPill) { aPill.textContent = 'Paused'; aPill.className = 'pill warn'; }
+        if (sum) sum.textContent = `⚠️ Signed in as ${cfg.googleEmail || 'new account'} · Paused until you reconnect ${cloudAccountMismatch.previousEmail} or import your local profile.`;
+      } else if (cloudEmptyAwaitingPublish) {
+        if (hPill) { hPill.textContent = '☁️ Ready to Sync'; hPill.className = 'pill warn'; }
+        if (aPill) { aPill.textContent = 'Empty Cloud'; aPill.className = 'pill warn'; }
+        if (sum) sum.textContent = `✅ Connected as ${activeEmail} · No Soft Spot cloud profile found yet. Tap Sync Now when you're ready to publish your local profile (${stashCache.length} items).`;
+      } else {
+        if (hPill) {
+          hPill.textContent = pending > 0 ? `☁️ Sync (${pending})` : '☁️ Synced';
+          hPill.className = pending > 0 ? 'pill warn' : 'pill ok';
+        }
+        if (aPill) {
+          aPill.textContent = pending > 0 ? `${pending} pending` : 'Connected';
+          aPill.className = pending > 0 ? 'pill warn' : 'pill ok';
+        }
+        if (sum) {
+          sum.textContent = `✅ Connected as ${activeEmail || 'Google'} · Pending: ${pending} · Last load: ${lastLoadStr} · Last sync: ${lastSyncStr}`;
+        }
       }
       if (btnIn) btnIn.classList.add('hidden');
+      if (btnLoad) btnLoad.classList.remove('hidden');
       if (btnSync) btnSync.classList.remove('hidden');
       if (btnOut) btnOut.classList.remove('hidden');
     } else if (hasClient) {
+      const wasConnected = Boolean(cfg.googleBoundEmail || cfg.googleLastSyncAt || cfg.googleLastLoadAt);
+      if (btnIn) {
+        btnIn.textContent = wasConnected ? '🔄 Reconnect Google Drive' : '☁️ Connect Google Drive';
+        btnIn.classList.remove('hidden');
+      }
+      if (btnLoad) btnLoad.classList.add('hidden');
+      if (btnSync) btnSync.classList.add('hidden');
+      if (btnOut) btnOut.classList.add('hidden');
+
       if (pending > 0) {
         if (hPill) { hPill.textContent = `☁️ Reconnect (${pending})`; hPill.className = 'pill warn'; }
         if (aPill) { aPill.textContent = `Reconnect (${pending})`; aPill.className = 'pill warn'; }
-        if (sum) sum.textContent = `Saved on this device · ${pending} change(s) waiting — tap Sign in to sync${cfg.googleLastSyncAt ? ` (Last synced: ${lastStr})` : ''}.`;
+        if (sum) sum.textContent = `Session expired${activeEmail ? ` (${activeEmail})` : ''} · ${pending} local change(s) queued safely offline · Last sync: ${lastSyncStr}. Tap Reconnect Google Drive.`;
+      } else if (wasConnected) {
+        if (hPill) { hPill.textContent = '☁️ Reconnect'; hPill.className = 'pill warn'; }
+        if (aPill) { aPill.textContent = 'Reconnect'; aPill.className = 'pill warn'; }
+        if (sum) sum.textContent = `Session expired${activeEmail ? ` (${activeEmail})` : ''} · Last load: ${lastLoadStr} · Last sync: ${lastSyncStr}. Tap Reconnect Google Drive to resume.`;
       } else {
-        if (hPill) { hPill.textContent = '☁️ Sign In'; hPill.className = 'pill warn'; }
-        if (aPill) { aPill.textContent = 'Sign In'; aPill.className = 'pill warn'; }
-        if (sum) sum.textContent = cfg.googleLastSyncAt
-          ? `Session idle${cfg.googleEmail ? ` (${cfg.googleEmail})` : ''} · Last synced: ${lastStr}. Tap Sign in with Google & Sync to reconnect.`
-          : 'Ready — tap Sign in with Google & Sync to back up and sync across phone and PC.';
+        if (hPill) { hPill.textContent = 'Cloud: Off'; hPill.className = 'pill'; }
+        if (aPill) { aPill.textContent = 'Connect'; aPill.className = 'pill'; }
+        if (sum) sum.textContent = 'Not connected. Tap Connect Google Drive to sign in and immediately load your cloud profile.';
       }
-      if (btnIn) btnIn.classList.remove('hidden');
-      if (btnSync) btnSync.classList.add('hidden');
-      if (btnOut) btnOut.classList.add('hidden');
     } else {
       if (hPill) { hPill.textContent = 'Cloud: Off'; hPill.className = 'pill'; }
       if (aPill) { aPill.textContent = 'Off'; aPill.className = 'pill'; }
-      if (sum) sum.textContent = 'Not signed in. Open Advanced below to add a Google OAuth Client ID.';
+      if (sum) sum.textContent = 'Not connected. Open Advanced below to set a Google OAuth Client ID.';
       if (btnIn) btnIn.classList.remove('hidden');
+      if (btnLoad) btnLoad.classList.add('hidden');
       if (btnSync) btnSync.classList.add('hidden');
       if (btnOut) btnOut.classList.add('hidden');
     }
-  }
-
-  async function markCloudChangeAndAutoSync(syncId = null, isDelete = false) {
-    await CC.recordLocalCloudChange(syncId, isDelete);
-    updateCloudUI();
-    scheduleGoogleAutoSync();
   }
 
   function applySyncedSettingsToUI() {
@@ -6075,7 +6958,7 @@ Return ONLY valid JSON:
   };
 
   window.handleCloudPillClick = () => {
-    if (CC.isGoogleSignedIn()) {
+    if (CC.isGoogleSignedIn() && !cloudAccountMismatch) {
       syncGoogleDriveNow();
       return;
     }
@@ -6084,76 +6967,225 @@ Return ONLY valid JSON:
     if (acc) acc.open = true;
   };
 
-  async function runGoogleSyncFlow({ interactive = false, quiet = false } = {}) {
-    if (googleSyncInFlight) return;
-    googleSyncInFlight = true;
-    const syncBtn = document.getElementById('btnGoogleSyncNow');
-    const inBtn = document.getElementById('btnGoogleSignIn');
-    if (syncBtn) syncBtn.disabled = true;
-    if (inBtn) inBtn.disabled = true;
-    updateCloudUI('☁️ Syncing...');
+  function setCloudButtonsDisabled(disabled) {
+    ['btnGoogleSignIn', 'btnGoogleLoad', 'btnGoogleSyncNow'].forEach(id => {
+      const b = document.getElementById(id);
+      if (b) b.disabled = disabled;
+    });
+  }
 
+  async function refreshAllAfterCloudPull(res) {
+    if (res?.spotifyProfile) spotifyProfile = res.spotifyProfile;
+    else {
+      const spRec = await CC.idbGet('meta', 'spotify_profile');
+      if (spRec?.value) spotifyProfile = spRec.value;
+    }
+    if (res?.discogsCollectionIndex) discogsCollectionIndex = res.discogsCollectionIndex;
+    else {
+      const dcRec = await CC.idbGet('meta', 'discogs_collection_index');
+      if (dcRec?.value) discogsCollectionIndex = dcRec.value;
+    }
+    const q = await CC.getCloudOutbox();
+    CC.setPendingCloudChanges(q.length);
+    await loadStashCache();
+    renderStash();
+    applySyncedSettingsToUI();
+    if (activeStashItem?.id) openStashDetail(activeStashItem.id, true);
+  }
+
+  // Serialized in-tab cloud runner: prevents overlapping runs and schedules follow-up if edits arrive mid-sync
+  async function runCloudSerialized(label, fn) {
+    if (googleSyncInFlight) {
+      cloudFollowupNeeded = true;
+      return null;
+    }
+    googleSyncInFlight = true;
+    cloudFollowupNeeded = false;
+    setCloudButtonsDisabled(true);
+    updateCloudUI(label);
     try {
-      const res = await CC.syncWithGoogleDrive({ interactive, quiet });
-      if (res.spotifyProfile) spotifyProfile = res.spotifyProfile;
-      if (res.discogsCollectionIndex) discogsCollectionIndex = res.discogsCollectionIndex;
-      await loadStashCache();
-      renderStash();
-      applySyncedSettingsToUI();
-      if (!quiet) {
-        setStatus('', false);
-        const photoNote = (res.uploadedPhotos || res.downloadedPhotos)
-          ? ` · ↑${res.uploadedPhotos} ↓${res.downloadedPhotos} photos`
-          : '';
-        toast(`☁️ Synced ${res.stashCount} Stash item(s)${photoNote}`, 3800);
-      }
-    } catch (err) {
-      if (!quiet) {
-        setStatus('', false);
-        toast('Google Drive Sync: ' + (err?.message || 'Failed'), 4800);
-      }
+      return await fn();
     } finally {
       googleSyncInFlight = false;
-      if (syncBtn) syncBtn.disabled = false;
-      if (inBtn) inBtn.disabled = false;
+      setCloudButtonsDisabled(false);
       updateCloudUI();
+      if (cloudFollowupNeeded) {
+        cloudFollowupNeeded = false;
+        scheduleGoogleAutoSync();
+      }
     }
   }
 
-  window.googleSignInAndSync = async () => {
+  // Single shared pull helper used by BOTH "Connect Google Drive" and "Load from Google Drive" (ZERO Drive writes!)
+  async function performSharedGooglePull({ quiet = false } = {}) {
+    return runCloudSerialized('☁️ Loading...', async () => {
+      try {
+        const res = await CC.pullFromGoogleDrive({ quiet, skipAccountBindOnEmpty: true });
+        if (res.status === 'account_mismatch') {
+          cloudAccountMismatch = { previousEmail: res.previousEmail, currentEmail: res.currentEmail };
+          cloudEmptyAwaitingPublish = false;
+          if (!quiet) {
+            setStatus('', false);
+            toast(`⚠️ Signed in as ${res.currentEmail}, but local data belongs to ${res.previousEmail}. Review options in Settings.`, 5200);
+          }
+          return res;
+        }
+
+        cloudAccountMismatch = null;
+        if (res.emptyCloud) {
+          cloudEmptyAwaitingPublish = Boolean(res.hasLocalData && !cfg.googleBoundEmail);
+          await refreshAllAfterCloudPull(res);
+          if (!quiet) {
+            setStatus('', false);
+            toast(res.hasLocalData
+              ? `☁️ Connected (${res.email}) — Drive is empty. Tap Sync Now when ready to publish your local profile.`
+              : `☁️ Connected (${res.email}) — No cloud profile yet. Scan or sync to get started.`, 4500);
+          }
+          return res;
+        }
+
+        cloudEmptyAwaitingPublish = false;
+        await refreshAllAfterCloudPull(res);
+        if (!quiet) {
+          setStatus('', false);
+          const photoNote = res.downloadedPhotos ? ` · ↓${res.downloadedPhotos} photo(s)` : '';
+          const confNote = res.conflicts?.length ? ` · ⚠️ ${res.conflicts.length} conflict(s) saved for review` : '';
+          const errNote = res.partialErrors?.length ? ` · ⚠️ ${res.partialErrors.length} warning(s)` : '';
+          toast(`⬇️ Loaded ${res.stashCount} Stash item(s) from ${res.email}${photoNote}${confNote}${errNote}`, 4200);
+        }
+        return res;
+      } catch (err) {
+        if (!quiet) {
+          setStatus('', false);
+          toast('Load from Google Drive failed: ' + (err?.message || 'Error'), 4800);
+        }
+        return null;
+      }
+    });
+  }
+
+  // 1. Connect Google Drive: sign in -> identify account -> immediately await initial pull in ONE click
+  window.googleConnectAndLoad = async () => {
     saveSettings(true);
     try {
       await CC.requestGoogleAccessToken('');
       updateCloudUI();
-      await runGoogleSyncFlow({ interactive: true, quiet: false });
+      await performSharedGooglePull({ quiet: false });
     } catch (err) {
-      toast('Google Sign-In: ' + (err?.message || 'Cancelled'), 4500);
+      toast('Connect Google Drive: ' + (err?.message || 'Cancelled'), 4500);
       updateCloudUI();
     }
   };
 
+  // Alias for any legacy callers
+  window.googleSignInAndSync = window.googleConnectAndLoad;
+
+  // 2. Load from Google Drive: read-only pull & merge (ZERO Drive writes!)
+  window.loadFromGoogleDriveUI = async () => {
+    saveSettings(true);
+    if (!CC.isGoogleSignedIn()) {
+      await googleConnectAndLoad();
+      return;
+    }
+    await performSharedGooglePull({ quiet: false });
+  };
+
+  // 3. Sync Now: pull, merge, and upload pending batches & missing photos
+  async function runGoogleSyncFlow({ interactive = false, quiet = false, publishInitialLocal = false } = {}) {
+    return runCloudSerialized('☁️ Syncing...', async () => {
+      try {
+        const res = await CC.syncNowWithGoogleDrive({ interactive, quiet, publishInitialLocal });
+        if (res.status === 'account_mismatch') {
+          cloudAccountMismatch = { previousEmail: res.previousEmail, currentEmail: res.currentEmail };
+          if (!quiet) {
+            setStatus('', false);
+            toast(`⚠️ Account mismatch: local profile belongs to ${res.previousEmail}.`, 5000);
+          }
+          return res;
+        }
+        if (res.awaitingExplicitPublish) {
+          cloudEmptyAwaitingPublish = true;
+          if (!quiet) {
+            setStatus('', false);
+            toast('Drive is empty — tap Sync Now to publish your local profile.', 4200);
+          }
+          return res;
+        }
+        cloudAccountMismatch = null;
+        cloudEmptyAwaitingPublish = false;
+        await refreshAllAfterCloudPull(res);
+        if (res.remainingPending > 0) cloudFollowupNeeded = true;
+        if (!quiet) {
+          setStatus('', false);
+          const photoNote = (res.uploadedPhotos || res.downloadedPhotos)
+            ? ` · ↑${res.uploadedPhotos} ↓${res.downloadedPhotos} photos`
+            : '';
+          const confNote = res.conflicts?.length ? ` · ⚠️ ${res.conflicts.length} conflict(s)` : '';
+          toast(`☁️ Synced ${res.stashCount} Stash item(s) (↑${res.uploadedBatches} batch${res.uploadedBatches === 1 ? '' : 'es'})${photoNote}${confNote}`, 4000);
+        }
+        return res;
+      } catch (err) {
+        if (!quiet) {
+          setStatus('', false);
+          toast('Google Drive Sync: ' + (err?.message || 'Failed'), 4800);
+        }
+        return null;
+      }
+    });
+  }
+
   window.syncGoogleDriveNow = async () => {
     saveSettings(true);
-    await runGoogleSyncFlow({ interactive: true, quiet: false });
+    await runGoogleSyncFlow({ interactive: true, quiet: false, publishInitialLocal: true });
+  };
+
+  window.googleReconnectPreviousAccount = async () => {
+    const prevEmail = cloudAccountMismatch?.previousEmail || cfg.googleBoundEmail || '';
+    try {
+      await CC.requestGoogleAccessToken('select_account', prevEmail);
+      await performSharedGooglePull({ quiet: false });
+    } catch (err) {
+      toast('Reconnect cancelled: ' + (err?.message || ''), 4000);
+      updateCloudUI();
+    }
+  };
+
+  window.googleImportLocalToNewAccount = async () => {
+    if (!cloudAccountMismatch?.currentEmail) return;
+    const targetEmail = cloudAccountMismatch.currentEmail;
+    if (!confirm(`Import your existing local Stash (${stashCache.length} items) and Taste Profile into ${targetEmail}? Your local data stays preserved.`)) return;
+    cloudAccountMismatch = null;
+    cloudEmptyAwaitingPublish = false;
+    await CC.queueFullLocalProfileToOutbox(targetEmail);
+    updateCloudUI();
+    await runGoogleSyncFlow({ interactive: true, quiet: false, publishInitialLocal: true });
   };
 
   window.googleSignOut = () => {
     CC.signOutGoogle();
+    cloudAccountMismatch = null;
+    cloudEmptyAwaitingPublish = false;
     updateCloudUI();
     toast('Signed out of Google Drive');
   };
 
   function scheduleGoogleAutoSync() {
     if (!cfg.googleAutoSync || !CC.isGoogleSignedIn()) return;
+    if (cloudAccountMismatch || cloudEmptyAwaitingPublish) return;
+    if (!cfg.googleBoundEmail || (cfg.googleEmail && cfg.googleBoundEmail !== cfg.googleEmail)) return;
+    if (googleSyncInFlight) {
+      cloudFollowupNeeded = true;
+      return;
+    }
     clearTimeout(googleAutoSyncTimer);
     googleAutoSyncTimer = setTimeout(() => {
-      if (cfg.googleAutoSync && CC.isGoogleSignedIn() && !googleSyncInFlight) {
-        runGoogleSyncFlow({ interactive: false, quiet: true });
+      if (cfg.googleAutoSync && CC.isGoogleSignedIn() && !cloudAccountMismatch && !cloudEmptyAwaitingPublish) {
+        runGoogleSyncFlow({ interactive: false, quiet: true, publishInitialLocal: false });
       }
     }, 1200);
   }
 
-  // ==================== SETTINGS, DISCOGS INDEX & SPOTIFY WIRING ====================
+  // ==================== SETTINGS, DISCOGS COLLECTION SYNC & RESUMABLE SPOTIFY ====================
   function refreshNotice() {
     document.getElementById('setupNotice').classList.toggle('hidden', Boolean(CC.isAiReady() && cfg.discogsToken));
     updateSettingsPills();
@@ -6162,36 +7194,87 @@ Return ONLY valid JSON:
   function updateDiscogsCollectionUI() {
     const el = document.getElementById('discogsCollectionSummary');
     if (!el) return;
-    if (discogsCollectionIndex && discogsCollectionIndex.totalItems) {
+    if (discogsCollectionIndex && discogsCollectionIndex.totalItems !== undefined) {
       const uniqueAlbums = Object.keys(discogsCollectionIndex.albumKeys || {}).length;
-      const dt = new Date(discogsCollectionIndex.syncedAt || Date.now()).toLocaleDateString();
-      el.textContent = `✅ Indexed ${discogsCollectionIndex.totalItems} releases (${uniqueAlbums} unique albums) for @${discogsCollectionIndex.username} · ${dt}`;
+      const folderCnt = getDiscogsFoldersList().length;
+      const dt = new Date(discogsCollectionIndex.syncedAt || cfg.discogsLastSyncAt || Date.now()).toLocaleString();
+      el.textContent = `✅ Synced ${discogsCollectionIndex.totalItems} cop${discogsCollectionIndex.totalItems === 1 ? 'y' : 'ies'} (${uniqueAlbums} unique albums) · ${folderCnt} folder(s) for @${discogsCollectionIndex.username} · ${dt}`;
     } else {
-      el.textContent = 'Not synced yet — detects when you already own an album in a different pressing/format.';
+      el.textContent = 'Not synced yet — updates owned copies, mirrors your Discogs folders in Stash, and enables duplicate alerts.';
     }
   }
 
-  window.syncDiscogsCollectionUI = async () => {
-    saveSettings(true);
-    if (!cfg.discogsToken || !cfg.discogsUser) {
-      toast('Verify your Discogs account first');
-      return;
+  // Single-flight per account Discogs collection & folder reconciliation
+  window.syncWithDiscogsUI = async (manual = true, quiet = false) => {
+    if (manual) saveSettings(true);
+    const account = (cfg.discogsUser || '').trim();
+    if (!cfg.discogsToken || !account) {
+      if (manual) toast('Verify your Discogs account in Settings first');
+      return null;
     }
-    const btn = document.getElementById('btnSyncDiscogsIndex');
-    if (btn) btn.disabled = true;
-    try {
-      discogsCollectionIndex = await CC.syncDiscogsCollectionIndex();
-      await CC.idbPut('meta', { key: 'discogs_collection_index', value: discogsCollectionIndex });
-      updateDiscogsCollectionUI();
-      setStatus('', false);
-      toast(`📀 Indexed ${discogsCollectionIndex.totalItems} Discogs releases!`, 3600);
-    } catch (err) {
-      setStatus('', false);
-      toast('Collection index failed: ' + err.message, 4500);
-    } finally {
-      if (btn) btn.disabled = false;
+    if (activeDiscogsRefreshPromise && activeDiscogsRefreshAccount === account) {
+      return activeDiscogsRefreshPromise;
     }
+
+    const btns = [document.getElementById('btnSyncDiscogsIndex'), document.getElementById('btnStashSyncDiscogs')].filter(Boolean);
+    btns.forEach(b => { b.disabled = true; });
+
+    const run = (async () => {
+      try {
+        const fullRes = await CC.syncDiscogsCollectionFull({ quiet });
+        if ((cfg.discogsUser || '').trim() !== account) {
+          throw new Error('Discogs account switched mid-sync — aborted safely');
+        }
+        const recRes = await CC.reconcileDiscogsCollectionIntoStash(fullRes, { confirmMissingOnline: true });
+        discogsCollectionIndex = recRes.collectionIndex;
+        populateFolders();
+        updateDiscogsCollectionUI();
+        await loadStashCache();
+        renderStash();
+        if (activeStashItem?.id) openStashDetail(activeStashItem.id, true);
+        updateCloudUI();
+        scheduleGoogleAutoSync();
+        if (!quiet) {
+          setStatus('', false);
+          const parts = [];
+          if (recRes.addedCount) parts.push(`+${recRes.addedCount} added`);
+          if (recRes.movedCount) parts.push(`${recRes.movedCount} moved`);
+          if (recRes.removedCount) parts.push(`${recRes.removedCount} removed`);
+          if (recRes.ambiguousCount) parts.push(`⚠️ ${recRes.ambiguousCount} link check`);
+          const summary = parts.length ? parts.join(' · ') : 'all copies & folders up to date';
+          toast(`📀 Discogs synced (${recRes.totalCopies} copies · ${recRes.folders.length} folders): ${summary}`, 4200);
+        }
+        return recRes;
+      } catch (err) {
+        if (!quiet) {
+          setStatus('', false);
+          toast('Sync with Discogs failed: ' + (err?.message || 'Error'), 4800);
+        }
+        return null;
+      } finally {
+        if (activeDiscogsRefreshAccount === account) {
+          activeDiscogsRefreshPromise = null;
+          activeDiscogsRefreshAccount = '';
+        }
+        btns.forEach(b => { b.disabled = false; });
+      }
+    })();
+
+    activeDiscogsRefreshAccount = account;
+    activeDiscogsRefreshPromise = run;
+    return run;
   };
+
+  window.syncDiscogsCollectionUI = () => syncWithDiscogsUI(true, false);
+
+  function maybeAutoRefreshDiscogs() {
+    if (!cfg.discogsToken || !cfg.discogsUser) return;
+    if (document.visibilityState === 'hidden') return;
+    if (activeDiscogsRefreshPromise) return;
+    const last = Number(cfg.discogsLastSyncAt || discogsCollectionIndex?.syncedAt || 0);
+    if (last && (Date.now() - last) < DISCOGS_FRESH_MS) return;
+    syncWithDiscogsUI(false, true);
+  }
 
   window.saveSettings = (silent = false) => {
     cfg.googleClientId = (document.getElementById('cfgGoogleClientId')?.value || '').trim();
@@ -6218,8 +7301,26 @@ Return ONLY valid JSON:
     CC.persistCfg(true);
     refreshNotice();
     if (!silent) {
+      const outPrefs = {
+        cfgUpdatedAt: Number(cfg.cfgUpdatedAt || Date.now()),
+        geminiModel: cfg.geminiModel,
+        autoPlayHighlight: cfg.autoPlayHighlight,
+        autoDetective: cfg.autoDetective,
+        autoGradeOnScan: cfg.autoGradeOnScan,
+        homeCountry: cfg.homeCountry,
+        fetchVgSuggestions: cfg.fetchVgSuggestions,
+        threshold: cfg.threshold,
+        voice: cfg.voice,
+        showSpotify: cfg.showSpotify,
+        showApple: cfg.showApple,
+        showDeezer: cfg.showDeezer,
+        showYoutube: cfg.showYoutube
+      };
+      CC.commitLocalMutation({ extraOps: [{ type: 'prefs', prefs: outPrefs }], queueOutbox: true }).then(() => {
+        updateCloudUI();
+        scheduleGoogleAutoSync();
+      }).catch(() => {});
       toast('Settings saved!');
-      scheduleGoogleAutoSync();
     }
   };
 
@@ -6254,9 +7355,10 @@ Return ONLY valid JSON:
     setStatus('Verifying Discogs, folders & grading fields...', true);
     try {
       const id = await CC.discogsFetch('/oauth/identity');
+      const prevUser = cfg.discogsUser || '';
       cfg.discogsUser = id.username;
       const fRes = await CC.discogsFetch(`/users/${encodeURIComponent(id.username)}/collection/folders`);
-      cfg.discogsFolders = (fRes.folders || []).filter(f => f.id !== 0);
+      cfg.discogsFolders = (fRes.folders || []).filter(f => Number(f.id) !== 0);
       if (!cfg.discogsFolders.length) cfg.discogsFolders = [{ id: 1, name: 'Uncategorized' }];
 
       const fieldsRes = await CC.discogsFetch(`/users/${encodeURIComponent(id.username)}/collection/fields`).catch(() => null);
@@ -6265,53 +7367,99 @@ Return ONLY valid JSON:
         cfg.discogsFields = { media: findId(/media/i, 1), sleeve: findId(/sleeve/i, 2), notes: findId(/note/i, 3) };
       }
 
+      if (prevUser && prevUser !== id.username) {
+        activeDiscogsFolderFilter = null;
+      }
+
       populateFolders(); CC.persistCfg(); refreshNotice();
       setStatus('', false);
       toast(`✅ Connected as @${id.username}`);
 
-      // Auto-sync collection index on first verify (or if user changed)
       if (!discogsCollectionIndex || discogsCollectionIndex.username !== id.username) {
-        await syncDiscogsCollectionUI();
+        await syncWithDiscogsUI(false, false);
       }
     } catch (err) { setStatus('', false); toast('Discogs verify failed: ' + err.message, 4000); }
   };
 
   function populateFolders() {
     const sel = document.getElementById('cfgDiscogsFolder');
-    sel.innerHTML = (cfg.discogsFolders || [{ id: 1, name: 'Uncategorized' }]).map(f => `<option value="${f.id}">${esc(f.name)} (${f.count ?? 0})</option>`).join('');
+    const folders = getDiscogsFoldersList();
+    sel.innerHTML = folders.map(f => `<option value="${f.id}">${esc(f.name)} (${f.count ?? 0})</option>`).join('');
     sel.value = cfg.discogsFolderId || '1';
     if (!sel.value && sel.options.length) sel.selectedIndex = 0;
     document.getElementById('discogsUserBadge').textContent = cfg.discogsUser ? `Connected: @${cfg.discogsUser}` : '';
   }
 
-  window.startSpotifyAuth = async () => {
+  window.startSpotifyAuth = async (mode = 'liked') => {
     saveSettings(true);
+    const syncMode = mode === 'full' ? 'full' : 'liked';
     if (!cfg.spotifyClientId) { toast('Paste Spotify Client ID first'); return; }
     if (!window.crypto?.subtle) { toast('Spotify login requires HTTPS'); return; }
     if (cfg.spotifyRefreshToken && await CC.refreshSpotifyToken()) {
-      await runSpotifySyncUI();
+      await runSpotifySyncUI(syncMode, false);
       return;
     }
-    await CC.beginSpotifyRedirect();
+    await CC.beginSpotifyRedirect(syncMode);
   };
 
-  async function runSpotifySyncUI() {
+  window.resumeSpotifySyncUI = async () => {
+    saveSettings(true);
+    if (!cfg.spotifyClientId) { toast('Paste Spotify Client ID first'); return; }
+    if (cfg.spotifyRefreshToken && await CC.refreshSpotifyToken()) {
+      await runSpotifySyncUI('resume', true);
+      return;
+    }
+    if (cfg.spotifyAccessToken && Date.now() < Number(cfg.spotifyExpiresAt || 0)) {
+      await runSpotifySyncUI('resume', true);
+      return;
+    }
+    await CC.beginSpotifyRedirect(spotifyCheckpoint?.mode || 'liked');
+  };
+
+  async function runSpotifySyncUI(mode = 'liked', resume = false) {
     switchView('settings');
     document.getElementById('accMusic').open = true;
     try {
       const prevDna = spotifyProfile?.tasteDna || document.getElementById('cfgTasteDna').value.trim();
       const prevSoftSpots = spotifyProfile?.softSpots || document.getElementById('cfgSoftSpots').value.trim();
-      spotifyProfile = await CC.syncSpotifyAll(prevDna, prevSoftSpots);
-      await CC.idbPut('meta', { key: 'spotify_profile', value: spotifyProfile });
-      tasteCache.clear();
-      document.getElementById('cfgTasteDna').value = spotifyProfile.tasteDna || '';
-      document.getElementById('cfgSoftSpots').value = spotifyProfile.softSpots || '';
-      updateSpotifyUI();
-      setStatus('', false);
-      await markCloudChangeAndAutoSync();
-      toast(`🎧 Synced ${spotifyProfile.totalTracks} tracks & ${spotifyProfile.totalArtists} artists locally for instant matching!`, 4500);
+      const res = await CC.syncSpotifyResumable({
+        mode,
+        resume,
+        existingDna: prevDna,
+        existingSoftSpots: prevSoftSpots
+      });
+
+      if (res.completed && res.profile) {
+        spotifyProfile = res.profile;
+        spotifyCheckpoint = null;
+        await CC.commitLocalMutation({
+          metaPuts: [{ key: 'spotify_profile', value: spotifyProfile }],
+          extraOps: [{ type: 'spotify_profile', profile: spotifyProfile }],
+          queueOutbox: true
+        });
+        tasteCache.clear();
+        document.getElementById('cfgTasteDna').value = spotifyProfile.tasteDna || '';
+        document.getElementById('cfgSoftSpots').value = spotifyProfile.softSpots || '';
+        updateSpotifyUI();
+        setStatus('', false);
+        updateCloudUI();
+        scheduleGoogleAutoSync();
+        toast(`🎧 Synced ${spotifyProfile.totalTracks} tracks & ${spotifyProfile.totalArtists} artists (${spotifyProfile.syncMode === 'full' ? 'Full Library' : 'Liked Songs'})!`, 4500);
+        return;
+      }
+
+      if (res.paused) {
+        // Preserve prior usable spotifyProfile, Taste Profile, and Soft Spots untouched!
+        spotifyCheckpoint = res.checkpoint || await CC.getSpotifyCheckpoint();
+        updateSpotifyUI();
+        setStatus('', false);
+        const waitHint = res.retryAfterSec ? ` Wait ~${res.retryAfterSec}s then tap ▶ Resume Spotify Sync.` : ' Tap ▶ Resume Spotify Sync when ready.';
+        toast(`⏸️ Spotify sync paused with progress saved.${waitHint}`, 5400);
+      }
     } catch (err) {
       setStatus('', false);
+      spotifyCheckpoint = await CC.getSpotifyCheckpoint();
+      updateSpotifyUI();
       if (err.name !== 'AbortError') toast('Spotify sync error: ' + err.message, 5000);
     }
   }
@@ -6355,8 +7503,14 @@ Return ONLY valid JSON:
       totalArtists: Object.keys(allArtists).length,
       softSpots: spotifyProfile?.softSpots || document.getElementById('cfgSoftSpots')?.value.trim() || ''
     });
-    await CC.idbPut('meta', { key: 'spotify_profile', value: spotifyProfile });
+    await CC.commitLocalMutation({
+      metaPuts: [{ key: 'spotify_profile', value: spotifyProfile }],
+      extraOps: [{ type: 'spotify_profile', profile: spotifyProfile }],
+      queueOutbox: true
+    });
     tasteCache.clear(); updateSpotifyUI();
+    updateCloudUI();
+    scheduleGoogleAutoSync();
     toast(`Merged! Total: ${spotifyProfile.totalTracks} tracks & ${spotifyProfile.totalArtists} artists.`);
   };
 
@@ -6364,15 +7518,36 @@ Return ONLY valid JSON:
     const pill = document.getElementById('spotifyPill');
     const sum = document.getElementById('spotifySummary');
     const dnaSum = document.getElementById('dnaSummary');
+    const resBox = document.getElementById('spotifyResumeBox');
+    const resBtn = document.getElementById('btnResumeSpotify');
+
     if (spotifyProfile && spotifyProfile.totalArtists > 0) {
       pill.textContent = `Spotify: ${spotifyProfile.totalArtists} art`;
       pill.className = 'pill ok';
       const pl = spotifyProfile.totalPlaylists ? ` · ${spotifyProfile.totalPlaylists} playlists` : '';
-      sum.textContent = `✅ Synced locally (${spotifyProfile.userDisplayName}): ${spotifyProfile.totalTracks} tracks · ${spotifyProfile.totalArtists} artists${pl}`;
+      const modeTag = spotifyProfile.syncMode === 'liked' ? ' [Liked Songs]' : (spotifyProfile.syncMode === 'full' ? ' [Full Library]' : '');
+      sum.textContent = `✅ Synced locally (${spotifyProfile.userDisplayName})${modeTag}: ${spotifyProfile.totalTracks} tracks · ${spotifyProfile.totalArtists} artists${pl}`;
     } else {
       pill.textContent = 'Spotify: Off';
       pill.className = 'pill';
       sum.textContent = 'Not synced yet (local exact matching disabled).';
+    }
+
+    if (resBox && resBtn) {
+      if (spotifyCheckpoint && spotifyCheckpoint.stage && spotifyCheckpoint.stage !== 'done') {
+        const modeLbl = spotifyCheckpoint.mode === 'full' ? 'Full Library Pass' : 'Liked Songs';
+        const progressParts = [];
+        if (spotifyCheckpoint.scannedLiked) progressParts.push(`${spotifyCheckpoint.scannedLiked} liked songs (page ${spotifyCheckpoint.pageNum || 0})`);
+        if (spotifyCheckpoint.scannedAlbums) progressParts.push(`${spotifyCheckpoint.scannedAlbums} albums`);
+        if (spotifyCheckpoint.stage === 'playlist_items') progressParts.push(`playlist ${(spotifyCheckpoint.playlistIdx || 0) + 1}/${(spotifyCheckpoint.ownedPlaylists || []).length}`);
+        resBox.textContent = `⏸️ Paused ${modeLbl} checkpoint saved (${spotifyCheckpoint.userDisplayName || 'Spotify'}): ${progressParts.join(' · ') || `stage: ${spotifyCheckpoint.stage}`}. Your previous Spotify profile & Taste Profile remain active.`;
+        resBox.classList.remove('hidden');
+        resBtn.classList.remove('hidden');
+      } else {
+        resBox.classList.add('hidden');
+        resBox.textContent = '';
+        resBtn.classList.add('hidden');
+      }
     }
 
     const ssTag = spotifyProfile?.softSpots ? ' · Soft Spots active' : '';
@@ -6408,9 +7583,14 @@ Return ONLY valid JSON:
 
     const spRec = await CC.idbGet('meta', 'spotify_profile');
     if (spRec?.value) spotifyProfile = spRec.value;
+    spotifyCheckpoint = await CC.getSpotifyCheckpoint();
 
     const dcRec = await CC.idbGet('meta', 'discogs_collection_index');
     if (dcRec?.value) discogsCollectionIndex = dcRec.value;
+
+    // Sync pending badge from authoritative IndexedDB outbox on startup
+    const startupOutbox = await CC.getCloudOutbox();
+    CC.setPendingCloudChanges(startupOutbox.length);
 
     document.getElementById('googleOriginText').textContent = location.origin;
     document.getElementById('cfgGoogleClientId').value = cfg.googleClientId || '';
@@ -6476,9 +7656,17 @@ Return ONLY valid JSON:
         document.querySelectorAll('#stashFilters .chip').forEach(c => c.classList.remove('active'));
         ch.classList.add('active');
         activeStashFilter = ch.dataset.filter;
+        if (activeStashFilter === 'localonly' || activeStashFilter === 'all') {
+          activeDiscogsFolderFilter = null;
+        }
         renderStash();
       });
     });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') maybeAutoRefreshDiscogs();
+    });
+    window.addEventListener('focus', () => maybeAutoRefreshDiscogs());
 
     document.getElementById('galleryInput').addEventListener('change', (e) => { stagePhotoFiles(e.target.files); e.target.value = ''; });
     document.getElementById('nativeCamInput').addEventListener('change', (e) => { stagePhotoFiles(e.target.files); e.target.value = ''; });
@@ -6491,10 +7679,14 @@ Return ONLY valid JSON:
       toast('Spotify login cancelled');
     } else if (p.get('code')) {
       const code = p.get('code'), state = p.get('state');
+      const savedMode = localStorage.getItem('sp_sync_mode') || 'liked';
       history.replaceState({ view: 'scan', modal: null }, '', location.pathname);
       setStatus('Connecting Spotify...', true);
-      try { await CC.exchangeSpotifyCode(code, state); await runSpotifySyncUI(); }
-      catch (e) { setStatus('', false); toast('Spotify error: ' + e.message, 4500); }
+      try {
+        await CC.exchangeSpotifyCode(code, state);
+        const hasCp = Boolean(spotifyCheckpoint && spotifyCheckpoint.mode === savedMode);
+        await runSpotifySyncUI(savedMode, hasCp);
+      } catch (e) { setStatus('', false); toast('Spotify error: ' + e.message, 4500); }
     } else {
       try { history.replaceState({ view: 'scan', modal: null }, ''); } catch (_) {}
     }
