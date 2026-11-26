@@ -30,9 +30,12 @@
   let currentView = 'scan';
   let scanMode = 'single';
   let activeFormat = 'Auto';
+  let activeOtherFormat = '';
   let activeStashFilter = 'all';
+  let activeStashOtherFormat = '';
   let activeDiscogsFolderFilter = null;
   let activeStashView = 'list';
+  const hydratingStashIds = new Set();
   let googleSyncInFlight = false;
   let googleAutoSyncTimer = null;
   let cloudFollowupNeeded = false;
@@ -157,8 +160,42 @@
     recalibratingStash = false;
     CC.cancelAI();
     CC.cancelSpotifySync();
+    CC.cancelDiscogsEnrich();
     setStatus('', false);
     toast('Cancelled');
+  };
+
+  function getEffectiveScanFormat() {
+    if (activeFormat === 'Other') return activeOtherFormat || 'Other';
+    return activeFormat || 'Auto';
+  }
+
+  function setSelectFormatValue(selectId, fmt) {
+    const sel = document.getElementById(selectId);
+    const val = String(fmt || '').trim();
+    if (!sel || !val || val === 'Auto' || val === 'Other' || val === 'Unknown') return;
+    let found = Array.from(sel.options).some(o => o.value === val);
+    if (!found) {
+      const opt = document.createElement('option');
+      opt.value = val;
+      opt.textContent = val;
+      sel.appendChild(opt);
+    }
+    sel.value = val;
+  }
+
+  window.onOtherFormatChange = (val) => {
+    activeOtherFormat = String(val || '').trim();
+    if (activeOtherFormat) setSelectFormatValue('fFormat', activeOtherFormat);
+    const otherBtn = document.querySelector('#formatSeg .seg-btn[data-fmt="Other"]');
+    if (otherBtn) {
+      otherBtn.textContent = activeOtherFormat ? `${activeOtherFormat.split(/[\s-]/)[0]} ▾` : 'Other ▾';
+    }
+  };
+
+  window.onStashOtherFormatChange = (val) => {
+    activeStashOtherFormat = String(val || '').trim();
+    renderStash();
   };
 
   function updateRatePill(count = CC.getRateCount()) {
@@ -385,7 +422,8 @@
 
   // ==================== MANUAL SEARCH & DIRECT DISCOGS ID MODAL ====================
   window.openManualModal = (focusTarget = 'search') => {
-    if (activeFormat !== 'Auto') document.getElementById('fFormat').value = activeFormat;
+    const effFmt = getEffectiveScanFormat();
+    if (effFmt !== 'Auto' && effFmt !== 'Other') setSelectFormatValue('fFormat', effFmt);
     document.getElementById('manualModal').classList.remove('hidden');
     try { history.pushState({ view: currentView, modal: 'manual' }, ''); } catch (_) {}
     setTimeout(() => {
@@ -1028,7 +1066,8 @@
 
     if (camMode === 'pile') {
       const n = pilePhotos.length;
-      const fmtNote = activeFormat === 'Auto' ? 'All Formats' : `${activeFormat} Only`;
+      const effFmt = getEffectiveScanFormat();
+      const fmtNote = effFmt === 'Auto' ? 'All Formats' : (effFmt === 'Other' ? 'Other Media' : `${effFmt} Only`);
       thumbsEl.classList.remove('hidden');
       if (n === 0) {
         badge.textContent = `📚 Pile Shot 1 (${fmtNote})`;
@@ -1691,7 +1730,12 @@ Return ONLY valid JSON:
   function setAudioArtwork(artUrl, format = '') {
     const el = document.getElementById('audioArt');
     if (!el) return;
-    const fallbackIcon = /vinyl/i.test(format) ? '💿' : (/cd/i.test(format) ? '📀' : '📼');
+    const f = String(format || '');
+    let fallbackIcon = '📼';
+    if (/\b(vhs|betamax|dvd|blu[\s-]*ray|laser\s*disc)\b/i.test(f)) fallbackIcon = '🎬';
+    else if (/\b(vinyl|shellac)\b/i.test(f)) fallbackIcon = '💿';
+    else if (/\b(cd|sacd|mini\s*disc|umd)\b/i.test(f)) fallbackIcon = '📀';
+    else if (/\b(file|digital)\b/i.test(f)) fallbackIcon = '🎵';
     if (artUrl) {
       el.innerHTML = `<img src="${esc(artUrl)}" alt="" onerror="this.parentElement.textContent='${fallbackIcon}'" />`;
     } else {
@@ -2168,7 +2212,9 @@ Return ONLY valid JSON:
       ? `You are a meticulous physical music media OCR, Discogs pressing-ID, and strict Goldmine visual grading expert. Inspect ALL attached photos carefully. ${upcHint}
 
 TRUE VISUAL FORMAT RULE (CRITICAL):
-- Detect "detected_format" ("Cassette" | "CD" | "Vinyl" | "Unknown") STRICTLY from what you physically see in the photos. NEVER guess or override based on any filter!
+- Detect "detected_format" STRICTLY from what you physically see in the photos. NEVER guess or override based on any filter!
+- Allowed values: "Cassette" | "CD" | "Vinyl" | "8-Track Cartridge" | "Reel-To-Reel" | "MiniDisc" | "DAT" | "DVD" | "VHS" | "LaserDisc" | "Blu-ray" | "Betamax" | "UMD" | "Shellac" | "SACD" | "File" | "Box Set" | "Unknown".
+- Classify ALL vinyl record sizes/types (LP, 12", 7", 10", Flexi-disc, Lathe Cut) as "Vinyl".
 
 PHOTO-SCOPE, SPINE & LOOSE-MEDIA AWARENESS:
 - Photos are 0-indexed (0 = Front + Side A, 1 = Back + Side B, 2 = Spine close-up if provided, 3 = extra detail if provided).
@@ -2200,7 +2246,7 @@ STRICT DISCOGS SELLER GRADING RULES (Be brutally honest and conservative — nev
 
 Return ONLY valid JSON:
 {
-  "detected_format": "Cassette" | "CD" | "Vinyl" | "Unknown",
+  "detected_format": "Cassette" | "CD" | "Vinyl" | "8-Track Cartridge" | "Reel-To-Reel" | "MiniDisc" | "DAT" | "DVD" | "VHS" | "LaserDisc" | "Blu-ray" | "Betamax" | "UMD" | "Shellac" | "SACD" | "File" | "Box Set" | "Unknown",
   "has_case_or_insert": true | false,
   "raw_catalog_number": "exact record-label catalog code or empty string",
   "cleaned_catalog_variants": ["catalog variations stripping hyphens/spaces/price prefixes"],
@@ -2224,7 +2270,9 @@ Return ONLY valid JSON:
       : `You are a fast, meticulous physical music media OCR and Discogs pressing-ID expert. Inspect ALL attached photos carefully. ${upcHint}
 
 TRUE VISUAL FORMAT RULE (CRITICAL):
-- Detect "detected_format" ("Cassette" | "CD" | "Vinyl" | "Unknown") STRICTLY from what you physically see in the photos. NEVER guess or override based on any filter!
+- Detect "detected_format" STRICTLY from what you physically see in the photos. NEVER guess or override based on any filter!
+- Allowed values: "Cassette" | "CD" | "Vinyl" | "8-Track Cartridge" | "Reel-To-Reel" | "MiniDisc" | "DAT" | "DVD" | "VHS" | "LaserDisc" | "Blu-ray" | "Betamax" | "UMD" | "Shellac" | "SACD" | "File" | "Box Set" | "Unknown".
+- Classify ALL vinyl record sizes/types (LP, 12", 7", 10", Flexi-disc, Lathe Cut) as "Vinyl".
 
 PHOTO-SCOPE, SPINE & LOOSE-MEDIA AWARENESS:
 - Photos are 0-indexed (0 = Front + Side A, 1 = Back + Side B, 2 = Spine close-up if provided, 3 = extra detail if provided).
@@ -2239,7 +2287,7 @@ OCR RULES:
 
 Return ONLY valid JSON:
 {
-  "detected_format": "Cassette" | "CD" | "Vinyl" | "Unknown",
+  "detected_format": "Cassette" | "CD" | "Vinyl" | "8-Track Cartridge" | "Reel-To-Reel" | "MiniDisc" | "DAT" | "DVD" | "VHS" | "LaserDisc" | "Blu-ray" | "Betamax" | "UMD" | "Shellac" | "SACD" | "File" | "Box Set" | "Unknown",
   "has_case_or_insert": true | false,
   "raw_catalog_number": "exact record-label catalog code or empty string",
   "cleaned_catalog_variants": ["catalog variations stripping hyphens/spaces/price prefixes"],
@@ -2264,7 +2312,7 @@ Return ONLY valid JSON:
 
       // Preserve Gemini's TRUE visual detected_format (NEVER overwrite with activeFormat!)
       const rawFmt = String(ext.detected_format || '').trim();
-      ext.detected_format = ['Cassette', 'CD', 'Vinyl'].includes(rawFmt) ? rawFmt : 'Unknown';
+      ext.detected_format = (rawFmt && !/^unknown$/i.test(rawFmt)) ? CC.normalizeDiscogsFormat(rawFmt) : 'Unknown';
 
       // Anti-hallucination guard: never accept CRC/BMG without quoted visible evidence
       if ((ext.club_edition === 'CRC' || ext.club_edition === 'BMG') && !String(ext.club_evidence || '').trim()) {
@@ -2308,14 +2356,15 @@ Return ONLY valid JSON:
       document.getElementById('fArtist').value = Array.isArray(ext.artists) ? ext.artists.join(', ') : (ext.artists || '');
       document.getElementById('fCatno').value = ext.raw_catalog_number || '';
       document.getElementById('fBarcode').value = stagedUpc || (ext.barcode || '').replace(/\D/g, '');
-      if (['Cassette', 'CD', 'Vinyl'].includes(ext.detected_format)) {
-        document.getElementById('fFormat').value = ext.detected_format;
+      if (ext.detected_format && ext.detected_format !== 'Unknown') {
+        setSelectFormatValue('fFormat', ext.detected_format);
       }
       document.getElementById('fLabel').value = ext.label || '';
       document.getElementById('fYear').value = ext.year || '';
 
-      if (activeFormat !== 'Auto' && ext.detected_format !== 'Unknown' && norm(ext.detected_format) !== norm(activeFormat)) {
-        toast(`⚠️ Photo shows a ${ext.detected_format}, but filter is set to ${activeFormat}`, 4800);
+      const effFilter = getEffectiveScanFormat();
+      if (effFilter !== 'Auto' && ext.detected_format !== 'Unknown' && !CC.matchesMediaFormat(ext.detected_format, effFilter)) {
+        toast(`⚠️ Photo shows ${ext.detected_format}, but filter is set to ${effFilter}`, 4800);
       }
 
       const clues = [
@@ -2355,8 +2404,14 @@ Return ONLY valid JSON:
     const artist = document.getElementById('fArtist').value.trim();
     const catno = document.getElementById('fCatno').value.trim();
     const barcode = document.getElementById('fBarcode').value.replace(/\D/g, '').trim();
-    const visualFmt = ['Cassette', 'CD', 'Vinyl'].includes(currentExtracted?.detected_format) ? currentExtracted.detected_format : '';
-    const format = activeFormat !== 'Auto' ? activeFormat : (visualFmt || document.getElementById('fFormat').value);
+    const visualFmt = (currentExtracted?.detected_format && currentExtracted.detected_format !== 'Unknown')
+      ? currentExtracted.detected_format
+      : '';
+    const effFmt = getEffectiveScanFormat();
+    const manualFmt = document.getElementById('fFormat').value;
+    const format = effFmt === 'Auto'
+      ? (visualFmt || (stagedPhotos.length === 0 ? manualFmt : ''))
+      : (effFmt === 'Other' ? '' : effFmt);
     const label = document.getElementById('fLabel').value.trim();
     const year = document.getElementById('fYear').value.trim();
 
@@ -2543,7 +2598,7 @@ Return ONLY valid JSON:
             <div>
               ${isPick ? `<span class="badge badge-purple">🎯 AI Pick</span>` : ''}
               <span class="badge badge-blue">${esc(fmtText)}</span>
-              <span class="badge" style="background:#0d1017; color:var(--muted);">👥 ${have} have · ${want} want</span>
+              <span class="badge badge-mono">👥 ${have} have · ${want} want</span>
             </div>
           </div>
         </div>
@@ -2552,18 +2607,9 @@ Return ONLY valid JSON:
   }
 
   function candidateMatchesVisualFormat(dossierOrCand, visualFmt) {
-    if (!visualFmt || !['Cassette', 'CD', 'Vinyl'].includes(visualFmt)) return true;
-    const rawFmt = Array.isArray(dossierOrCand?.format)
-      ? dossierOrCand.format.join(' ')
-      : String(dossierOrCand?.formats || dossierOrCand?.format || '');
-    if (!rawFmt.trim()) return true;
-    const hasCassette = /\bcassette\b/i.test(rawFmt);
-    const hasCd = /\b(cd|cdr|cd-r|sacd|hdcd)\b/i.test(rawFmt);
-    const hasVinyl = /\b(vinyl|lp|12"|7"|10"|flexi-disc|acetate)\b/i.test(rawFmt);
-    if (visualFmt === 'Cassette') return hasCassette;
-    if (visualFmt === 'CD') return hasCd;
-    if (visualFmt === 'Vinyl') return hasVinyl;
-    return true;
+    if (!visualFmt || visualFmt === 'Unknown' || visualFmt === 'Auto') return true;
+    const rawFmt = dossierOrCand?.formats || dossierOrCand?.format || '';
+    return CC.matchesMediaFormat(rawFmt, visualFmt);
   }
 
   // ==================== TWO-TIER ZERO-GUESSING VERIFICATION ENGINE ====================
@@ -2573,11 +2619,11 @@ Return ONLY valid JSON:
     const batchFetchedIds = new Set();
     const refQueue = [];
 
-    const visualFormat = ['Cassette', 'CD', 'Vinyl'].includes(currentExtracted?.detected_format)
+    const visualFormat = (currentExtracted?.detected_format && currentExtracted.detected_format !== 'Unknown')
       ? currentExtracted.detected_format
       : '';
-    const requestedFormat = activeFormat;
-    const formatMismatch = Boolean(activeFormat !== 'Auto' && visualFormat && norm(visualFormat) !== norm(activeFormat));
+    const requestedFormat = getEffectiveScanFormat();
+    const formatMismatch = Boolean(requestedFormat !== 'Auto' && visualFormat && !CC.matchesMediaFormat(visualFormat, requestedFormat));
 
     const pushReleaseDossier = (rel, fallbackCat) => {
       if (!rel || batchFetchedIds.has(rel.id)) return;
@@ -3092,7 +3138,10 @@ Return ONLY valid JSON:
       const albumTitle = release.title || (cand.title.includes(' - ') ? cand.title.split(' - ').slice(1).join(' - ') : cand.title);
       const catno = release.labels?.[0]?.catno || cand.catno || document.getElementById('fCatno').value.trim();
       const label = release.labels?.[0]?.name || (Array.isArray(cand.label) ? cand.label[0] : '');
-      const format = activeFormat !== 'Auto' ? activeFormat : document.getElementById('fFormat').value;
+      const effFmt = getEffectiveScanFormat();
+      const format = (Array.isArray(release.formats) && release.formats.length)
+        ? CC.normalizeDiscogsFormat(release.formats)
+        : (effFmt !== 'Auto' && effFmt !== 'Other' ? effFmt : document.getElementById('fFormat').value);
       const masterId = Number(release.master_id || 0) || null;
 
       const tracklist = (release.tracklist || [])
@@ -3154,6 +3203,7 @@ Return ONLY valid JSON:
         other_pressing_matches: otherPressingMatches,
         is_conservative_tiebreak: Boolean(opts.isConservativeTiebreak),
         tracklist, pressing_notes: notesParts.join('\n').trim(),
+        discogs_details_synced_at: Date.now(),
         discogs_url: release.uri || `https://www.discogs.com/release/${release.id}`,
         discogs_thumb: release.thumb || cand.thumb || '',
         taste_score: null, taste_verdict: null, taste_summary: '', context_note: '',
@@ -3192,7 +3242,7 @@ Return ONLY valid JSON:
     currentInspected = {
       discogs_id: null, master_id: null, title, artist,
       catno: document.getElementById('fCatno').value.trim(),
-      format: activeFormat !== 'Auto' ? activeFormat : document.getElementById('fFormat').value,
+      format: (() => { const ef = getEffectiveScanFormat(); return (ef !== 'Auto' && ef !== 'Other') ? ef : document.getElementById('fFormat').value; })(),
       year: document.getElementById('fYear').value.trim(),
       label: document.getElementById('fLabel').value.trim(),
       country: '', genres: [],
@@ -3822,7 +3872,7 @@ Return ONLY valid JSON:
       return;
     }
 
-    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v203`;
+    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v210`;
     if (tasteCache.has(cacheKey)) { applyTasteUI(item, tasteCache.get(cacheKey), myRunId); return; }
 
     const tracksStr = (item.tracklist || []).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title).join('; ');
@@ -4422,7 +4472,9 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
 
     try {
       const q = `${r.artist || ''} ${r.title || ''}`.trim();
-      const sr = await CC.discogsFetch('/database/search', { type: 'release', q, format: r.format || 'Cassette', per_page: 25 });
+      const searchParams = { type: 'release', q, per_page: 25 };
+      if (r.format) searchParams.format = r.format;
+      const sr = await CC.discogsFetch('/database/search', searchParams);
       if (myPileRunId !== pileRunId) return;
 
       const results = sr.results || [];
@@ -4617,8 +4669,8 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
         : `🎧 ${r.taste_score}/10`;
     return `
       <div>
-        <div style="font-weight:800; font-size:0.9rem; color:#f1f5f9;">#${idx + 1}: ${esc(r.artist || '?')} — ${esc(r.title || '?')}</div>
-        <div style="font-size:0.78rem; color:#cbd5e1; margin-top:2px;">
+        <div style="font-weight:800; font-size:0.9rem; color:var(--text);">#${idx + 1}: ${esc(r.artist || '?')} — ${esc(r.title || '?')}</div>
+        <div style="font-size:0.78rem; color:#cccccc; margin-top:2px;">
           ${tasteSummary}${r.ownedMatch ? ` · 📀 Owned (${esc(r.ownedMatch)})` : ''}${priceSummary ? ` · ${esc(priceSummary)}` : ''}${r.taste_reason ? ` · ${esc(r.taste_reason)}` : ''}${(!r.point && !r.poly) ? ' · (position not detected)' : ''}
         </div>
       </div>
@@ -4655,7 +4707,7 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
     const list = document.getElementById('pileResultsList');
     list.innerHTML = pileResults.map((r, i) => {
       const tasteBadge = r.tasteStatus === 'loading'
-        ? `<span class="badge" style="background:#0d1017; color:#fde68a;">⏳ Scoring...</span>`
+        ? `<span class="badge badge-mono" style="color:#fde68a;">⏳ Scoring...</span>`
         : r.tasteStatus === 'error'
           ? `<span class="badge badge-red">⚠️ Taste failed</span>`
           : `<span class="badge ${r.taste_score >= 7 ? 'badge-green' : r.taste_score >= 5 ? 'badge-blue' : 'badge-red'}">🎧 ${r.taste_score}/10</span>`;
@@ -4667,13 +4719,13 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
         ? `<span class="badge ${r.highVal ? 'badge-yellow' : 'badge-purple'}">~VG+: ${esc(formatMoneyWithUsd(r.roughVgVal, r.roughVgCur))}</span>`
         : '';
       const statusBadge = r.priceStatus === 'loading'
-        ? `<span class="badge" style="background:#0d1017; color:#fde68a;">⏳ Pricing...</span>`
+        ? `<span class="badge badge-mono" style="color:#fde68a;">⏳ Pricing...</span>`
         : r.priceStatus === 'error'
           ? `<button type="button" class="badge badge-red" style="border:none; cursor:pointer;" onclick="retryPileItemPrice(${i}, event)">⚠️ Price unavailable · Tap to retry</button>`
           : (r.priceStatus === 'done' && r.roughAskVal === null && r.roughVgVal === null)
-            ? `<span class="badge" style="background:#0d1017; color:var(--muted);">0 listed</span>`
+            ? `<span class="badge badge-mono">0 listed</span>`
             : (r.priceStatus === 'none')
-              ? `<span class="badge" style="background:#0d1017; color:var(--muted);">No Discogs hit</span>`
+              ? `<span class="badge badge-mono">No Discogs hit</span>`
               : '';
       const histLink = r.roughId
         ? `<a class="badge badge-blue" style="text-decoration:none;" target="_blank" rel="noopener" onclick="event.stopPropagation();" href="https://www.discogs.com/sell/history/${r.roughId}">📈 Sales ↗</a>`
@@ -4682,7 +4734,7 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
       return `
         <div id="pileCard-${i}" class="pile-item ${activePileIdx === i ? 'active' : ''}" onclick="selectPileItem(${i}, false)">
           <div style="flex:1; min-width:0;">
-            <div class="candidate-title"><span style="color:#93c5fd;">#${i + 1}</span> ${esc(r.artist || '?')} — ${esc(r.title || '?')}</div>
+            <div class="candidate-title"><span style="color:var(--accent);">#${i + 1}</span> ${esc(r.artist || '?')} — ${esc(r.title || '?')}</div>
             <div class="candidate-sub">${esc(r.format || 'Cassette')}${r.catno ? ` · ${esc(r.catno)}` : ''}${r.taste_reason ? ` · ${esc(r.taste_reason)}` : ''}</div>
             <div>
               ${tasteBadge}
@@ -4690,8 +4742,8 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
               ${r.localArtistHit ? `<span class="badge badge-green">In Spotify</span>` : ''}
               ${askBadge}${vgBadge}${statusBadge}${histLink}
               ${(r.roughWant > r.roughHave && r.roughWant >= 15) ? `<span class="badge badge-purple">💎 High Want (${r.roughWant})</span>` : ''}
-              ${pilePhotos.length > 1 ? `<span class="badge" style="background:#0d1017; color:#c4b5fd;">📷 #${(r.photoIdx ?? 0) + 1}</span>` : ''}
-              ${(r.point || r.poly) ? `<span class="badge" style="background:#0d1017; color:#93c5fd;">📍 #${i + 1}</span>` : ''}
+              ${pilePhotos.length > 1 ? `<span class="badge badge-mono" style="color:#d8b4fe;">📷 #${(r.photoIdx ?? 0) + 1}</span>` : ''}
+              ${(r.point || r.poly) ? `<span class="badge badge-mono" style="color:var(--accent);">📍 #${i + 1}</span>` : ''}
             </div>
           </div>
           <button type="button" class="btn btn-secondary btn-sm" style="min-height:34px; padding:5px 9px; flex:0 0 auto;" onclick="jumpFromPileToSingle(${i}); event.stopPropagation();">Verify ›</button>
@@ -4801,14 +4853,17 @@ Return ONLY valid JSON:
 
     document.getElementById('pileResultsCard').classList.add('hidden');
     activePileIdx = null;
-    const fmtLabel = activeFormat === 'Auto' ? 'all formats' : `${activeFormat}s only`;
+    const effFmt = getEffectiveScanFormat();
+    const fmtLabel = effFmt === 'Auto' ? 'all formats' : (effFmt === 'Other' ? 'other media formats' : `${effFmt} only`);
     const shotCount = pilePhotos.length;
 
-    const formatRule = activeFormat === 'Auto'
-      ? '- Extract legible Cassettes, CDs, and Vinyl — from BOTH spines AND visible front covers/faces.'
-      : `- FORMAT FILTER ACTIVE: The user selected "${activeFormat}". ONLY extract ${activeFormat} items and strictly IGNORE all other formats in the photo. Read both spines AND visible front covers/faces of ${activeFormat} items.`;
+    const formatRule = effFmt === 'Auto'
+      ? '- Extract legible physical media (Cassettes, CDs, Vinyl, 8-Tracks, VHS, DVD, LaserDisc, Blu-ray, MiniDisc, Reel-To-Reel, etc.) — from BOTH spines AND visible front covers/faces. Classify all vinyl sizes (7"/10"/12"/LP) as "Vinyl".'
+      : effFmt === 'Other'
+        ? '- FORMAT FILTER ACTIVE: Extract ONLY non-standard / Other physical media (8-Track Cartridge, Reel-To-Reel, MiniDisc, DAT, DVD, VHS, LaserDisc, Blu-ray, Betamax, UMD, Shellac, SACD, Box Set) and IGNORE standard Cassettes, CDs, and Vinyl.'
+        : `- FORMAT FILTER ACTIVE: The user selected "${effFmt}". ONLY extract ${effFmt} items and strictly IGNORE all other formats in the photo. Read both spines AND visible front covers/faces of ${effFmt} items.`;
 
-    const ocrPrompt = `You are inspecting a high-resolution photo of a crate, shelf, box, or stack of physical music media (cassettes, CDs, and/or vinyl).
+    const ocrPrompt = `You are inspecting a high-resolution photo of a crate, shelf, box, or stack of physical music/video media (cassettes, CDs, vinyl, 8-tracks, VHS, DVDs, LaserDiscs, MiniDiscs, etc.).
 
 SYSTEMATIC COVERAGE & ACCURACY RULES:
 - Dense shelves can contain 60–100+ items. Scan systematically ROW-BY-ROW and STACK-BY-STACK (top-to-bottom, left-to-right) so you do not skip legible items.
@@ -4826,7 +4881,7 @@ Return ONLY valid JSON:
     {
       "artist": "artist name",
       "title": "album/release title",
-      "format": "Cassette" | "CD" | "Vinyl",
+      "format": "Cassette" | "CD" | "Vinyl" | "8-Track Cartridge" | "Reel-To-Reel" | "MiniDisc" | "DAT" | "DVD" | "VHS" | "LaserDisc" | "Blu-ray" | "Betamax" | "UMD" | "Shellac" | "SACD" | "File" | "Box Set",
       "catno": "catalog # if readable else empty string",
       "point": [y, x],
       "poly": [[y1, x1], [y2, x2], [y3, x3], [y4, x4]]
@@ -4863,8 +4918,9 @@ Return ONLY valid JSON:
 
         totalUnreadable += Number(ocr.unreadable_count || 0);
         let sectionItems = Array.isArray(ocr.items) ? ocr.items.filter(x => x.title || x.artist) : [];
-        if (activeFormat !== 'Auto') {
-          sectionItems = sectionItems.filter(x => !x.format || norm(x.format) === norm(activeFormat));
+        sectionItems = sectionItems.map(x => ({ ...x, format: x.format ? CC.normalizeDiscogsFormat(x.format) : '' }));
+        if (effFmt !== 'Auto') {
+          sectionItems = sectionItems.filter(x => !x.format || CC.matchesMediaFormat(x.format, effFmt));
         }
 
         for (const it of sectionItems) {
@@ -5413,7 +5469,7 @@ Return ONLY valid JSON:
     document.getElementById('fCatno').value = it.catno || '';
     document.getElementById('fLabel').value = it.label || '';
     document.getElementById('fYear').value = it.year || '';
-    if (['Cassette', 'CD', 'Vinyl'].includes(it.format)) document.getElementById('fFormat').value = it.format;
+    if (it.format) setSelectFormatValue('fFormat', it.format);
     updateStageUI();
     toast('Take new 2-shot photos (or tap Search & Verify) to re-check this item!', 3800);
   };
@@ -5595,7 +5651,11 @@ Return ONLY valid JSON:
 
     const q = norm(document.getElementById('stashSearch').value);
     const filtered = stashCache.filter(it => {
-      if (['Cassette', 'CD', 'Vinyl'].includes(activeStashFilter) && it.format !== activeStashFilter) return false;
+      if (['Cassette', 'CD', 'Vinyl'].includes(activeStashFilter) && norm(it.format) !== norm(activeStashFilter)) return false;
+      if (activeStashFilter === 'other') {
+        if (CC.isPrimaryMediaFormat(it.format)) return false;
+        if (activeStashOtherFormat && norm(it.format) !== norm(activeStashOtherFormat)) return false;
+      }
       if (activeStashFilter === 'highvalue' && !it.is_high_value && !it.is_scarce) return false;
       if (activeStashFilter === 'keep' && (it.taste_score || 0) < 7) return false;
       if (activeStashFilter === 'lowconf' && !(it.discogs_id && (it.have ?? 0) < 15)) return false;
@@ -5789,7 +5849,7 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
         'notable_songs', 'litmus_track', 'litmus_artist', 'taste_scored_at'
       ]);
 
-      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v203`);
+      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v210`);
       await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
       await loadStashCache();
       renderStash();
@@ -6279,7 +6339,9 @@ Return ONLY valid JSON:
     const ebayQ = encodeURIComponent(`${it.artist} ${it.title} ${it.format} ${it.catno}`.trim());
     let links = `<a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="https://www.ebay.com/sch/i.html?_nkw=${ebayQ}&LH_Sold=1&LH_Complete=1">💸 eBay Sold</a>`;
     if (hasDiscogs) {
-      links = `<a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="${esc(it.discogs_url)}">💿 Discogs</a>` +
+      const isHydratingNow = hydratingStashIds.has(it.id);
+      links = `<button id="sdBtnRefreshDiscogs" type="button" class="btn btn-secondary btn-sm" ${isHydratingNow ? 'disabled' : ''} onclick="refreshSingleStashDiscogsData(${it.id}, false)">${isHydratingNow ? '⏳ Loading Discogs...' : '🔄 Refresh Discogs'}</button>` +
+              `<a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="${esc(it.discogs_url)}">💿 Discogs</a>` +
               `<a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="https://www.discogs.com/sell/history/${it.discogs_id}">📈 Sales History</a>` +
               `<a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="https://www.discogs.com/sell/post/${it.discogs_id}">🏷️ Sell</a>` + links;
     }
@@ -6480,14 +6542,14 @@ Return ONLY valid JSON:
           </div>
         </div>
         <div style="margin-bottom:6px;">${localBadges}</div>
-        <div style="font-size:0.87rem; color:#e2e8f0;">${esc(it.taste_summary || 'No taste summary saved.')}</div>
+        <div style="font-size:0.87rem; color:#d4d4d4;">${esc(it.taste_summary || 'No taste summary saved.')}</div>
         ${contextTxt ? `<div class="context-box"><strong>📖 Context:</strong> ${esc(contextTxt)}</div>` : ''}
-        <div style="margin-top:10px; font-size:0.84rem; color:#cbd5e1;">${buildNotableHitsHtml(it, 'stash')}</div>
+        <div style="margin-top:10px; font-size:0.84rem; color:#cccccc;">${buildNotableHitsHtml(it, 'stash')}</div>
       </div>
 
       <div class="section-block">
         <div class="section-heading">🎵 Tracklist (${(it.tracklist || []).length})</div>
-        <div class="tracklist-open">${buildTracklistHtml(it.tracklist || [], localMatch.matchedTracks, 'stash', it.artist)}</div>
+        <div class="tracklist-open">${(it.tracklist || []).length ? buildTracklistHtml(it.tracklist, localMatch.matchedTracks, 'stash', it.artist) : (hydratingStashIds.has(it.id) ? `<div style="padding:12px; color:var(--muted); font-size:0.84rem;">⏳ Loading tracklist &amp; values from Discogs...</div>` : buildTracklistHtml([], localMatch.matchedTracks, 'stash', it.artist))}</div>
       </div>
 
       ${it.pressing_notes ? `
@@ -6528,7 +6590,9 @@ Return ONLY valid JSON:
         <div class="inline-actions">
           <button class="btn btn-sm" onclick="saveStashEdits(${it.id})">💾 Save Grade &amp; Sync Discogs</button>
           ${(!it.synced_to_discogs && it.discogs_id) ? `<button id="sdBtnPushDiscogs" class="btn btn-green btn-sm" ${needsStashTiebreakConfirm ? 'disabled' : ''} onclick="pushStashToDiscogs(${it.id})">✅ Push to Discogs</button>` : ''}
-          <button class="btn btn-danger btn-sm" onclick="deleteStashItem(${it.id})">🗑️ Delete</button>
+          ${(it.synced_to_discogs && !it.discogs_removed && it.discogs_id)
+            ? `<button id="sdBtnDelete" class="btn btn-danger btn-sm" onclick="deleteStashItem(${it.id}, true)">🗑️ Delete from Discogs &amp; Stash</button>`
+            : `<button id="sdBtnDelete" class="btn btn-danger btn-sm" onclick="deleteStashItem(${it.id}, false)">🗑️ Delete from Stash</button>`}
         </div>
       </div>
     `;
@@ -6537,6 +6601,47 @@ Return ONLY valid JSON:
     body.scrollTop = 0;
     syncTrackPlayButtons();
     updateStashPushBtnState();
+
+    // Auto-hydrate missing tracklist, country, pressing notes & market values on demand when opening a Discogs-linked item
+    if (hasDiscogs && cfg.discogsToken && (!Number(it.discogs_details_synced_at || 0) || !(it.tracklist || []).length) && !hydratingStashIds.has(it.id)) {
+      refreshSingleStashDiscogsData(it.id, true);
+    }
+  };
+
+  window.refreshSingleStashDiscogsData = async (id, silent = false) => {
+    const it = stashCache.find(x => x.id === id);
+    if (!it || !it.discogs_id) return;
+    if (!cfg.discogsToken) {
+      if (!silent) toast('Add your Discogs Token in Settings first');
+      return;
+    }
+    if (hydratingStashIds.has(id)) return;
+    hydratingStashIds.add(id);
+    const btn = document.getElementById('sdBtnRefreshDiscogs');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Loading Discogs...'; }
+    try {
+      const res = await CC.enrichSyncedDiscogsStashItems({
+        stashIds: [id],
+        forceRefresh: !silent,
+        quiet: silent
+      });
+      await loadStashCache();
+      renderStash();
+      updateCloudUI();
+      if (res.updatedRows > 0) scheduleGoogleAutoSync();
+      if (!silent) {
+        setStatus('', false);
+        toast(res.updatedRows > 0 ? '✅ Updated tracklist & Discogs values!' : 'Discogs details could not be fetched', 3200);
+      }
+    } catch (err) {
+      if (!silent) {
+        setStatus('', false);
+        toast('Discogs refresh failed: ' + (err?.message || 'Error'), 4200);
+      }
+    } finally {
+      hydratingStashIds.delete(id);
+      if (activeStashItem?.id === id) openStashDetail(id, true);
+    }
   };
 
   window.updateStashPushBtnState = () => {
@@ -6744,19 +6849,44 @@ Return ONLY valid JSON:
     }
   };
 
-  window.deleteStashItem = async (id) => {
-    if (!confirm('Remove from Local Stash?')) return;
+  window.deleteStashItem = async (id, deleteRemote = false) => {
     const it = stashCache.find(x => x.id === id);
-    await CC.commitLocalMutation({
-      deleteStash: { id, sync_id: it?.sync_id || null },
-      queueOutbox: Boolean(it?.sync_id)
-    });
-    closeStashDetail();
-    await loadStashCache();
-    renderStash();
-    updateCloudUI();
-    scheduleGoogleAutoSync();
-    toast('Deleted');
+    if (!it) return;
+    const isSynced = Boolean(it.synced_to_discogs && !it.discogs_removed && it.discogs_id);
+    const willDeleteRemote = Boolean(deleteRemote && isSynced);
+
+    const promptMsg = willDeleteRemote
+      ? `Delete "${it.artist} — ${it.title}" from BOTH Discogs and Local Stash?\n\nThis removes copy #${it.discogs_instance_id || it.discogs_id} from your Discogs collection so it will not reappear on future syncs.`
+      : `Remove "${it.artist} — ${it.title}" from Local Stash?`;
+    if (!confirm(promptMsg)) return;
+
+    const delBtn = document.getElementById('sdBtnDelete');
+    if (delBtn) delBtn.disabled = true;
+    if (willDeleteRemote) setStatus(`🗑️ Deleting copy #${it.discogs_instance_id || it.discogs_id} from Discogs & Stash...`, true);
+
+    try {
+      const res = await CC.deleteDiscogsAndStashCopy(it, { deleteRemote: willDeleteRemote });
+      setStatus('', false);
+      closeStashDetail();
+      const idxRec = await CC.idbGet('meta', 'discogs_collection_index');
+      if (idxRec?.value) discogsCollectionIndex = idxRec.value;
+      updateDiscogsCollectionUI();
+      await loadStashCache();
+      renderStash();
+      updateCloudUI();
+      scheduleGoogleAutoSync();
+      if (res.remoteStatus === 'deleted_remote') {
+        toast('🗑️ Deleted from Discogs & Local Stash');
+      } else if (res.remoteStatus === 'already_absent') {
+        toast('🗑️ Already absent on Discogs — removed from Local Stash');
+      } else {
+        toast('🗑️ Deleted from Local Stash');
+      }
+    } catch (err) {
+      setStatus('', false);
+      if (delBtn) delBtn.disabled = false;
+      toast('Delete failed (local item kept): ' + (err?.message || 'Error'), 5200);
+    }
   };
 
   // ==================== EXPORT / BACKUP ====================
@@ -7244,18 +7374,42 @@ Return ONLY valid JSON:
         if (activeStashItem?.id) openStashDetail(activeStashItem.id, true);
         updateCloudUI();
         scheduleGoogleAutoSync();
+
+        // Automatically hydrate tracklists, pressing notes & market values for any Discogs copies missing details
+        const missingDetailCount = stashCache.filter(x => Number(x.discogs_id || 0) > 0 && (!Number(x.discogs_details_synced_at || 0) || !(x.tracklist || []).length)).length;
+        let enrichRes = null;
+        if (missingDetailCount > 0 && cfg.discogsToken) {
+          enrichRes = await CC.enrichSyncedDiscogsStashItems({
+            quiet,
+            onItemUpdated: async () => {
+              await loadStashCache();
+              renderStash();
+              if (activeStashItem?.id) openStashDetail(activeStashItem.id, true);
+            }
+          });
+          if (enrichRes?.updatedRows > 0) {
+            await loadStashCache();
+            renderStash();
+            if (activeStashItem?.id) openStashDetail(activeStashItem.id, true);
+            updateCloudUI();
+            scheduleGoogleAutoSync();
+          }
+        }
+
         if (!quiet) {
           setStatus('', false);
           if (recRes.repairSummary) {
-            toast(`📀 ${recRes.repairSummary}`, 5200);
+            const hydNote = enrichRes?.hydratedReleases ? ` · ${enrichRes.hydratedReleases} tracklist(s) loaded` : '';
+            toast(`📀 ${recRes.repairSummary}${hydNote}`, 5200);
           } else {
             const parts = [];
             if (recRes.addedCount) parts.push(`+${recRes.addedCount} added`);
             if (recRes.movedCount) parts.push(`${recRes.movedCount} moved`);
             if (recRes.removedCount) parts.push(`${recRes.removedCount} removed`);
             if (recRes.ambiguousCount) parts.push(`⚠️ ${recRes.ambiguousCount} link check`);
+            if (enrichRes?.hydratedReleases) parts.push(`🎵 ${enrichRes.hydratedReleases} hydrated`);
             const summary = parts.length ? parts.join(' · ') : 'all copies & folders up to date';
-            toast(`📀 Discogs synced (${recRes.totalCopies} copies · ${recRes.folders.length} folders): ${summary}`, 4200);
+            toast(`📀 Discogs synced (${recRes.totalCopies} copies · ${recRes.folders.length} folders): ${summary}`, 4400);
           }
         }
         return recRes;
@@ -7808,7 +7962,10 @@ Return ONLY valid JSON:
         document.querySelectorAll('#formatSeg .seg-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         activeFormat = btn.dataset.fmt;
-        if (activeFormat !== 'Auto') document.getElementById('fFormat').value = activeFormat;
+        const otherWrap = document.getElementById('otherFormatWrap');
+        if (otherWrap) otherWrap.classList.toggle('hidden', activeFormat !== 'Other');
+        const eff = getEffectiveScanFormat();
+        if (eff !== 'Auto' && eff !== 'Other') setSelectFormatValue('fFormat', eff);
       });
     });
 
@@ -7817,6 +7974,8 @@ Return ONLY valid JSON:
         document.querySelectorAll('#stashFilters .chip').forEach(c => c.classList.remove('active'));
         ch.classList.add('active');
         activeStashFilter = ch.dataset.filter;
+        const otherStashWrap = document.getElementById('stashOtherFormatWrap');
+        if (otherStashWrap) otherStashWrap.classList.toggle('hidden', activeStashFilter !== 'other');
         if (activeStashFilter === 'localonly' || activeStashFilter === 'all') {
           activeDiscogsFolderFilter = null;
         }

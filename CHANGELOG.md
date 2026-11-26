@@ -1,30 +1,28 @@
-# Soft Spot v2.0.3 Changelog
+# Soft Spot v2.1 Changelog
 
-## 1. Discogs Copy Deduplication & Automatic Duplicate Repair
-- Enforced verified physical copy identity (`normalized discogs_account + discogs_id + discogs_instance_id`, excluding mutable folder ID) across both Discogs reconciliation and Google Drive merge alongside Soft Spot `sync_id`s.
-- Automatically repairs existing verified duplicate Stash entries (such as 20 Discogs copies doubled to 40 rows after independent phone/PC syncs) with **zero Discogs writes**, reporting a plain-language summary (e.g., *"Merged 20 duplicate Stash entries. 20 Discogs copies in Stash."*).
-- Deterministic survivor selection (smallest `sync_id`) guarantees phone and desktop converge to the exact same survivor while preserving local photos, `gdrive:` photo references, spine orientation, notes, grades, verified Discogs folders, pending local folder moves, and competing conflict values for review.
-- Persists retired-ID mappings in `sync_id_aliases_v1` (kept strictly distinct from intentional deletion tombstones in `deleted_sync_ids`) and propagates `retire_sync_id` ops in Drive v2 batches so stale snapshots, old queued batches, or previously offline devices reconcile newer edits into the surviving row without reviving duplicates.
-- Keeps local-only items, ambiguous legacy links, and distinct owned copies of the same release (different `instance_id`s) untouched and separate.
+## Visual Design & Desktop Polish (`DESIGN.md`)
+- **Restored Strict Sharp-Corner Borderless Neutral Monochrome Aesthetic:**
+  - Enforced `border-radius: 0px` across all cards, panels, modals, buttons, inputs, selects, chips, badges, tracklist rows, audio mini-player, and global status banner (only functional circular camera guides—shutter button, focus ring, spinner—stay circular).
+  - Purged all blue/indigo/slate/tinted dark surface washes (`#131316`, `#1c1c21`, `#142028`, `#171420`, `#0d1017`, etc.) back to pure achromatic neutral grayscale (`--bg: #0a0a0a`, `--well: #0d0d0d`, `--card: #121212`, `--card-2: #1a1a1a`, `--card-3: #242424`, `--text: #f3f3f3`, `--muted: #8a8a8a`) with zero decorative `1px` perimeter borders.
+  - Replaced tinted alert/selection card fills with neutral tonal surfaces plus crisp left semantic accent bars (`inset 3px 0 0`).
+- **Dark Monochrome PC Scrollbars:** Added `color-scheme: dark` and slim dark monochrome scrollbars (`#0a0a0a` track, `#2e2e2e` thumb, `0px` corners) globally and on `.chip-row` so bright white scrollbars no longer appear on Windows desktop browsers.
+- **Added `DESIGN.md`:** Codified the permanent Soft Spot design rules (`0px` corners, pure neutral `R===G===B` grayscale surfaces, borderless tonal separation, dark scrollbars, semantic accent discipline).
 
-## 2. Race-Free IndexedDB, Outbox & Drive Sync
-- Added a local commit lock (`withLocalCommitLock`) serializing all local IndexedDB read-modify-write commits while keeping every network request strictly outside locks and transactions.
-- Fixed the Drive pull overwrite race: `pullFromGoogleDrive` downloads remote batches and photos first, then reconciles against the **latest** local IndexedDB state at commit time so edits made during a delayed pull always survive.
-- Fixed the outbox race: overlapping saves both persist locally and both append to `cloud_outbox_v2`, and acknowledging uploaded batches preserves any batch queued mid-upload.
-- Read-only **Load from Google Drive** repairs the local view and queues any necessary duplicate-repair batch for the next write-capable **Sync Now** while making **zero** Drive writes itself.
+## Discogs Sync Tracklist & Market Value Hydration
+- **Fixed Empty Tracklists & Missing Values on Synced Discogs Items:**
+  - Added `CC.hydrateDiscogsReleaseDetails` and `CC.enrichSyncedDiscogsStashItems` in `apis.js`.
+  - Automatically hydrates `tracklist`, `country`, `pressing_notes`, `lowest_price`, `vg_plus_price`, `est_price`, `num_for_sale`, `have`, `want`, `is_high_value`, and `is_scarce` right after **Sync with Discogs** (deduplicated by `discogs_id`, cancellable, respecting the 58/min rate limit, and preserving local photos, spines, grades, notes, and Taste scores).
+  - Auto-hydrates on demand when opening any Discogs-linked item in Stash Detail that is missing tracklist/values, plus adds a **🔄 Refresh Discogs** button in Stash Detail.
 
-## 3. Reliable Checkpointed Spotify Sync & Provenance
-- Replaced shared `pageNum` counters with explicit per-stage progress tracking (`likedPage`/`likedOffset`/`likedDone`, `albumsPage`/`albumsDone`, `playlistsListPage`, `playlistIdx`/`playlistPage`, `skippedPlaylists`, and structured `lastError` with stage, HTTP status, and playlist name).
-- Persisted `Retry-After` cooldown deadlines across reloads (`cratecheck_spotify_cooldown_v1` + checkpoint) with bounded fallback backoff; strictly blocks all Spotify Web API requests (including `/v1/me`) during cooldown and guards against overlapping runs.
-- Individual playlist `403`/`404` responses are recorded as skipped while remaining accessible playlists complete and skipped names are reported at the end; playlist-list failures surface separately; expired logins (`401`) support reconnect-and-resume of the same saved run; checkpoints stay intact until the completed profile commits atomically to IndexedDB.
-- `/me/tracks` remains the sole source of Liked Songs while real user playlists named `"Liked Songs"` stay eligible as playlists. Deduplicates repeated tracks within the same source using Spotify track IDs (falling back to normalized artist/title) without inflating taste weights, while preserving full cross-source provenance (Liked Songs, saved albums, top tracks, and playlists with names & IDs).
-- Fully migrates and resumes existing v2.0.2 checkpoints (including checkpoints paused in the playlist stages).
+## Delete From Discogs & Stash (Synced) + Local-Only Support
+- **Context-Aware Delete in Stash Detail (`CC.deleteDiscogsAndStashCopy`):**
+  - Synced Discogs items now show **🗑️ Delete from Discogs & Stash**: confirms live Discogs copy & current folder (handling remote moves cleanly and refusing to guess on ambiguous legacy multi-copy items), deletes from Discogs FIRST, and then removes locally + tombstones to Google Drive so the deleted copy does not reappear on future Discogs syncs. If Discogs deletion fails, the local Stash item is kept intact.
+  - Local-only / unlisted items remain fully supported and show **🗑️ Delete from Stash** (local delete + Drive tombstone, zero Discogs calls).
 
-## 4. Clear Spotify Controls
-- Renamed **Full Library Pass** to **Sync Full Library** everywhere with a short scope description underneath, kept **Sync Liked Songs** and **Sync Full Library** together, and moved **Auto-Draft Profile** into the editable Taste Profile section.
-- Gave **Resume Spotify Sync** a stable, always-visible location: disabled with explanation when idle, showing a live countdown during cooldown, and becoming the primary action when a checkpoint exists (with explicit confirmation before starting a fresh sync that would discard saved progress).
-- Separated the active completed profile summary from live/paused sync progress.
+## Future-Proof Multi-Media Support (All Discogs Formats)
+- Unified all vinyl variants (`LP`, `12"`, `7"`, `10"`, `Flexi-disc`, `Lathe Cut`, `Acetate`) under **Vinyl** while keeping **Cassette**, **CD**, and **Vinyl** as primary top-level controls.
+- Added **Other ▾** format selector in Scanner, `<optgroup label="Other Discogs Media">` in Manual Search, and **Other Media** filter + dropdown in Stash supporting `8-Track Cartridge`, `Reel-To-Reel`, `MiniDisc`, `DAT`, `DVD`, `VHS`, `LaserDisc`, `Blu-ray`, `Betamax`, `UMD`, `Shellac`, `SACD`, `File` (FLAC/WAV/MP3), `Box Set`, and exotic Discogs format names across OCR, Hard Format Gate, Pile Scan, Discogs Sync, and Stash filtering.
 
-## 5. Borderless Dark UI Polish
-- Removed decorative 1px borders across cards, settings panels, buttons, inputs, tabs, pills, chips, menus, audio bar, status banner, and Stash items (including inline styles in HTML and JS-generated markup).
-- Kept the dark Soft Spot palette with subtle tonal layering, modest corner radii, generous spacing, understated secondary button fills, prominent primary actions, visible keyboard `:focus-visible` outlines, comfortable touch targets, and crisp camera viewfinder guides.
+## Migration & Compatibility
+- Bumped cache-busters (`?v=2.1`), header badge (`v2.1`), and taste cache namespace (`v210`).
+- Preserved `CrateCheckDB`, all `cratecheck_*` localStorage/sessionStorage keys, public Google OAuth Client ID, Drive `drive.appdata` sync, and v2.0.3 duplicate-copy repair.

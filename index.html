@@ -7,13 +7,13 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>Soft Spot — Physical Media Scanner</title>
-  <link rel="stylesheet" href="style.css?v=2.0.3" />
+  <link rel="stylesheet" href="style.css?v=2.1" />
   <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
 <header>
-  <div class="brand">📼 Soft Spot <span class="ver-tag">v2.0.3</span></div>
+  <div class="brand">📼 Soft Spot <span class="ver-tag">v2.1</span></div>
   <div class="status-pills">
     <span id="cloudPill" class="pill" title="Google Drive Cloud Sync" onclick="handleCloudPillClick()">Cloud: Off</span>
     <span id="aiPill" class="pill" title="Gemini Cloud AI status" onclick="switchView('settings')">Gemini: Off</span>
@@ -37,8 +37,8 @@
         <strong style="font-size:0.9rem; color:#e9d5ff;">🔄 Editing Stash Item</strong>
         <button type="button" class="btn btn-secondary btn-sm" style="min-height:30px; padding:4px 10px;" onclick="cancelEditMode()">Cancel Edit</button>
       </div>
-      <div id="editModeTitle" style="font-size:0.84rem; color:#f1f5f9; margin-bottom:8px;"></div>
-      <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; color:#e2e8f0; cursor:pointer;">
+      <div id="editModeTitle" style="font-size:0.84rem; color:var(--text); margin-bottom:8px;"></div>
+      <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; color:#d4d4d4; cursor:pointer;">
         <input id="chkRegradeEdit" type="checkbox" style="width:18px; height:18px;" />
         <span>Re-grade condition with AI (leave unchecked to keep your saved grades &amp; notes)</span>
       </label>
@@ -50,6 +50,27 @@
       <button class="seg-btn" data-fmt="Cassette">Cassette</button>
       <button class="seg-btn" data-fmt="CD">CD</button>
       <button class="seg-btn" data-fmt="Vinyl">Vinyl</button>
+      <button class="seg-btn" data-fmt="Other">Other ▾</button>
+    </div>
+    <div id="otherFormatWrap" class="other-format-bar hidden">
+      <label for="otherFormatSelect" class="other-format-lbl">Other Format</label>
+      <select id="otherFormatSelect" onchange="onOtherFormatChange(this.value)">
+        <option value="">All Other Media</option>
+        <option value="8-Track Cartridge">8-Track Cartridge</option>
+        <option value="Reel-To-Reel">Reel-To-Reel</option>
+        <option value="MiniDisc">MiniDisc</option>
+        <option value="DAT">DAT</option>
+        <option value="DVD">DVD</option>
+        <option value="VHS">VHS</option>
+        <option value="LaserDisc">LaserDisc</option>
+        <option value="Blu-ray">Blu-ray</option>
+        <option value="Betamax">Betamax</option>
+        <option value="UMD">UMD</option>
+        <option value="Shellac">Shellac</option>
+        <option value="SACD">SACD</option>
+        <option value="File">File (Digital / FLAC / WAV / MP3)</option>
+        <option value="Box Set">Box Set</option>
+      </select>
     </div>
 
     <!-- Single Item vs Pile Scan Mode -->
@@ -174,7 +195,7 @@
         <strong style="font-size:0.95rem; color:#e9d5ff;">🕵️ Verification Engine</strong>
         <span id="detectiveBadge"></span>
       </div>
-      <div id="detectiveReasoning" style="font-size:0.86rem; color:#f1f5f9;"></div>
+      <div id="detectiveReasoning" style="font-size:0.86rem; color:var(--text);"></div>
       <div id="detectiveQuestionBox" class="detective-q hidden"></div>
       <div id="detectiveActions" class="inline-actions" style="margin-top:8px;"></div>
     </div>
@@ -219,9 +240,9 @@
           <span class="taste-score" id="tasteScore">...</span>
         </div>
         <div id="tasteLocalBadges" style="margin-bottom:6px;"></div>
-        <div id="tasteBody" style="font-size:0.87rem; color:#e2e8f0;">Analyzing against your Taste Profile &amp; Soft Spots...</div>
+        <div id="tasteBody" style="font-size:0.87rem; color:#d4d4d4;">Analyzing against your Taste Profile &amp; Soft Spots...</div>
         <div id="contextBox" class="context-box hidden"></div>
-        <div id="tasteHits" style="margin-top:10px; font-size:0.84rem; color:#cbd5e1;"></div>
+        <div id="tasteHits" style="margin-top:10px; font-size:0.84rem; color:#cccccc;"></div>
       </div>
 
       <!-- Full Open Tracklist -->
@@ -329,10 +350,31 @@
         <button class="chip" data-filter="Cassette">Cassette</button>
         <button class="chip" data-filter="CD">CD</button>
         <button class="chip" data-filter="Vinyl">Vinyl</button>
+        <button class="chip" data-filter="other">Other Media</button>
         <button class="chip" data-filter="highvalue">🔥 Value / Scarce</button>
         <button class="chip" data-filter="keep">🎧 Taste 7+</button>
         <button class="chip" data-filter="lowconf">⚠️ Low-Have (&lt;15)</button>
         <button class="chip" data-filter="localonly">Local Only</button>
+      </div>
+      <div id="stashOtherFormatWrap" class="other-format-bar hidden">
+        <label for="stashOtherFormatSelect" class="other-format-lbl">Other Media</label>
+        <select id="stashOtherFormatSelect" onchange="onStashOtherFormatChange(this.value)">
+          <option value="">All Other Media</option>
+          <option value="8-Track Cartridge">8-Track Cartridge</option>
+          <option value="Reel-To-Reel">Reel-To-Reel</option>
+          <option value="MiniDisc">MiniDisc</option>
+          <option value="DAT">DAT</option>
+          <option value="DVD">DVD</option>
+          <option value="VHS">VHS</option>
+          <option value="LaserDisc">LaserDisc</option>
+          <option value="Blu-ray">Blu-ray</option>
+          <option value="Betamax">Betamax</option>
+          <option value="UMD">UMD</option>
+          <option value="Shellac">Shellac</option>
+          <option value="SACD">SACD</option>
+          <option value="File">File (Digital / FLAC / WAV / MP3)</option>
+          <option value="Box Set">Box Set</option>
+        </select>
       </div>
       <div id="stashFolderRow" class="chip-row hidden" aria-label="Discogs Folders"></div>
       <div id="stashDiscogsSyncLine" style="font-size:0.74rem; color:var(--muted); margin-bottom:8px;"></div>
@@ -708,6 +750,22 @@
             <option value="Cassette">Cassette</option>
             <option value="CD">CD</option>
             <option value="Vinyl">Vinyl</option>
+            <optgroup label="Other Discogs Media">
+              <option value="8-Track Cartridge">8-Track Cartridge</option>
+              <option value="Reel-To-Reel">Reel-To-Reel</option>
+              <option value="MiniDisc">MiniDisc</option>
+              <option value="DAT">DAT</option>
+              <option value="DVD">DVD</option>
+              <option value="VHS">VHS</option>
+              <option value="LaserDisc">LaserDisc</option>
+              <option value="Blu-ray">Blu-ray</option>
+              <option value="Betamax">Betamax</option>
+              <option value="UMD">UMD</option>
+              <option value="Shellac">Shellac</option>
+              <option value="SACD">SACD</option>
+              <option value="File">File</option>
+              <option value="Box Set">Box Set</option>
+            </optgroup>
           </select>
         </div>
         <div>
@@ -836,7 +894,7 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="apis.js?v=2.0.3"></script>
-<script src="app.js?v=2.0.3"></script>
+<script src="apis.js?v=2.1"></script>
+<script src="app.js?v=2.1"></script>
 </body>
 </html>

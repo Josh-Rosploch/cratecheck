@@ -34,6 +34,133 @@
     'No Cover'
   ];
 
+  CC.PRIMARY_MEDIA_FORMATS = ['Cassette', 'CD', 'Vinyl'];
+  CC.OTHER_MEDIA_FORMATS = [
+    '8-Track Cartridge',
+    'Reel-To-Reel',
+    'MiniDisc',
+    'DAT',
+    'DVD',
+    'VHS',
+    'LaserDisc',
+    'Blu-ray',
+    'Betamax',
+    'UMD',
+    'Shellac',
+    'SACD',
+    'File',
+    'Box Set'
+  ];
+  CC.ALL_MEDIA_FORMATS = [...CC.PRIMARY_MEDIA_FORMATS, ...CC.OTHER_MEDIA_FORMATS];
+
+  CC.isPrimaryMediaFormat = (fmt) => {
+    const s = String(fmt || '').trim().toLowerCase();
+    return CC.PRIMARY_MEDIA_FORMATS.some(f => f.toLowerCase() === s);
+  };
+
+  // Normalize Discogs format arrays/strings into Soft Spot's canonical format names.
+  // Unifies all Vinyl sizes/variants (LP, 12", 7", 10", Flexi-disc, Lathe Cut) under "Vinyl",
+  // while supporting all Other Discogs media formats cleanly.
+  CC.normalizeDiscogsFormat = (rawFormats) => {
+    const tokens = [];
+    const primaryNames = [];
+    if (Array.isArray(rawFormats)) {
+      rawFormats.forEach(entry => {
+        if (!entry) return;
+        if (typeof entry === 'string') {
+          const s = entry.trim();
+          if (s) { tokens.push(s); primaryNames.push(s); }
+        } else if (typeof entry === 'object') {
+          if (entry.name) { primaryNames.push(String(entry.name).trim()); tokens.push(String(entry.name).trim()); }
+          if (Array.isArray(entry.descriptions)) entry.descriptions.forEach(d => { if (d) tokens.push(String(d).trim()); });
+          if (entry.text) tokens.push(String(entry.text).trim());
+        }
+      });
+    } else if (typeof rawFormats === 'string' && rawFormats.trim()) {
+      tokens.push(rawFormats.trim());
+      primaryNames.push(rawFormats.trim());
+    }
+
+    const joined = tokens.join(' | ');
+    const primaryJoined = primaryNames.join(' | ');
+    if (!joined) return 'Vinyl';
+
+    // Check specific non-primary / specialized optical/tape/digital formats first so SACD/DVD/LaserDisc/MiniDisc aren't misclassified
+    const checkList = (txt) => {
+      if (/\b8[\s-]*track\b/i.test(txt)) return '8-Track Cartridge';
+      if (/\breel[\s-]*to[\s-]*reel\b/i.test(txt)) return 'Reel-To-Reel';
+      if (/\bmini\s*disc\b/i.test(txt)) return 'MiniDisc';
+      if (/\b(dat|digital audio tape)\b/i.test(txt)) return 'DAT';
+      if (/\blaser\s*disc\b/i.test(txt)) return 'LaserDisc';
+      if (/\bblu[\s-]*ray\b/i.test(txt)) return 'Blu-ray';
+      if (/\bbetamax\b/i.test(txt)) return 'Betamax';
+      if (/\bumd\b/i.test(txt)) return 'UMD';
+      if (/\bsacd\b|\bsuper audio cd\b/i.test(txt)) return 'SACD';
+      if (/\bdvd\b|\bdvd-video\b|\bdvd-audio\b/i.test(txt)) return 'DVD';
+      if (/\bvhs\b/i.test(txt)) return 'VHS';
+      if (/\bshellac\b/i.test(txt)) return 'Shellac';
+      if (/\bcassette\b|\bmicrocassette\b/i.test(txt)) return 'Cassette';
+      if (/\bvinyl\b|\bflexi[\s-]*disc\b|\blathe cut\b|\bacetate\b|\b(7|10|12)"|\b(7|10|12)\s*inch\b|\b\blp\b/i.test(txt)) return 'Vinyl';
+      if (/\b(cd|cdr|cd-r|cd-rom|hdcd|cdv|dualdisc|mini cd)\b/i.test(txt)) return 'CD';
+      if (/\b(file|flac|wav|mp3|alac|aiff|aac|ogg|digital)\b/i.test(txt)) return 'File';
+      if (/\bbox\s*set\b/i.test(txt)) return 'Box Set';
+      return '';
+    };
+
+    // Prioritize primary Discogs format names (so e.g. "Vinyl, LP, Box Set" stays "Vinyl", and "Box Set" alone stays "Box Set")
+    const nonContainerPrimary = primaryNames.filter(n => !/^box\s*set$/i.test(n) && !/^all media$/i.test(n)).join(' | ');
+    if (nonContainerPrimary) {
+      const hit = checkList(nonContainerPrimary);
+      if (hit) return hit;
+      // Preserve any exotic Discogs primary format name (e.g., "Cylinder", "Floppy Disk", "Memory Stick")
+      const firstClean = primaryNames.find(n => n && !/^all media$/i.test(n));
+      if (firstClean) return firstClean;
+    }
+
+    const fromPrimary = checkList(primaryJoined);
+    if (fromPrimary) return fromPrimary;
+
+    const fromAll = checkList(joined);
+    if (fromAll) return fromAll;
+
+    return primaryNames[0] || 'Vinyl';
+  };
+
+  CC.matchesMediaFormat = (rawFormats, targetFormat) => {
+    const target = String(targetFormat || '').trim();
+    if (!target || target === 'Auto' || target === 'Unknown') return true;
+    const rawStr = Array.isArray(rawFormats)
+      ? rawFormats.map(f => typeof f === 'string' ? f : [f?.name, ...(f?.descriptions || []), f?.text].filter(Boolean).join(' ')).join(' ')
+      : String(rawFormats || '');
+    if (!rawStr.trim()) return true;
+
+    const normalized = CC.normalizeDiscogsFormat(rawFormats);
+    if (target === 'Other') {
+      return !CC.isPrimaryMediaFormat(normalized);
+    }
+    if (normalized.toLowerCase() === target.toLowerCase()) return true;
+
+    // Secondary check for multi-format releases (e.g., CD + DVD combo pack)
+    if (target === 'Cassette') return /\bcassette\b|\bmicrocassette\b/i.test(rawStr);
+    if (target === 'CD') return /\b(cd|cdr|cd-r|hdcd|cdv|dualdisc)\b/i.test(rawStr) && !/\bsacd\b/i.test(rawStr);
+    if (target === 'Vinyl') return /\b(vinyl|lp|12"|7"|10"|flexi[\s-]*disc|lathe cut|acetate)\b/i.test(rawStr);
+    if (target === '8-Track Cartridge') return /\b8[\s-]*track\b/i.test(rawStr);
+    if (target === 'Reel-To-Reel') return /\breel[\s-]*to[\s-]*reel\b/i.test(rawStr);
+    if (target === 'MiniDisc') return /\bmini\s*disc\b/i.test(rawStr);
+    if (target === 'DAT') return /\b(dat|digital audio tape)\b/i.test(rawStr);
+    if (target === 'DVD') return /\bdvd\b/i.test(rawStr);
+    if (target === 'VHS') return /\bvhs\b/i.test(rawStr);
+    if (target === 'LaserDisc') return /\blaser\s*disc\b/i.test(rawStr);
+    if (target === 'Blu-ray') return /\bblu[\s-]*ray\b/i.test(rawStr);
+    if (target === 'Betamax') return /\bbetamax\b/i.test(rawStr);
+    if (target === 'UMD') return /\bumd\b/i.test(rawStr);
+    if (target === 'Shellac') return /\bshellac\b/i.test(rawStr);
+    if (target === 'SACD') return /\bsacd\b|\bsuper audio cd\b/i.test(rawStr);
+    if (target === 'File') return /\b(file|flac|wav|mp3|alac|aiff|aac|ogg)\b/i.test(rawStr);
+    if (target === 'Box Set') return /\bbox\s*set\b/i.test(rawStr);
+    return rawStr.toLowerCase().includes(target.toLowerCase());
+  };
+
   let storedCfg = {};
   try {
     storedCfg = JSON.parse(localStorage.getItem(CC.CFG_KEY) || '{}') || {};
@@ -568,7 +695,7 @@
         const artist = (info.artists || []).map(a => String(a.name || '').replace(/\s*\(\d+\)$/, '')).join(', ').trim() || 'Unknown Artist';
         const title = String(info.title || '').trim() || 'Untitled Release';
         const formatNames = (info.formats || []).map(f => f.name).filter(Boolean);
-        const primaryFmt = formatNames.find(n => /^(Cassette|CD|Vinyl)$/i.test(n)) || formatNames[0] || 'Vinyl';
+        const primaryFmt = CC.normalizeDiscogsFormat(info.formats);
         const format = formatNames.join(', ');
         const year = info.year ? String(info.year) : '';
         const label = info.labels?.[0]?.name || '';
@@ -928,6 +1055,7 @@
           want: 0,
           tracklist: [],
           pressing_notes: '',
+          discogs_details_synced_at: 0,
           taste_score: null,
           taste_verdict: null,
           taste_summary: '',
@@ -1070,6 +1198,359 @@
   CC.syncDiscogsCollectionIndex = async () => {
     const res = await CC.syncDiscogsCollectionFull();
     return res.collectionIndex;
+  };
+
+  // ==================== DISCOGS RELEASE DETAIL HYDRATION & DELETE-FROM-BOTH ====================
+  let discogsEnrichCancelled = false;
+  let discogsEnrichRunning = false;
+
+  CC.cancelDiscogsEnrich = () => {
+    discogsEnrichCancelled = true;
+  };
+  CC.isDiscogsEnrichRunning = () => Boolean(discogsEnrichRunning);
+
+  function cleanDiscogsArtistsArr(arr) {
+    return (Array.isArray(arr) ? arr : [])
+      .map(a => String(a?.name || '').replace(/\s*\(\d+\)$/, '').trim())
+      .filter(Boolean)
+      .join(', ');
+  }
+
+  function buildDiscogsPressingNotes(release) {
+    if (!release) return '';
+    const notesParts = [];
+    if (Array.isArray(release.formats) && release.formats.length) {
+      notesParts.push('Format: ' + release.formats.map(f => [f.name, ...(f.descriptions || []), f.text || ''].filter(Boolean).join(', ')).join(' | '));
+    }
+    if (release.notes) notesParts.push('\nNotes:\n' + release.notes);
+    if (Array.isArray(release.identifiers) && release.identifiers.length) {
+      notesParts.push('\nIdentifiers:\n' + release.identifiers.map(x => `• ${x.type}${x.description ? ` (${x.description})` : ''}: ${x.value}`).join('\n'));
+    }
+    if (Array.isArray(release.companies) && release.companies.length) {
+      notesParts.push('\nCompanies:\n' + release.companies.map(c => `• ${c.entity_type_name}: ${c.name}`).join('\n'));
+    }
+    return notesParts.join('\n').trim();
+  }
+
+  // Fetch full Discogs release metadata, tracklist, marketplace stats & VG+ price suggestion for a single release ID
+  CC.hydrateDiscogsReleaseDetails = async (releaseId, opts = {}) => {
+    const id = Number(releaseId || 0);
+    if (!id) throw new Error('Invalid Discogs release ID');
+    const { forceRefresh = false } = opts || {};
+
+    if (forceRefresh) CC.releaseDetailCache.delete(id);
+    const release = await CC.getReleaseCached(id);
+    const stats = await CC.discogsFetch(`/marketplace/stats/${id}`).catch(() => ({}));
+
+    let suggestions = null;
+    if (CC.cfg.fetchVgSuggestions !== false) {
+      suggestions = await CC.discogsFetch(`/marketplace/price_suggestions/${id}`).catch(() => null);
+    }
+
+    const tracklist = (release.tracklist || [])
+      .filter(t => t && t.type_ !== 'heading' && String(t.title || '').trim())
+      .map(t => ({
+        pos: t.position || '',
+        artist: cleanDiscogsArtistsArr(t.artists),
+        title: String(t.title || '').trim()
+      }));
+
+    const lowestPrice = stats?.lowest_price?.value ?? release.lowest_price ?? null;
+    const lowestCurrency = stats?.lowest_price?.currency || 'USD';
+    const numForSale = stats?.num_for_sale ?? release.num_for_sale ?? 0;
+    const vgPlusPrice = suggestions?.['Very Good Plus (VG+)']?.value ?? null;
+    const vgPlusCurrency = suggestions?.['Very Good Plus (VG+)']?.currency || lowestCurrency || 'USD';
+    const estPrice = vgPlusPrice ?? lowestPrice;
+    const estCurrency = vgPlusPrice !== null ? vgPlusCurrency : lowestCurrency;
+    const estUsd = CC.toApproxUsd(estPrice, estCurrency);
+    const have = Number(release.community?.have ?? 0);
+    const want = Number(release.community?.want ?? 0);
+    const isHighValue = estUsd !== null && estUsd >= Number(CC.cfg.threshold || 20);
+    const isScarce = numForSale === 0 && (want >= 10 || (want > have && want >= 5));
+
+    return {
+      discogs_id: id,
+      master_id: Number(release.master_id || 0) || null,
+      title: String(release.title || '').trim(),
+      artist: cleanDiscogsArtistsArr(release.artists),
+      catno: release.labels?.[0]?.catno || '',
+      label: release.labels?.[0]?.name || '',
+      format: CC.normalizeDiscogsFormat(release.formats),
+      year: release.year ? String(release.year) : '',
+      country: release.country || '',
+      genres: [...(release.genres || []), ...(release.styles || [])],
+      tracklist,
+      pressing_notes: buildDiscogsPressingNotes(release),
+      discogs_thumb: release.thumb || release.images?.[0]?.uri150 || '',
+      discogs_url: release.uri || `https://www.discogs.com/release/${id}`,
+      lowest_price: lowestPrice,
+      lowest_currency: lowestCurrency,
+      vg_plus_price: vgPlusPrice,
+      vg_plus_currency: vgPlusCurrency,
+      est_price: estPrice,
+      est_currency: estCurrency,
+      est_usd: estUsd,
+      num_for_sale: numForSale,
+      have,
+      want,
+      is_high_value: isHighValue,
+      is_scarce: isScarce,
+      discogs_details_synced_at: Date.now()
+    };
+  };
+
+  function needsDiscogsDetailHydration(it) {
+    if (!it || !Number(it.discogs_id || 0)) return false;
+    if (!Number(it.discogs_details_synced_at || 0)) return true;
+    if (!Array.isArray(it.tracklist) || it.tracklist.length === 0) return true;
+    return false;
+  }
+
+  // Hydrate missing tracklists, pressing notes, country, and marketplace values for Discogs-linked Stash items.
+  // Deduplicates by discogs_id, respects the 58/min rate limiter, commits atomically per release without touching local photos/grades/notes!
+  CC.enrichSyncedDiscogsStashItems = async (opts = {}) => {
+    const {
+      stashIds = null,
+      releaseIds = null,
+      forceRefresh = false,
+      quiet = false,
+      onItemUpdated = null
+    } = opts || {};
+
+    if (!CC.cfg.discogsToken) {
+      return { hydratedReleases: 0, updatedRows: 0, failedReleases: 0, cancelled: false, totalTargets: 0 };
+    }
+
+    const stashIdSet = Array.isArray(stashIds) ? new Set(stashIds.map(Number)) : null;
+    const relIdSet = Array.isArray(releaseIds) ? new Set(releaseIds.map(Number)) : null;
+    const allBefore = await CC.idbGetAll('stash');
+
+    const targetRelIds = [];
+    const seenRel = new Set();
+    for (const it of allBefore) {
+      const rid = Number(it.discogs_id || 0);
+      if (!rid) continue;
+      if (stashIdSet && !stashIdSet.has(Number(it.id))) continue;
+      if (relIdSet && !relIdSet.has(rid)) continue;
+      if (!forceRefresh && !needsDiscogsDetailHydration(it)) continue;
+      if (!seenRel.has(rid)) {
+        seenRel.add(rid);
+        targetRelIds.push(rid);
+      }
+    }
+
+    if (!targetRelIds.length) {
+      return { hydratedReleases: 0, updatedRows: 0, failedReleases: 0, cancelled: false, totalTargets: 0 };
+    }
+
+    discogsEnrichCancelled = false;
+    discogsEnrichRunning = true;
+    let hydratedReleases = 0;
+    let updatedRows = 0;
+    let failedReleases = 0;
+
+    try {
+      for (let i = 0; i < targetRelIds.length; i++) {
+        if (discogsEnrichCancelled) break;
+        const rid = targetRelIds[i];
+        if (!quiet) {
+          statusCb(
+            `🎵 Loading Discogs tracklists & values (${i + 1}/${targetRelIds.length}) · API ${CC.getRateCount()}/58...`,
+            true,
+            { cancellable: true }
+          );
+        }
+
+        let details = null;
+        try {
+          details = await CC.hydrateDiscogsReleaseDetails(rid, { forceRefresh });
+        } catch (_) {
+          failedReleases++;
+          continue;
+        }
+        if (discogsEnrichCancelled) break;
+
+        // Atomically apply hydrated fields to ALL Stash rows matching this releaseId,
+        // strictly preserving local photos, spine, grades, notes, taste, and folder!
+        const appliedCount = await withLocalCommitLock(async () => {
+          const curStash = await CC.idbGetAll('stash');
+          const outboxBefore = await CC.getCloudOutbox();
+          const matching = curStash.filter(x => {
+            if (Number(x.discogs_id || 0) !== rid) return false;
+            if (stashIdSet && !stashIdSet.has(Number(x.id))) return false;
+            return true;
+          });
+          if (!matching.length) return 0;
+
+          const toPut = [];
+          const ops = [];
+          for (const row of matching) {
+            const next = { ...row };
+            const changed = [];
+            const applyIfVal = (field, val, onlyIfEmpty = false) => {
+              if (val === undefined) return;
+              if (onlyIfEmpty && next[field]) return;
+              if (JSON.stringify(next[field]) !== JSON.stringify(val)) {
+                next[field] = val;
+                changed.push(field);
+              }
+            };
+
+            applyIfVal('tracklist', details.tracklist, false);
+            applyIfVal('pressing_notes', details.pressing_notes, false);
+            applyIfVal('country', details.country, !details.country);
+            if (details.year) applyIfVal('year', details.year, true);
+            if (details.label) applyIfVal('label', details.label, true);
+            if (details.catno) applyIfVal('catno', details.catno, true);
+            if (details.master_id) applyIfVal('master_id', details.master_id, true);
+            if (details.genres?.length) applyIfVal('genres', details.genres, false);
+            if (details.format) applyIfVal('format', details.format, false);
+            if (details.discogs_thumb) {
+              applyIfVal('discogs_thumb', details.discogs_thumb, true);
+              if (!next.thumb_data_url) applyIfVal('thumb_data_url', details.discogs_thumb, true);
+            }
+            if (details.discogs_url) applyIfVal('discogs_url', details.discogs_url, true);
+
+            applyIfVal('lowest_price', details.lowest_price, false);
+            applyIfVal('lowest_currency', details.lowest_currency, false);
+            applyIfVal('vg_plus_price', details.vg_plus_price, false);
+            applyIfVal('vg_plus_currency', details.vg_plus_currency, false);
+            applyIfVal('est_price', details.est_price, false);
+            applyIfVal('est_currency', details.est_currency, false);
+            applyIfVal('est_usd', details.est_usd, false);
+            applyIfVal('num_for_sale', details.num_for_sale, false);
+            applyIfVal('have', details.have, false);
+            applyIfVal('want', details.want, false);
+            applyIfVal('is_high_value', details.is_high_value, false);
+            applyIfVal('is_scarce', details.is_scarce, false);
+            applyIfVal('discogs_details_synced_at', details.discogs_details_synced_at, false);
+
+            const stamped = CC.stampStashRevision(next, row, changed.length ? changed : ['discogs_details_synced_at']);
+            toPut.push(stamped);
+            const opCopy = { ...stamped };
+            delete opCopy.id;
+            ops.push({ type: 'upsert_stash', sync_id: stamped.sync_id, record: opCopy });
+          }
+
+          const nextQueue = outboxBefore.slice();
+          if (ops.length > 0) {
+            nextQueue.push({
+              batchId: CC.newBatchId(),
+              accountEmail: CC.cfg.googleBoundEmail || CC.cfg.googleEmail || '',
+              createdAt: Date.now(),
+              deviceId: CC.getDeviceId(),
+              status: 'queued',
+              ops
+            });
+          }
+
+          await CC.idbAtomicWrite(({ stashStore, metaStore }) => {
+            for (const rec of toPut) stashStore.put(rec);
+            if (ops.length > 0) {
+              metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: nextQueue } });
+            }
+          });
+          if (ops.length > 0) CC.setPendingCloudChanges(nextQueue.length);
+          return toPut.length;
+        });
+
+        hydratedReleases++;
+        updatedRows += appliedCount;
+        if (typeof onItemUpdated === 'function') {
+          try { await onItemUpdated({ releaseId: rid, details, index: i + 1, total: targetRelIds.length }); } catch (_) {}
+        }
+      }
+
+      return {
+        hydratedReleases,
+        updatedRows,
+        failedReleases,
+        cancelled: Boolean(discogsEnrichCancelled),
+        totalTargets: targetRelIds.length
+      };
+    } finally {
+      discogsEnrichRunning = false;
+    }
+  };
+
+  // Delete a Discogs-synced copy from BOTH Discogs AND Local Stash (+ Drive tombstone).
+  // Confirms live folder & instance first so remote folder moves work cleanly and ambiguous legacy copies are never guessed!
+  CC.deleteDiscogsAndStashCopy = async (stashItem, opts = {}) => {
+    const { deleteRemote = true } = opts || {};
+    if (!stashItem) throw new Error('Stash item not found');
+
+    const isSynced = Boolean(stashItem.synced_to_discogs && !stashItem.discogs_removed && stashItem.discogs_id);
+    let remoteStatus = 'local_only';
+    let deletedInstanceId = null;
+    let deletedFolderId = null;
+
+    if (deleteRemote && isSynced) {
+      const account = (CC.cfg.discogsUser || '').trim();
+      if (!account || !CC.cfg.discogsToken) {
+        throw new Error('Connect and verify your Discogs account in Settings to delete this synced copy from Discogs');
+      }
+      const relId = Number(stashItem.discogs_id);
+      const liveInsts = await CC.findDiscogsInstances(relId, { throwOnError: true });
+
+      if (stashItem.discogs_instance_id) {
+        const instId = Number(stashItem.discogs_instance_id);
+        const live = liveInsts.find(r => Number(r.instance_id) === instId);
+        if (live) {
+          const actualFolderId = String(live.folder_id ?? stashItem.discogs_folder_id ?? '1');
+          await CC.deleteDiscogsInstance(actualFolderId, relId, instId);
+          remoteStatus = 'deleted_remote';
+          deletedInstanceId = instId;
+          deletedFolderId = actualFolderId;
+        } else {
+          // Already absent on Discogs — safe to remove locally without failing
+          remoteStatus = 'already_absent';
+        }
+      } else {
+        // Legacy synced record lacking discogs_instance_id
+        if (liveInsts.length === 0) {
+          remoteStatus = 'already_absent';
+        } else if (liveInsts.length === 1) {
+          const only = liveInsts[0];
+          const actualFolderId = String(only.folder_id ?? stashItem.discogs_folder_id ?? '1');
+          await CC.deleteDiscogsInstance(actualFolderId, relId, Number(only.instance_id));
+          remoteStatus = 'deleted_remote';
+          deletedInstanceId = Number(only.instance_id);
+          deletedFolderId = actualFolderId;
+        } else {
+          throw new Error(`You own ${liveInsts.length} copies of release #${relId} on Discogs and this legacy Stash entry isn't linked to a specific copy — run Sync with Discogs first so the exact copy can be deleted safely.`);
+        }
+      }
+    }
+
+    // Only remove locally + tombstone to Drive AFTER Discogs deletion succeeded (or confirmed already absent / local-only)
+    await CC.commitLocalMutation({
+      deleteStash: { id: stashItem.id, sync_id: stashItem.sync_id || null },
+      queueOutbox: Boolean(stashItem.sync_id)
+    });
+
+    // Keep cached discogs_collection_index consistent if this was the last local copy of that release
+    if (isSynced && stashItem.discogs_id) {
+      try {
+        const remaining = await CC.idbGetAll('stash');
+        const stillHasRel = remaining.some(x => x.synced_to_discogs && !x.discogs_removed && Number(x.discogs_id) === Number(stashItem.discogs_id));
+        const idxRec = await CC.idbGet('meta', 'discogs_collection_index');
+        if (idxRec?.value) {
+          const idx = { ...idxRec.value };
+          idx.totalItems = Math.max(0, Number(idx.totalItems || 1) - 1);
+          if (!stillHasRel && Array.isArray(idx.releaseIds)) {
+            idx.releaseIds = idx.releaseIds.filter(r => Number(r) !== Number(stashItem.discogs_id));
+          }
+          await CC.idbPut('meta', { key: 'discogs_collection_index', value: idx });
+        }
+      } catch (_) {}
+    }
+
+    return {
+      ok: true,
+      remoteStatus,
+      deletedInstanceId,
+      deletedFolderId
+    };
   };
 
   // ==================== GEMINI CLOUD AI ENGINE (WITH INFINITE 5s AUTO-RETRY) ====================
@@ -2509,7 +2990,7 @@
     'pending_discogs_sync', 'pending_field_sync', 'pending_delete_old', 'pending_folder_move',
     'rating', 'is_high_value', 'is_scarce', 'est_price', 'est_currency', 'est_usd',
     'lowest_price', 'lowest_currency', 'vg_plus_price', 'vg_plus_currency',
-    'num_for_sale', 'have', 'want', 'tracklist', 'pressing_notes',
+    'num_for_sale', 'have', 'want', 'tracklist', 'pressing_notes', 'discogs_details_synced_at',
     'discogs_url', 'discogs_thumb', 'is_conservative_tiebreak', 'tiebreak_confirmed', 'spotify_matches'
   ];
 
