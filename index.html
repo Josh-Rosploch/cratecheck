@@ -6,14 +6,14 @@
   <meta name="theme-color" content="#0a0a0a" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
-  <title>CrateCheck — Media Scanner</title>
-  <link rel="stylesheet" href="style.css?v=2.0" />
+  <title>Soft Spot — Physical Media Scanner</title>
+  <link rel="stylesheet" href="style.css?v=2.0.1" />
   <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
 <header>
-  <div class="brand">📼 CrateCheck <span class="ver-tag">v2.0</span></div>
+  <div class="brand">📼 Soft Spot <span class="ver-tag">v2.0.1</span></div>
   <div class="status-pills">
     <span id="cloudPill" class="pill" title="Google Drive Cloud Sync" onclick="handleCloudPillClick()">Cloud: Off</span>
     <span id="aiPill" class="pill" title="Gemini Cloud AI status" onclick="switchView('settings')">Gemini: Off</span>
@@ -349,30 +349,14 @@
     <details id="accCloud" class="acc-card">
       <summary class="acc-summary">
         <span>1. ☁️ Google Drive Cloud Sync</span>
-        <span id="pillCloud" class="pill">Off</span>
+        <span id="pillCloud" class="pill">Sign In</span>
       </summary>
       <div class="acc-body">
-        <div class="inline-guide">
-          <strong>3-Step Google Cloud Setup (strictly sandboxed <code>drive.appdata</code> — zero access to your normal Drive files):</strong>
-          <ol style="margin:6px 0 0; padding-left:18px;">
-            <li>Open <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noopener">Google Cloud Console ↗</a> → create/select a project → enable <strong>Google Drive API</strong>.</li>
-            <li>Open <strong>OAuth consent screen</strong> (External, add your Google account as a Test User) → <strong>Credentials</strong> → <strong>Create OAuth Client ID</strong> → <strong>Web application</strong>.</li>
-            <li>Add your exact <strong>Authorized JavaScript Origin</strong> below, paste the Client ID, and tap <strong>Sign in with Google &amp; Sync</strong>.</li>
-          </ol>
-        </div>
+        <p style="font-size:0.82rem; margin-bottom:10px;">
+          Sign in with Google to back up and sync your Stash, photos, cropped spines, and Taste Profile across your phone and PC. Uses strictly private app-only Drive storage — Soft Spot cannot see your normal Drive files.
+        </p>
 
-        <label class="field-label">Authorized JavaScript Origin (paste in Google Cloud Console)</label>
-        <div class="code-copy">
-          <span id="googleOriginText" style="flex:1;"></span>
-          <button type="button" class="btn btn-secondary btn-sm" onclick="copyGoogleOrigin()">Copy</button>
-        </div>
-
-        <div style="margin:10px 0;">
-          <label class="field-label">Google OAuth Client ID</label>
-          <input id="cfgGoogleClientId" type="text" placeholder="1234567890-xxxx.apps.googleusercontent.com" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
-        </div>
-
-        <div id="googleSyncSummary" style="font-size:0.82rem; color:var(--muted); margin-bottom:10px;">Not signed in. Sign in to sync Stash, photos, spines, Taste Profile &amp; settings across phone and PC.</div>
+        <div id="googleSyncSummary" style="font-size:0.82rem; color:var(--muted); margin-bottom:10px;">Not signed in. Tap Sign in with Google &amp; Sync to keep your devices in sync.</div>
 
         <div class="inline-actions" style="margin-bottom:10px;">
           <button id="btnGoogleSignIn" type="button" class="btn btn-green btn-sm" onclick="googleSignInAndSync()">☁️ Sign in with Google &amp; Sync</button>
@@ -390,10 +374,35 @@
         <div class="toggle-row">
           <div>
             <div style="font-size:0.88rem; font-weight:700;">Sync API Keys &amp; Tokens across my devices</div>
-            <div style="font-size:0.74rem; color:var(--muted);">Syncs Gemini key, Discogs token &amp; Spotify Client ID inside your private appDataFolder</div>
+            <div style="font-size:0.74rem; color:var(--muted);">Opt-in: syncs Gemini key, Discogs token &amp; Spotify Client ID inside your own private Drive appDataFolder</div>
           </div>
           <input id="cfgGoogleSyncSecrets" type="checkbox" style="width:20px; height:20px;" onchange="saveSettings(true)" />
         </div>
+
+        <details style="margin-top:10px; border-top:1px solid var(--border); padding-top:9px;">
+          <summary style="font-size:0.78rem; color:var(--muted);">Advanced: Self-Hosting / Custom Google Client ID</summary>
+          <div style="margin-top:10px;">
+            <div class="inline-guide">
+              <strong>Self-Hosting Setup (strictly sandboxed <code>drive.appdata</code> scope):</strong>
+              <ol style="margin:6px 0 0; padding-left:18px;">
+                <li>Open <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noopener">Google Cloud Console ↗</a> → create/select a project → enable <strong>Google Drive API</strong>.</li>
+                <li>Open <strong>OAuth consent screen</strong> → <strong>Credentials</strong> → <strong>Create OAuth Client ID</strong> → <strong>Web application</strong>.</li>
+                <li>Add your exact <strong>Authorized JavaScript Origin</strong> below, paste your custom Client ID (or leave blank to use Soft Spot's built-in Client ID), and tap <strong>Sign in with Google &amp; Sync</strong>.</li>
+              </ol>
+            </div>
+
+            <label class="field-label">Authorized JavaScript Origin</label>
+            <div class="code-copy">
+              <span id="googleOriginText" style="flex:1;"></span>
+              <button type="button" class="btn btn-secondary btn-sm" onclick="copyGoogleOrigin()">Copy</button>
+            </div>
+
+            <div style="margin-top:10px;">
+              <label class="field-label">Custom Google OAuth Client ID (Optional Override)</label>
+              <input id="cfgGoogleClientId" type="text" placeholder="Leave blank to use built-in Soft Spot Client ID" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+            </div>
+          </div>
+        </details>
       </div>
     </details>
 
@@ -623,7 +632,7 @@
         <div class="inline-guide" style="margin-bottom:0;">
           <strong>Workflow Tips:</strong>
           <ol style="margin:6px 0 0; padding-left:18px;">
-            <li><strong>2-Shot Camera + Auto-UPC:</strong> Snap Front/Side A → flip → snap Back/Side B, then tap <strong>🔍 Finish &amp; Search</strong>.</li>
+            <li><strong>3-Shot Camera + Auto-UPC:</strong> Snap Front + Side A → flip → Back + Side B → optional Spine (auto-crops horizontally for your Stash Spine Shelf), then tap <strong>🔍 Finish &amp; Search</strong>.</li>
             <li><strong>Interactive Pile Scan:</strong> Snapping or uploading a shelf auto-analyzes immediately with 3072px ultra-high detail, rotated polygon highlights, and pinch-zoom.</li>
             <li><strong>Currency-Aware Value Alerts:</strong> Non-USD prices are converted to approximate USD before triggering High-Value alerts.</li>
             <li><strong>Safe Discogs Swaps:</strong> Swapping pressings adds the new copy, syncs fields, and saves locally before removing the old copy.</li>
@@ -806,7 +815,7 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="apis.js?v=2.0"></script>
-<script src="app.js?v=2.0"></script>
+<script src="apis.js?v=2.0.1"></script>
+<script src="app.js?v=2.0.1"></script>
 </body>
 </html>

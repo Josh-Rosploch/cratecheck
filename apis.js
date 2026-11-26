@@ -3,8 +3,10 @@
 
   const CC = {};
   CC.REDIRECT_URI = location.origin + location.pathname;
+  // Migration safety: keep legacy IndexedDB / localStorage keys unchanged so existing Stash & settings persist
   CC.CFG_KEY = 'cratecheck_cfg_v1';
-  CC.DEFAULT_GOOGLE_CLIENT_ID = '';
+  CC.CLOUD_DIRTY_KEY = 'cratecheck_cloud_dirty_v1';
+  CC.DEFAULT_GOOGLE_CLIENT_ID = '409160262973-fr2ostrkem4nqpcp6p6igjqf2hjdp7fn.apps.googleusercontent.com';
 
   CC.MEDIA_GRADES = [
     'Not Graded',
@@ -46,9 +48,9 @@
     autoDetective: true,
     autoGradeOnScan: false,
     preferredCameraId: '',
-    googleClientId: CC.DEFAULT_GOOGLE_CLIENT_ID,
+    googleClientId: '',
     googleAutoSync: true,
-    googleSyncSecrets: true,
+    googleSyncSecrets: false,
     googleLastSyncAt: 0,
     googleEmail: '',
     cfgUpdatedAt: 0,
@@ -1162,8 +1164,10 @@
 
   // ==================== GOOGLE DRIVE APPDATAFOLDER CLOUD SYNC ====================
   const GDRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
-  const GDRIVE_STATE_FILENAME = 'cratecheck_state.json';
+  const GDRIVE_STATE_FILENAME = 'softspot_state.json';
+  const GDRIVE_LEGACY_STATE_FILENAME = 'cratecheck_state.json';
   const GDRIVE_SESSION_KEY = 'cratecheck_gdrive_sess_v1';
+  const GDRIVE_DELTA_RX = /^delta_\d+_[a-z0-9]+\.json$/i;
 
   let gToken = '';
   let gTokenExp = 0;
@@ -1175,6 +1179,40 @@
     }
   } catch (_) {}
 
+  CC.getPendingCloudChanges = () => {
+    try { return Math.max(0, Number(localStorage.getItem(CC.CLOUD_DIRTY_KEY) || 0) || 0); }
+    catch (_) { return 0; }
+  };
+
+  CC.setPendingCloudChanges = (count) => {
+    try { localStorage.setItem(CC.CLOUD_DIRTY_KEY, String(Math.max(0, Math.floor(Number(count) || 0)))); }
+    catch (_) {}
+  };
+
+  CC.recordLocalCloudChange = async (syncId = null, isDelete = false) => {
+    const nextCount = CC.getPendingCloudChanges() + 1;
+    CC.setPendingCloudChanges(nextCount);
+    if (syncId) {
+      try {
+        const rec = (await CC.idbGet('meta', 'cloud_dirty_batch'))?.value || { modified: [], deleted: {} };
+        const modSet = new Set(Array.isArray(rec.modified) ? rec.modified : []);
+        const delMap = Object.assign({}, rec.deleted || {});
+        if (isDelete) {
+          modSet.delete(syncId);
+          delMap[syncId] = Date.now();
+        } else {
+          modSet.add(syncId);
+          delete delMap[syncId];
+        }
+        await CC.idbPut('meta', {
+          key: 'cloud_dirty_batch',
+          value: { modified: Array.from(modSet), deleted: delMap }
+        });
+      } catch (_) {}
+    }
+    return nextCount;
+  };
+
   CC.isGoogleSignedIn = () => Boolean(gToken && Date.now() < gTokenExp - 15000);
 
   CC.getGoogleClientId = () => (CC.cfg.googleClientId || CC.DEFAULT_GOOGLE_CLIENT_ID || '').trim();
@@ -1182,7 +1220,7 @@
   CC.requestGoogleAccessToken = (promptMode = '') => new Promise((resolve, reject) => {
     const clientId = CC.getGoogleClientId();
     if (!clientId) {
-      reject(new Error('Paste your Google OAuth Client ID in Settings → 1. Google Drive Cloud Sync first'));
+      reject(new Error('Google OAuth Client ID is missing — check Settings → 1. Google Drive Cloud Sync'));
       return;
     }
     if (!window.google?.accounts?.oauth2?.initTokenClient) {
@@ -1209,7 +1247,9 @@
           reject(new Error(err?.message || err?.type || 'Google sign-in popup blocked or closed'));
         }
       });
-      client.requestAccessToken({ prompt: promptMode });
+      const reqOpts = { prompt: promptMode };
+      if (CC.cfg.googleEmail) reqOpts.hint = CC.cfg.googleEmail;
+      client.requestAccessToken(reqOpts);
     } catch (err) {
       reject(err);
     }
@@ -1287,6 +1327,7 @@
 
   async function listAppDataFiles() {
     const map = new Map();
+    const deltaFiles = [];
     let pageToken = '';
     while (true) {
       const url = new URL('https://www.googleapis.com/drive/v3/files');
@@ -1298,6 +1339,9 @@
       const data = await res.json();
       (data.files || []).forEach(f => {
         if (!f?.name) return;
+        if (GDRIVE_DELTA_RX.test(f.name)) {
+          deltaFiles.push(f);
+        }
         const prev = map.get(f.name);
         if (!prev || String(f.modifiedTime || '') > String(prev.modifiedTime || '')) {
           map.set(f.name, f);
@@ -1306,11 +1350,18 @@
       if (!data.nextPageToken) break;
       pageToken = data.nextPageToken;
     }
-    return map;
+    return { map, deltaFiles };
+  }
+
+  async function deleteAppDataFileSafe(fileId) {
+    if (!fileId) return;
+    try {
+      await gdriveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, { method: 'DELETE' });
+    } catch (_) {}
   }
 
   async function uploadAppDataMultipart(name, contentBlob, mimeType, existingFileId = null) {
-    const boundary = 'cc_sync_' + Math.random().toString(36).slice(2, 12);
+    const boundary = 'ss_sync_' + Math.random().toString(36).slice(2, 12);
     const meta = existingFileId ? { name } : { name, parents: ['appDataFolder'] };
     const head =
       `--${boundary}\r\n` +
@@ -1352,7 +1403,7 @@
     } catch (_) {}
 
     report('☁️ Listing Google Drive appDataFolder...');
-    const fileMap = await listAppDataFiles();
+    const { map: fileMap, deltaFiles } = await listAppDataFiles();
 
     // 1. Load local state from IndexedDB
     const rawLocalStash = await CC.idbGetAll('stash');
@@ -1362,62 +1413,15 @@
         await CC.idbPut('stash', it);
       }
     }
+    const localBySync = new Map();
+    rawLocalStash.forEach(it => localBySync.set(it.sync_id, it));
+
     const localDeletedRec = await CC.idbGet('meta', 'deleted_sync_ids');
     const localDeleted = Object.assign({}, localDeletedRec?.value || {});
     const localSpotify = (await CC.idbGet('meta', 'spotify_profile'))?.value || null;
     const localDiscogsIdx = (await CC.idbGet('meta', 'discogs_collection_index'))?.value || null;
+    const localDirtyBatch = (await CC.idbGet('meta', 'cloud_dirty_batch'))?.value || { modified: [], deleted: {} };
 
-    // 2. Download existing cratecheck_state.json if present
-    const stateFile = fileMap.get(GDRIVE_STATE_FILENAME) || null;
-    let remoteState = null;
-    if (stateFile?.id) {
-      report('☁️ Downloading cloud state...');
-      const res = await gdriveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(stateFile.id)}?alt=media`);
-      try { remoteState = await res.json(); } catch (_) { remoteState = null; }
-    }
-
-    // 3. Merge deleted_sync_ids tombstones
-    const mergedDeleted = Object.assign({}, localDeleted);
-    const remoteDeleted = remoteState?.deleted_sync_ids || {};
-    Object.entries(remoteDeleted).forEach(([sid, ts]) => {
-      const nTs = Number(ts) || 0;
-      if (!mergedDeleted[sid] || nTs > mergedDeleted[sid]) mergedDeleted[sid] = nTs;
-    });
-
-    // 4. Merge Stash items by sync_id
-    const localBySync = new Map();
-    rawLocalStash.forEach(it => localBySync.set(it.sync_id, it));
-    const remoteBySync = new Map();
-    (remoteState?.stash || []).forEach(it => {
-      if (it?.sync_id) remoteBySync.set(it.sync_id, it);
-    });
-
-    const allSyncIds = new Set([...localBySync.keys(), ...remoteBySync.keys()]);
-    const mergedItems = [];
-    const localIdsToDelete = [];
-
-    for (const sid of allSyncIds) {
-      const loc = localBySync.get(sid) || null;
-      const rem = remoteBySync.get(sid) || null;
-      const locTs = loc ? Number(loc.updated_at || loc.created_at || 0) : -1;
-      const remTs = rem ? Number(rem.updated_at || rem.created_at || 0) : -1;
-      const winner = locTs >= remTs ? { ...loc } : { ...rem };
-      if (loc?.id !== undefined) winner.id = loc.id;
-      else delete winner.id;
-
-      const winTs = Number(winner.updated_at || winner.created_at || 0);
-      const delTs = Number(mergedDeleted[sid] || 0);
-      if (delTs > winTs) {
-        if (loc?.id !== undefined) localIdsToDelete.push(loc.id);
-        continue;
-      }
-      if (delTs && winTs >= delTs) {
-        delete mergedDeleted[sid];
-      }
-      mergedItems.push(winner);
-    }
-
-    // 5. Incremental photo blob sync (upload missing data: URLs once, hydrate missing gdrive: refs)
     let uploadedPhotos = 0;
     let downloadedPhotos = 0;
     const downloadedCache = new Map();
@@ -1463,6 +1467,127 @@
       return { localVal: s, remoteVal: s };
     };
 
+    const dehydrateItemForRemote = async (item) => {
+      const remoteItem = { ...item };
+      delete remoteItem.id;
+      if (Array.isArray(item.thumbs)) {
+        const remThumbs = [];
+        for (const t of item.thumbs) {
+          const r = await processImageField(t);
+          if (r.remoteVal) remThumbs.push(r.remoteVal);
+        }
+        remoteItem.thumbs = remThumbs;
+      }
+      if (item.thumb_data_url) {
+        const r = await processImageField(item.thumb_data_url);
+        remoteItem.thumb_data_url = r.remoteVal || remoteItem.thumbs?.[0] || remoteItem.discogs_thumb || '';
+      }
+      if (item.spine_thumb_url) {
+        const r = await processImageField(item.spine_thumb_url);
+        remoteItem.spine_thumb_url = r.remoteVal;
+      }
+      return remoteItem;
+    };
+
+    // 2. Collision-safe delta write: upload our local dirty batch as a uniquely named delta file
+    //    BEFORE overwriting softspot_state.json so concurrent offline edits on another device can never erase ours.
+    let ownDeltaFileId = null;
+    const dirtyModIds = Array.isArray(localDirtyBatch.modified) ? localDirtyBatch.modified : [];
+    const dirtyDelMap = Object.assign({}, localDirtyBatch.deleted || {});
+    if (dirtyModIds.length > 0 || Object.keys(dirtyDelMap).length > 0) {
+      const deltaItems = [];
+      for (const sid of dirtyModIds) {
+        const loc = localBySync.get(sid);
+        if (loc) deltaItems.push(await dehydrateItemForRemote(loc));
+      }
+      if (deltaItems.length > 0 || Object.keys(dirtyDelMap).length > 0) {
+        report('☁️ Writing collision-safe sync delta...');
+        const deltaName = `delta_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.json`;
+        const deltaBlob = new Blob([JSON.stringify({
+          version: 10,
+          createdAt: Date.now(),
+          items: deltaItems,
+          deleted_sync_ids: dirtyDelMap
+        })], { type: 'application/json' });
+        const createdDelta = await uploadAppDataMultipart(deltaName, deltaBlob, 'application/json', null);
+        ownDeltaFileId = createdDelta?.id || null;
+      }
+    }
+
+    // 3. Download existing softspot_state.json (automatically falling back to legacy cratecheck_state.json)
+    const primaryStateFile = fileMap.get(GDRIVE_STATE_FILENAME) || null;
+    const legacyStateFile = !primaryStateFile ? (fileMap.get(GDRIVE_LEGACY_STATE_FILENAME) || null) : null;
+    const readStateFile = primaryStateFile || legacyStateFile;
+    let remoteState = null;
+    if (readStateFile?.id) {
+      report('☁️ Downloading cloud snapshot...');
+      const res = await gdriveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(readStateFile.id)}?alt=media`);
+      try { remoteState = await res.json(); } catch (_) { remoteState = null; }
+    }
+
+    // 4. Download & fold ALL pending delta_*.json files from appDataFolder into the remote state
+    const remoteBySync = new Map();
+    (remoteState?.stash || []).forEach(it => {
+      if (it?.sync_id) remoteBySync.set(it.sync_id, it);
+    });
+    const remoteDeleted = Object.assign({}, remoteState?.deleted_sync_ids || {});
+    const mergedDeltaFileIds = [];
+
+    for (const df of deltaFiles) {
+      if (!df?.id || df.id === ownDeltaFileId) continue;
+      try {
+        report(`☁️ Merging remote delta (${mergedDeltaFileIds.length + 1}/${deltaFiles.length})...`);
+        const dRes = await gdriveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(df.id)}?alt=media`);
+        const dJson = await dRes.json();
+        (dJson?.items || []).forEach(it => {
+          if (!it?.sync_id) return;
+          const prev = remoteBySync.get(it.sync_id);
+          const prevTs = prev ? Number(prev.updated_at || prev.created_at || 0) : -1;
+          const nextTs = Number(it.updated_at || it.created_at || 0);
+          if (!prev || nextTs >= prevTs) remoteBySync.set(it.sync_id, it);
+        });
+        Object.entries(dJson?.deleted_sync_ids || {}).forEach(([sid, ts]) => {
+          const nTs = Number(ts) || 0;
+          if (!remoteDeleted[sid] || nTs > remoteDeleted[sid]) remoteDeleted[sid] = nTs;
+        });
+        mergedDeltaFileIds.push(df.id);
+      } catch (_) {}
+    }
+
+    // 5. Merge deleted_sync_ids tombstones
+    const mergedDeleted = Object.assign({}, localDeleted);
+    Object.entries(remoteDeleted).forEach(([sid, ts]) => {
+      const nTs = Number(ts) || 0;
+      if (!mergedDeleted[sid] || nTs > mergedDeleted[sid]) mergedDeleted[sid] = nTs;
+    });
+
+    // 6. Two-way merge Stash items by sync_id
+    const allSyncIds = new Set([...localBySync.keys(), ...remoteBySync.keys()]);
+    const mergedItems = [];
+    const localIdsToDelete = [];
+
+    for (const sid of allSyncIds) {
+      const loc = localBySync.get(sid) || null;
+      const rem = remoteBySync.get(sid) || null;
+      const locTs = loc ? Number(loc.updated_at || loc.created_at || 0) : -1;
+      const remTs = rem ? Number(rem.updated_at || rem.created_at || 0) : -1;
+      const winner = locTs >= remTs ? { ...loc } : { ...rem };
+      if (loc?.id !== undefined) winner.id = loc.id;
+      else delete winner.id;
+
+      const winTs = Number(winner.updated_at || winner.created_at || 0);
+      const delTs = Number(mergedDeleted[sid] || 0);
+      if (delTs > winTs) {
+        if (loc?.id !== undefined) localIdsToDelete.push(loc.id);
+        continue;
+      }
+      if (delTs && winTs >= delTs) {
+        delete mergedDeleted[sid];
+      }
+      mergedItems.push(winner);
+    }
+
+    // 7. Hydrate local items & build lightweight remote items (gdrive:img_<hash>.webp refs)
     const hydratedForLocal = [];
     const lightweightForRemote = [];
 
@@ -1499,7 +1624,7 @@
       lightweightForRemote.push(remoteItem);
     }
 
-    // 6. Merge spotifyProfile & discogsCollectionIndex by latest timestamp
+    // 8. Merge spotifyProfile & discogsCollectionIndex by latest timestamp
     const spTime = (p) => p ? Math.max(Number(p.syncedAt || 0), Number(p.dnaUpdatedAt || 0)) : 0;
     const remSpotify = remoteState?.spotifyProfile || null;
     let mergedSpotify = spTime(remSpotify) > spTime(localSpotify) ? remSpotify : localSpotify;
@@ -1522,7 +1647,7 @@
       ? remDiscogsIdx
       : localDiscogsIdx;
 
-    // 7. Merge preferences & optional secrets (NEVER sync spotifyRefreshToken/AccessToken/preferredCameraId)
+    // 9. Merge preferences & optional secrets (NEVER sync spotifyRefreshToken/AccessToken/preferredCameraId)
     const PREF_KEYS = [
       'geminiModel', 'autoPlayHighlight', 'autoDetective', 'autoGradeOnScan',
       'homeCountry', 'fetchVgSuggestions', 'threshold', 'voice',
@@ -1561,7 +1686,7 @@
       SECRET_KEYS.forEach(k => { outSecrets[k] = CC.cfg[k]; });
     }
 
-    // 8. Persist merged state back to local IndexedDB
+    // 10. Persist merged state back to local IndexedDB
     report('☁️ Updating local Stash...');
     for (const delId of localIdsToDelete) {
       await CC.idbDelete('stash', delId);
@@ -1573,8 +1698,8 @@
     if (mergedSpotify) await CC.idbPut('meta', { key: 'spotify_profile', value: mergedSpotify });
     if (mergedDiscogsIdx) await CC.idbPut('meta', { key: 'discogs_collection_index', value: mergedDiscogsIdx });
 
-    // 9. Upload lightweight cratecheck_state.json to appDataFolder
-    report('☁️ Saving merged state to Google Drive...');
+    // 11. Upload compacted softspot_state.json to appDataFolder (PATCH if exists, else POST)
+    report('☁️ Saving compacted snapshot to Google Drive...');
     const payload = {
       version: 10,
       syncedAt: Date.now(),
@@ -1586,7 +1711,16 @@
       secrets: outSecrets
     };
     const jsonBlob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
-    await uploadAppDataMultipart(GDRIVE_STATE_FILENAME, jsonBlob, 'application/json', stateFile?.id || null);
+    await uploadAppDataMultipart(GDRIVE_STATE_FILENAME, jsonBlob, 'application/json', primaryStateFile?.id || null);
+
+    // 12. Clean up merged delta files + reset dirty counter
+    const toClean = [...mergedDeltaFileIds];
+    if (ownDeltaFileId) toClean.push(ownDeltaFileId);
+    for (const fid of toClean) {
+      await deleteAppDataFileSafe(fid);
+    }
+    await CC.idbPut('meta', { key: 'cloud_dirty_batch', value: { modified: [], deleted: {} } });
+    CC.setPendingCloudChanges(0);
 
     CC.cfg.googleLastSyncAt = Date.now();
     CC.persistCfg();
@@ -1596,6 +1730,7 @@
       uploadedPhotos,
       downloadedPhotos,
       deletedCount: localIdsToDelete.length,
+      mergedDeltas: mergedDeltaFileIds.length,
       spotifyProfile: mergedSpotify,
       discogsCollectionIndex: mergedDiscogsIdx
     };

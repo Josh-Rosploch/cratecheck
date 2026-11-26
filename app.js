@@ -6,7 +6,7 @@
   // Dynamic PWA Manifest
   (function injectManifest() {
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192"><rect width="192" height="192" fill="#121212"/><rect x="26" y="48" width="140" height="96" fill="#f3f3f3"/><circle cx="68" cy="96" r="18" fill="#0a0a0a"/><circle cx="124" cy="96" r="18" fill="#0a0a0a"/><rect x="64" y="122" width="64" height="14" fill="#0a0a0a"/></svg>`;
-    const m = { name: 'CrateCheck Media Scanner', short_name: 'CrateCheck', start_url: CC.REDIRECT_URI, display: 'standalone', background_color: '#0a0a0a', theme_color: '#0a0a0a', icons: [{ src: 'data:image/svg+xml;base64,' + btoa(svg), sizes: '192x192', type: 'image/svg+xml' }] };
+    const m = { name: 'Soft Spot — Media Scanner', short_name: 'Soft Spot', start_url: CC.REDIRECT_URI, display: 'standalone', background_color: '#0a0a0a', theme_color: '#0a0a0a', icons: [{ src: 'data:image/svg+xml;base64,' + btoa(svg), sizes: '192x192', type: 'image/svg+xml' }] };
     const link = document.createElement('link');
     link.rel = 'manifest';
     link.href = URL.createObjectURL(new Blob([JSON.stringify(m)], { type: 'application/json' }));
@@ -3598,7 +3598,7 @@ Return ONLY valid JSON:
       return;
     }
 
-    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v200`;
+    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v201`;
     if (tasteCache.has(cacheKey)) { applyTasteUI(item, tasteCache.get(cacheKey), myRunId); return; }
 
     const tracksStr = (item.tracklist || []).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title).join('; ');
@@ -3741,7 +3741,7 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
       document.getElementById('cfgTasteDna').value = finalDna;
       updateSpotifyUI();
       setStatus('', false);
-      scheduleGoogleAutoSync();
+      await markCloudChangeAndAutoSync();
       toast(`🧠 Taste Profile drafted from ${spotifyProfile.totalArtists} artists & ${spotifyProfile.totalTracks} tracks!`, 4200);
     } catch (err) {
       setStatus('', false);
@@ -3761,7 +3761,7 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
     await CC.idbPut('meta', { key: 'spotify_profile', value: spotifyProfile });
     tasteCache.clear();
     updateSpotifyUI();
-    scheduleGoogleAutoSync();
+    await markCloudChangeAndAutoSync();
     if (!silent) toast('Taste Profile & Soft Spots saved!');
   };
 
@@ -5115,7 +5115,7 @@ Return ONLY valid JSON:
 
       await loadStashCache();
       setStatus('', false);
-      scheduleGoogleAutoSync();
+      await markCloudChangeAndAutoSync(record.sync_id, false);
 
       if (oldDeleteWarning) {
         toast(`⚠️ ${oldDeleteWarning}`, 6000);
@@ -5437,13 +5437,13 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
       it.taste_scored_at = Date.now();
       it.updated_at = Date.now();
 
-      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v200`);
+      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v201`);
       await CC.idbPut('stash', it);
       await loadStashCache();
       renderStash();
       setStatus('', false);
       rescoringStashItemId = null;
-      scheduleGoogleAutoSync();
+      await markCloudChangeAndAutoSync(it.sync_id, false);
       if (activeStashItem?.id === id) openStashDetail(id, true);
       toast(`✅ Re-scored: ${it.taste_score}/10 (${it.taste_verdict})`, 3200);
     } catch (err) {
@@ -5552,6 +5552,7 @@ Return ONLY valid JSON:
           it.taste_scored_at = now;
           it.updated_at = now;
           await CC.idbPut('stash', it);
+          if (it.sync_id) await CC.recordLocalCloudChange(it.sync_id, false);
           updatedTotal++;
         }
 
@@ -5562,6 +5563,7 @@ Return ONLY valid JSON:
       tasteCache.clear();
       setStatus('', false);
       if (updatedTotal > 0) {
+        updateCloudUI();
         scheduleGoogleAutoSync();
         toast(`✅ Recalibrated ${updatedTotal} Stash item(s)!`, 3600);
       }
@@ -5830,7 +5832,7 @@ Return ONLY valid JSON:
     await CC.idbPut('stash', it);
     await loadStashCache();
     renderStash();
-    scheduleGoogleAutoSync();
+    await markCloudChangeAndAutoSync(it.sync_id, false);
     if (activeStashItem?.id === id) openStashDetail(id, true);
   };
 
@@ -5895,7 +5897,7 @@ Return ONLY valid JSON:
       await loadStashCache();
       renderStash();
       setStatus('', false);
-      scheduleGoogleAutoSync();
+      await markCloudChangeAndAutoSync(it.sync_id, false);
       if (activeStashItem?.id === id) openStashDetail(id, true);
 
       if (oldWarn) {
@@ -5926,7 +5928,7 @@ Return ONLY valid JSON:
     closeStashDetail();
     await loadStashCache();
     renderStash();
-    scheduleGoogleAutoSync();
+    await markCloudChangeAndAutoSync(it?.sync_id || null, true);
     toast('Deleted');
   };
 
@@ -5942,11 +5944,11 @@ Return ONLY valid JSON:
     if (!stashCache.length) { toast('Nothing to export'); return; }
     const cols = ['artist', 'title', 'format', 'country', 'catno', 'label', 'year', 'media_condition', 'sleeve_condition', 'condition_note', 'est_price', 'est_currency', 'lowest_price', 'num_for_sale', 'have', 'want', 'is_high_value', 'is_scarce', 'taste_score', 'taste_verdict', 'synced_to_discogs', 'discogs_url'];
     const c = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    dl([cols.join(','), ...stashCache.map(it => cols.map(k => c(it[k])).join(','))].join('\n'), `cratecheck-stash-${new Date().toISOString().slice(0, 10)}.csv`, 'text/csv');
+    dl([cols.join(','), ...stashCache.map(it => cols.map(k => c(it[k])).join(','))].join('\n'), `softspot-stash-${new Date().toISOString().slice(0, 10)}.csv`, 'text/csv');
   };
 
   window.exportJSON = () => {
-    dl(JSON.stringify({ version: 10, exportedAt: new Date().toISOString(), stash: stashCache, spotifyProfile }), `cratecheck-backup-${new Date().toISOString().slice(0, 10)}.json`, 'application/json');
+    dl(JSON.stringify({ version: 10, exportedAt: new Date().toISOString(), stash: stashCache, spotifyProfile }), `softspot-backup-${new Date().toISOString().slice(0, 10)}.json`, 'application/json');
     toast('JSON backup downloaded');
   };
 
@@ -5985,6 +5987,7 @@ Return ONLY valid JSON:
 
     const signedIn = CC.isGoogleSignedIn();
     const hasClient = Boolean(CC.getGoogleClientId());
+    const pending = CC.getPendingCloudChanges();
     const lastStr = cfg.googleLastSyncAt ? new Date(cfg.googleLastSyncAt).toLocaleString() : 'Never';
 
     if (customLabel) {
@@ -5994,29 +5997,51 @@ Return ONLY valid JSON:
     }
 
     if (signedIn) {
-      if (hPill) { hPill.textContent = '☁️ Synced'; hPill.className = 'pill ok'; }
-      if (aPill) { aPill.textContent = 'Synced'; aPill.className = 'pill ok'; }
-      if (sum) sum.textContent = `✅ Signed in${cfg.googleEmail ? ` as ${cfg.googleEmail}` : ''} · Last synced: ${lastStr}`;
+      if (hPill) {
+        hPill.textContent = pending > 0 ? `☁️ Sync (${pending})` : '☁️ Synced';
+        hPill.className = pending > 0 ? 'pill warn' : 'pill ok';
+      }
+      if (aPill) {
+        aPill.textContent = pending > 0 ? `${pending} pending` : 'Synced';
+        aPill.className = pending > 0 ? 'pill warn' : 'pill ok';
+      }
+      if (sum) {
+        sum.textContent = pending > 0
+          ? `✅ Signed in${cfg.googleEmail ? ` as ${cfg.googleEmail}` : ''} · ${pending} change(s) pending · Last synced: ${lastStr}`
+          : `✅ Signed in${cfg.googleEmail ? ` as ${cfg.googleEmail}` : ''} · Last synced: ${lastStr}`;
+      }
       if (btnIn) btnIn.classList.add('hidden');
       if (btnSync) btnSync.classList.remove('hidden');
       if (btnOut) btnOut.classList.remove('hidden');
     } else if (hasClient) {
-      if (hPill) { hPill.textContent = '☁️ Sign In'; hPill.className = 'pill warn'; }
-      if (aPill) { aPill.textContent = 'Sign In'; aPill.className = 'pill warn'; }
-      if (sum) sum.textContent = cfg.googleLastSyncAt
-        ? `Session idle · Last synced: ${lastStr}. Tap Sign in with Google & Sync to reconnect.`
-        : 'Client ID configured — tap Sign in with Google & Sync to sync across phone and PC.';
+      if (pending > 0) {
+        if (hPill) { hPill.textContent = `☁️ Reconnect (${pending})`; hPill.className = 'pill warn'; }
+        if (aPill) { aPill.textContent = `Reconnect (${pending})`; aPill.className = 'pill warn'; }
+        if (sum) sum.textContent = `Saved on this device · ${pending} change(s) waiting — tap Sign in to sync${cfg.googleLastSyncAt ? ` (Last synced: ${lastStr})` : ''}.`;
+      } else {
+        if (hPill) { hPill.textContent = '☁️ Sign In'; hPill.className = 'pill warn'; }
+        if (aPill) { aPill.textContent = 'Sign In'; aPill.className = 'pill warn'; }
+        if (sum) sum.textContent = cfg.googleLastSyncAt
+          ? `Session idle${cfg.googleEmail ? ` (${cfg.googleEmail})` : ''} · Last synced: ${lastStr}. Tap Sign in with Google & Sync to reconnect.`
+          : 'Ready — tap Sign in with Google & Sync to back up and sync across phone and PC.';
+      }
       if (btnIn) btnIn.classList.remove('hidden');
       if (btnSync) btnSync.classList.add('hidden');
       if (btnOut) btnOut.classList.add('hidden');
     } else {
       if (hPill) { hPill.textContent = 'Cloud: Off'; hPill.className = 'pill'; }
       if (aPill) { aPill.textContent = 'Off'; aPill.className = 'pill'; }
-      if (sum) sum.textContent = 'Not signed in. Paste your Google OAuth Client ID above to sync across phone and PC.';
+      if (sum) sum.textContent = 'Not signed in. Open Advanced below to add a Google OAuth Client ID.';
       if (btnIn) btnIn.classList.remove('hidden');
       if (btnSync) btnSync.classList.add('hidden');
       if (btnOut) btnOut.classList.add('hidden');
     }
+  }
+
+  async function markCloudChangeAndAutoSync(syncId = null, isDelete = false) {
+    await CC.recordLocalCloudChange(syncId, isDelete);
+    updateCloudUI();
+    scheduleGoogleAutoSync();
   }
 
   function applySyncedSettingsToUI() {
@@ -6171,7 +6196,7 @@ Return ONLY valid JSON:
   window.saveSettings = (silent = false) => {
     cfg.googleClientId = (document.getElementById('cfgGoogleClientId')?.value || '').trim();
     cfg.googleAutoSync = document.getElementById('cfgGoogleAutoSync')?.checked !== false;
-    cfg.googleSyncSecrets = document.getElementById('cfgGoogleSyncSecrets')?.checked !== false;
+    cfg.googleSyncSecrets = Boolean(document.getElementById('cfgGoogleSyncSecrets')?.checked);
     cfg.geminiKey = document.getElementById('cfgGeminiKey').value.trim();
     cfg.geminiModel = document.getElementById('cfgGeminiModel').value;
     cfg.autoPlayHighlight = document.getElementById('cfgAutoPlay').checked;
@@ -6283,7 +6308,7 @@ Return ONLY valid JSON:
       document.getElementById('cfgSoftSpots').value = spotifyProfile.softSpots || '';
       updateSpotifyUI();
       setStatus('', false);
-      scheduleGoogleAutoSync();
+      await markCloudChangeAndAutoSync();
       toast(`🎧 Synced ${spotifyProfile.totalTracks} tracks & ${spotifyProfile.totalArtists} artists locally for instant matching!`, 4500);
     } catch (err) {
       setStatus('', false);
@@ -6390,7 +6415,7 @@ Return ONLY valid JSON:
     document.getElementById('googleOriginText').textContent = location.origin;
     document.getElementById('cfgGoogleClientId').value = cfg.googleClientId || '';
     document.getElementById('cfgGoogleAutoSync').checked = cfg.googleAutoSync !== false;
-    document.getElementById('cfgGoogleSyncSecrets').checked = cfg.googleSyncSecrets !== false;
+    document.getElementById('cfgGoogleSyncSecrets').checked = Boolean(cfg.googleSyncSecrets);
     document.getElementById('cfgGeminiKey').value = cfg.geminiKey || '';
     document.getElementById('cfgGeminiModel').value = cfg.geminiModel || 'gemini-3.5-flash-lite';
     document.getElementById('cfgAutoPlay').checked = cfg.autoPlayHighlight !== false;
