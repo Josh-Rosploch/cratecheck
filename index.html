@@ -7,13 +7,13 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>Soft Spot — Physical Media Scanner</title>
-  <link rel="stylesheet" href="style.css?v=2.1" />
+  <link rel="stylesheet" href="style.css?v=2.1.1" />
   <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
 <header>
-  <div class="brand">📼 Soft Spot <span class="ver-tag">v2.1</span></div>
+  <div class="brand">📼 Soft Spot <span class="ver-tag">v2.1.1</span></div>
   <div class="status-pills">
     <span id="cloudPill" class="pill" title="Google Drive Cloud Sync" onclick="handleCloudPillClick()">Cloud: Off</span>
     <span id="aiPill" class="pill" title="Gemini Cloud AI status" onclick="switchView('settings')">Gemini: Off</span>
@@ -864,16 +864,34 @@
   </div>
 </div>
 
-<!-- Open-In Music Platform Popup Menu -->
-<div id="openInMenu" class="open-in-menu hidden"></div>
+<!-- Interactive Monochrome Crop & 90° Rotate Modal -->
+<div id="cropModal" class="crop-overlay hidden">
+  <div class="crop-top">
+    <span id="cropTitle" style="font-weight:800; font-size:0.9rem;">✂️ Crop &amp; Rotate</span>
+    <div class="inline-actions" style="gap:6px;">
+      <button type="button" class="btn btn-secondary btn-sm" onclick="rotateCropImage90()">↻ Rotate 90°</button>
+      <button type="button" class="btn btn-secondary btn-sm" onclick="resetCropRect()">Reset</button>
+      <button type="button" class="btn btn-secondary btn-sm" onclick="closeCropModal()">Cancel</button>
+    </div>
+  </div>
+  <div id="cropStage" class="crop-stage">
+    <canvas id="cropCanvas" class="crop-canvas"></canvas>
+  </div>
+  <div class="crop-bottom">
+    <span id="cropHint" style="font-size:0.75rem; color:var(--muted);">Drag inside to move · Drag corners to resize</span>
+    <button id="btnApplyCrop" type="button" class="btn btn-green btn-sm" onclick="applyCropModal()">✂️ Apply Crop</button>
+  </div>
+</div>
 
 <!-- Global Floating Live Status / Auto-Retry + Cancel Banner -->
 <div id="globalStatusBanner" class="global-status-banner" role="status" aria-live="polite"></div>
 
 <!-- Floating 30s Audio Mini-Player -->
 <div id="audioBar" class="audio-bar hidden">
-  <div id="audioArt" class="audio-art">📼</div>
-  <button id="audioPlayBtn" class="audio-play-btn" onclick="toggleHighlightAudio()">▶</button>
+  <div class="audio-art-btn-wrap">
+    <div id="audioArt" class="audio-art">📼</div>
+    <button id="audioPlayBtn" class="audio-play-btn" onclick="toggleHighlightAudio()" title="Play / Pause">▶</button>
+  </div>
   <div class="audio-meta" onclick="handleAudioMetaClick()">
     <div id="audioMarqueeWrap" class="marquee-wrap">
       <span id="audioTitle" class="audio-title">Loading 30s highlight...</span>
@@ -882,6 +900,8 @@
   </div>
   <button id="audioOpenInBtn" type="button" class="audio-menu-btn" onclick="toggleOpenInMenu()" title="Open song in music app">▲</button>
   <button type="button" class="audio-close-btn" onclick="stopHighlightAudio()" title="Stop &amp; Close">✕</button>
+  <!-- Open-In Music Platform Popup Menu anchored directly above ▲ -->
+  <div id="openInMenu" class="open-in-menu hidden"></div>
 </div>
 <audio id="previewAudio" preload="none" playsinline></audio>
 
@@ -894,7 +914,7 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="apis.js?v=2.1"></script>
-<script src="app.js?v=2.1"></script>
+<script src="apis.js?v=2.1.1"></script>
+<script src="app.js?v=2.1.1"></script>
 </body>
 </html>

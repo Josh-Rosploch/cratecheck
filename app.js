@@ -36,6 +36,7 @@
   let activeDiscogsFolderFilter = null;
   let activeStashView = 'list';
   const hydratingStashIds = new Set();
+  const autoHydrateAttemptedIds = new Set();
   let googleSyncInFlight = false;
   let googleAutoSyncTimer = null;
   let cloudFollowupNeeded = false;
@@ -140,11 +141,17 @@
     if (!el) return;
     if (!show) { el.classList.remove('show', 'is-cancellable'); return; }
     el.classList.toggle('is-cancellable', Boolean(cancellable));
-    el.innerHTML = `
-      <div class="spinner"></div>
-      <div style="flex:1; font-size:0.84rem;">${esc(text)}</div>
-      ${cancellable ? `<button type="button" class="btn btn-danger btn-sm" style="min-height:32px; padding:4px 10px;" onclick="cancelActiveAI()">✕ Cancel</button>` : ''}
-    `;
+    if (!el.querySelector('.banner-text')) {
+      el.innerHTML = `
+        <div class="spinner"></div>
+        <div class="banner-text" style="flex:1; font-size:0.84rem;"></div>
+        <button type="button" class="btn btn-danger btn-sm banner-cancel hidden" style="min-height:32px; padding:4px 10px;" onclick="cancelActiveAI()">✕ Cancel</button>
+      `;
+    }
+    const textEl = el.querySelector('.banner-text');
+    const cancelBtn = el.querySelector('.banner-cancel');
+    if (textEl) textEl.textContent = text;
+    if (cancelBtn) cancelBtn.classList.toggle('hidden', !cancellable);
     el.classList.add('show');
   }
 
@@ -361,6 +368,12 @@
     document.getElementById('lbImg').classList.remove('zoomed');
   }
 
+  function hideCropModalUI() {
+    document.getElementById('cropModal')?.classList.add('hidden');
+    cropState.active = false;
+    cropState.onApply = null;
+  }
+
   window.closeOpenInMenu = () => {
     document.getElementById('openInMenu').classList.add('hidden');
     document.getElementById('audioOpenInBtn').classList.remove('open');
@@ -373,6 +386,7 @@
     hidePileFsUI();
     hideCameraUI();
     hideLightboxUI();
+    hideCropModalUI();
     closeOpenInMenu();
 
     if (!fromPop) {
@@ -399,6 +413,7 @@
   window.addEventListener('popstate', (e) => {
     const st = e.state || { view: 'scan', modal: null };
     if (st.modal !== 'lightbox') hideLightboxUI();
+    if (st.modal !== 'crop') hideCropModalUI();
     if (st.modal !== 'camera') hideCameraUI();
     if (st.modal !== 'manual') hideManualModalUI();
     if (st.modal !== 'pileFs') hidePileFsUI();
@@ -504,6 +519,285 @@
     const dx = (e.changedTouches?.[0]?.clientX || 0) - lbTouchX;
     if (Math.abs(dx) > 55) stepLightbox(dx < 0 ? 1 : -1);
   }, { passive: true });
+
+  // ==================== INTERACTIVE MONOCHROME CROP & 90° ROTATE MODAL ====================
+  const cropState = {
+    active: false,
+    mode: 'cover', // 'cover' | 'spine'
+    srcCanvas: null,
+    rect: { x: 0.04, y: 0.04, w: 0.92, h: 0.92 },
+    dragMode: null, // 'move' | 'nw' | 'ne' | 'sw' | 'se'
+    dragStartX: 0,
+    dragStartY: 0,
+    dragStartRect: null,
+    displayW: 1,
+    displayH: 1,
+    onApply: null
+  };
+
+  function defaultCropRectForMode(mode) {
+    if (mode === 'spine') return { x: 0.04, y: 0.28, w: 0.92, h: 0.44 };
+    return { x: 0.04, y: 0.04, w: 0.92, h: 0.92 };
+  }
+
+  function renderCropCanvas() {
+    if (!cropState.active || !cropState.srcCanvas) return;
+    const stage = document.getElementById('cropStage');
+    const canvas = document.getElementById('cropCanvas');
+    if (!stage || !canvas) return;
+
+    const src = cropState.srcCanvas;
+    const sw = src.width || 1;
+    const sh = src.height || 1;
+    const maxW = Math.max(180, stage.clientWidth - 24);
+    const maxH = Math.max(180, stage.clientHeight - 24);
+    const scale = Math.min(maxW / sw, maxH / sh);
+    const dispW = Math.max(1, Math.round(sw * scale));
+    const dispH = Math.max(1, Math.round(sh * scale));
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    cropState.displayW = dispW;
+    cropState.displayH = dispH;
+    canvas.style.width = `${dispW}px`;
+    canvas.style.height = `${dispH}px`;
+    canvas.width = Math.round(dispW * dpr);
+    canvas.height = Math.round(dispH * dpr);
+
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.clearRect(0, 0, dispW, dispH);
+    ctx.drawImage(src, 0, 0, dispW, dispH);
+
+    const r = cropState.rect;
+    const rx = r.x * dispW;
+    const ry = r.y * dispH;
+    const rw = r.w * dispW;
+    const rh = r.h * dispH;
+
+    // Dark scrim outside selection
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.68)';
+    ctx.fillRect(0, 0, dispW, ry);
+    ctx.fillRect(0, ry + rh, dispW, dispH - (ry + rh));
+    ctx.fillRect(0, ry, rx, rh);
+    ctx.fillRect(rx + rw, ry, dispW - (rx + rw), rh);
+
+    // Subtle rule-of-thirds guides
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(rx + rw / 3, ry); ctx.lineTo(rx + rw / 3, ry + rh);
+    ctx.moveTo(rx + (2 * rw) / 3, ry); ctx.lineTo(rx + (2 * rw) / 3, ry + rh);
+    ctx.moveTo(rx, ry + rh / 3); ctx.lineTo(rx + rw, ry + rh / 3);
+    ctx.moveTo(rx, ry + (2 * rh) / 3); ctx.lineTo(rx + rw, ry + (2 * rh) / 3);
+    ctx.stroke();
+
+    // Crisp 0px selection box
+    ctx.strokeStyle = '#f3f3f3';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(rx + 1, ry + 1, Math.max(1, rw - 2), Math.max(1, rh - 2));
+
+    // Sharp square corner handles
+    const hs = 14;
+    const corners = [
+      [rx, ry],
+      [rx + rw - hs, ry],
+      [rx, ry + rh - hs],
+      [rx + rw - hs, ry + rh - hs]
+    ];
+    corners.forEach(([cx, cy]) => {
+      ctx.fillStyle = '#38bdf8';
+      ctx.fillRect(cx, cy, hs, hs);
+      ctx.fillStyle = '#0a0a0a';
+      ctx.fillRect(cx + 4, cy + 4, hs - 8, hs - 8);
+    });
+  }
+
+  function initCropPointerEvents() {
+    const canvas = document.getElementById('cropCanvas');
+    if (!canvas || canvas._cropBound) return;
+    canvas._cropBound = true;
+
+    const getLocalPt = (e) => {
+      const b = canvas.getBoundingClientRect();
+      return {
+        x: Math.max(0, Math.min(b.width, e.clientX - b.left)),
+        y: Math.max(0, Math.min(b.height, e.clientY - b.top)),
+        w: Math.max(1, b.width),
+        h: Math.max(1, b.height)
+      };
+    };
+
+    canvas.addEventListener('pointerdown', (e) => {
+      if (!cropState.active) return;
+      e.preventDefault();
+      canvas.setPointerCapture(e.pointerId);
+      const pt = getLocalPt(e);
+      const r = cropState.rect;
+      const rx = r.x * pt.w, ry = r.y * pt.h, rw = r.w * pt.w, rh = r.h * pt.h;
+      const hit = 28;
+
+      if (Math.hypot(pt.x - rx, pt.y - ry) <= hit) cropState.dragMode = 'nw';
+      else if (Math.hypot(pt.x - (rx + rw), pt.y - ry) <= hit) cropState.dragMode = 'ne';
+      else if (Math.hypot(pt.x - rx, pt.y - (ry + rh)) <= hit) cropState.dragMode = 'sw';
+      else if (Math.hypot(pt.x - (rx + rw), pt.y - (ry + rh)) <= hit) cropState.dragMode = 'se';
+      else if (pt.x >= rx && pt.x <= rx + rw && pt.y >= ry && pt.y <= ry + rh) cropState.dragMode = 'move';
+      else cropState.dragMode = null;
+
+      cropState.dragStartX = pt.x / pt.w;
+      cropState.dragStartY = pt.y / pt.h;
+      cropState.dragStartRect = { ...r };
+    });
+
+    canvas.addEventListener('pointermove', (e) => {
+      if (!cropState.active || !cropState.dragMode || !cropState.dragStartRect) return;
+      e.preventDefault();
+      const pt = getLocalPt(e);
+      const nx = pt.x / pt.w;
+      const ny = pt.y / pt.h;
+      const dx = nx - cropState.dragStartX;
+      const dy = ny - cropState.dragStartY;
+      const s = cropState.dragStartRect;
+      const minSize = 0.08;
+      let { x, y, w, h } = s;
+
+      if (cropState.dragMode === 'move') {
+        x = Math.max(0, Math.min(1 - w, s.x + dx));
+        y = Math.max(0, Math.min(1 - h, s.y + dy));
+      } else if (cropState.dragMode === 'nw') {
+        const right = s.x + s.w;
+        const bottom = s.y + s.h;
+        x = Math.max(0, Math.min(right - minSize, s.x + dx));
+        y = Math.max(0, Math.min(bottom - minSize, s.y + dy));
+        w = right - x;
+        h = bottom - y;
+      } else if (cropState.dragMode === 'ne') {
+        const bottom = s.y + s.h;
+        const right = Math.min(1, Math.max(s.x + minSize, s.x + s.w + dx));
+        y = Math.max(0, Math.min(bottom - minSize, s.y + dy));
+        w = right - x;
+        h = bottom - y;
+      } else if (cropState.dragMode === 'sw') {
+        const right = s.x + s.w;
+        x = Math.max(0, Math.min(right - minSize, s.x + dx));
+        const bottom = Math.min(1, Math.max(s.y + minSize, s.y + s.h + dy));
+        w = right - x;
+        h = bottom - y;
+      } else if (cropState.dragMode === 'se') {
+        const right = Math.min(1, Math.max(s.x + minSize, s.x + s.w + dx));
+        const bottom = Math.min(1, Math.max(s.y + minSize, s.y + s.h + dy));
+        w = right - x;
+        h = bottom - y;
+      }
+      cropState.rect = { x, y, w, h };
+      renderCropCanvas();
+    });
+
+    const endDrag = () => { cropState.dragMode = null; cropState.dragStartRect = null; };
+    canvas.addEventListener('pointerup', endDrag);
+    canvas.addEventListener('pointercancel', endDrag);
+    window.addEventListener('resize', () => { if (cropState.active) renderCropCanvas(); });
+  }
+
+  function openCropModal({ dataUrl, title = '✂️ Crop & Rotate', mode = 'cover', onApply }) {
+    if (!dataUrl) return;
+    initCropPointerEvents();
+    const img = new Image();
+    img.onload = () => {
+      const nw = img.naturalWidth || img.width;
+      const nh = img.naturalHeight || img.height;
+      if (!nw || !nh) { toast('Could not load photo for cropping'); return; }
+      const { width, height } = fitDims(nw, nh, 1800);
+      const c = document.createElement('canvas');
+      c.width = width;
+      c.height = height;
+      const ctx = c.getContext('2d');
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, 0, 0, width, height);
+
+      cropState.active = true;
+      cropState.mode = mode === 'spine' ? 'spine' : 'cover';
+      cropState.srcCanvas = c;
+      cropState.rect = defaultCropRectForMode(cropState.mode);
+      cropState.dragMode = null;
+      cropState.onApply = onApply || null;
+
+      document.getElementById('cropTitle').textContent = title;
+      document.getElementById('cropHint').textContent = cropState.mode === 'spine'
+        ? 'Frame the spine tightly · Tap ↻ Rotate 90° until upright'
+        : 'Drag inside to move · Drag corners to resize';
+      document.getElementById('cropModal').classList.remove('hidden');
+      try { history.pushState({ view: currentView, modal: 'crop', itemId: activeStashItem?.id || null }, ''); } catch (_) {}
+      requestAnimationFrame(() => renderCropCanvas());
+    };
+    img.onerror = () => toast('Could not decode photo for cropping');
+    img.src = dataUrl;
+  }
+
+  window.rotateCropImage90 = () => {
+    if (!cropState.active || !cropState.srcCanvas) return;
+    const prev = cropState.srcCanvas;
+    const next = document.createElement('canvas');
+    next.width = prev.height;
+    next.height = prev.width;
+    const ctx = next.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.translate(next.width / 2, next.height / 2);
+    ctx.rotate(Math.PI / 2);
+    ctx.drawImage(prev, -prev.width / 2, -prev.height / 2);
+    cropState.srcCanvas = next;
+    cropState.rect = defaultCropRectForMode(cropState.mode);
+    renderCropCanvas();
+  };
+
+  window.resetCropRect = () => {
+    if (!cropState.active) return;
+    cropState.rect = defaultCropRectForMode(cropState.mode);
+    renderCropCanvas();
+  };
+
+  window.closeCropModal = () => {
+    hideCropModalUI();
+    if (history.state?.modal === 'crop') {
+      try { history.back(); } catch (_) {}
+    }
+  };
+
+  window.applyCropModal = async () => {
+    if (!cropState.active || !cropState.srcCanvas) return;
+    const src = cropState.srcCanvas;
+    const r = cropState.rect;
+    const sx = Math.max(0, Math.round(r.x * src.width));
+    const sy = Math.max(0, Math.round(r.y * src.height));
+    const sw = Math.max(16, Math.min(src.width - sx, Math.round(r.w * src.width)));
+    const sh = Math.max(16, Math.min(src.height - sy, Math.round(r.h * src.height)));
+
+    const maxEdge = cropState.mode === 'spine' ? 960 : 1200;
+    const { width: dstW, height: dstH } = cropState.mode === 'spine'
+      ? (sw > maxEdge ? { width: maxEdge, height: Math.max(1, Math.round(sh * (maxEdge / sw))) } : { width: sw, height: sh })
+      : fitDims(sw, sh, maxEdge);
+
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = dstW;
+    outCanvas.height = dstH;
+    const ctx = outCanvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(src, sx, sy, sw, sh, 0, 0, dstW, dstH);
+
+    const croppedWebp = canvasToDataUrl(outCanvas, 'image/webp', 0.82);
+    const workingSourceWebp = canvasToDataUrl(src, 'image/webp', 0.82);
+    const cb = cropState.onApply;
+
+    hideCropModalUI();
+    if (history.state?.modal === 'crop') {
+      try { history.replaceState({ view: currentView, modal: activeStashItem ? 'stashDetail' : null, itemId: activeStashItem?.id || null }, ''); } catch (_) {}
+    }
+    if (typeof cb === 'function') await cb(croppedWebp, workingSourceWebp);
+  };
 
   // ==================== HIGH-RES MEMORY-SAFE IMAGE DECODING ====================
   function describeBlob(blob) {
@@ -1413,12 +1707,12 @@
     updateStageUI();
   };
 
-  window.flipStagedSpine180 = async (ev) => {
+  window.rotateStagedSpine90 = async (ev) => {
     if (ev) ev.stopPropagation();
     const cur = stagedSpineThumbUrl || currentExtracted?.spine_thumb_url || stagedPhotos[2]?.saveWebp || '';
     if (!cur) return;
     if (!stagedSpineSourceUrl) stagedSpineSourceUrl = cur;
-    const rotated = await rotateDataUrlByDeg(cur, 180, 'image/webp', 0.84, 1200);
+    const rotated = await rotateDataUrlByDeg(cur, 90, 'image/webp', 0.82, 960);
     stagedSpineThumbUrl = rotated;
     stagedSpineFlipped = !stagedSpineFlipped;
     if (currentExtracted) {
@@ -1432,8 +1726,9 @@
       currentInspected.spine_flipped = stagedSpineFlipped;
     }
     updateStageUI();
-    toast('↻ Spine flipped 180°', 1600);
+    toast('↻ Spine rotated 90°', 1600);
   };
+  window.flipStagedSpine180 = window.rotateStagedSpine90;
 
   window.openStagedSpineLightbox = () => {
     const src = stagedSpineThumbUrl || currentExtracted?.spine_thumb_url || stagedPhotos[2]?.saveWebp || '';
@@ -1483,7 +1778,7 @@
       const singleCls = coverIndices.length === 1 ? 'single-cover' : '';
       galleryHtml += `<div class="photo-gallery-covers ${singleCls}">${coverIndices.map(c => `
         <div class="photo-tile" onclick="openStagedLightbox(${c.idx})">
-          <img src="${stagedPhotos[c.idx].saveWebp}" alt="${c.label}" />
+          <img src="${stagedPhotos[c.idx].saveWebp}" alt="" />
           <span class="photo-tile-label">${c.label}</span>
           <div class="photo-tile-actions">
             <button type="button" class="photo-tile-btn danger" onclick="removeStagedPhoto(${c.idx}, event)" title="Remove ${c.label}">×</button>
@@ -1497,14 +1792,14 @@
       galleryHtml += `
         <div class="photo-gallery-spine">
           <div class="photo-gallery-spine-bar">
-            <span style="font-size:0.7rem; font-weight:800; letter-spacing:0.06em; color:var(--muted);">SPINE${stagedSpineFlipped ? ' (FLIPPED 180°)' : ''}</span>
+            <span style="font-size:0.7rem; font-weight:800; letter-spacing:0.06em; color:var(--muted);">SPINE</span>
             <div class="inline-actions" style="gap:4px;">
-              <button type="button" class="photo-tile-btn" onclick="flipStagedSpine180(event)" title="Flip spine 180°">↻ Flip 180°</button>
+              <button type="button" class="photo-tile-btn" onclick="rotateStagedSpine90(event)" title="Rotate spine 90°">↻ 90°</button>
               ${stagedPhotos[2] ? `<button type="button" class="photo-tile-btn danger" onclick="removeStagedPhoto(2, event)" title="Remove spine">×</button>` : ''}
             </div>
           </div>
           <div class="photo-gallery-spine-imgwrap" onclick="openStagedSpineLightbox()" title="Tap to zoom spine">
-            <img src="${spinePreviewSrc}" alt="Spine" />
+            <img src="${spinePreviewSrc}" alt="" />
           </div>
         </div>
       `;
@@ -1750,7 +2045,7 @@ Return ONLY valid JSON:
     const openBtn = document.getElementById('audioOpenInBtn');
     if (bar) bar.classList.remove('is-yt-direct');
     if (playBtn) {
-      playBtn.classList.remove('is-yt');
+      playBtn.classList.remove('is-yt', 'is-playing');
       playBtn.title = 'Play / Pause';
     }
     if (openBtn) openBtn.classList.remove('hidden');
@@ -1882,20 +2177,26 @@ Return ONLY valid JSON:
 
   audioEl.addEventListener('play', () => {
     if (audioEl.src !== SILENT_WAV) {
-      document.getElementById('audioPlayBtn').textContent = '⏸';
+      const btn = document.getElementById('audioPlayBtn');
+      btn.textContent = '⏸';
+      btn.classList.add('is-playing');
       if (activeTrackBtnKey) activeClipState = 'playing';
       syncTrackPlayButtons();
     }
   });
   audioEl.addEventListener('pause', () => {
     if (audioEl.src === SILENT_WAV) return;
-    if (!activeDirectYoutubeUrl) document.getElementById('audioPlayBtn').textContent = '▶';
+    const btn = document.getElementById('audioPlayBtn');
+    btn.classList.remove('is-playing');
+    if (!activeDirectYoutubeUrl) btn.textContent = '▶';
     if (activeTrackBtnKey && activeClipState !== 'loading') activeClipState = 'paused';
     syncTrackPlayButtons();
   });
   audioEl.addEventListener('ended', () => {
     if (audioEl.src === SILENT_WAV) return;
-    if (!activeDirectYoutubeUrl) document.getElementById('audioPlayBtn').textContent = '▶';
+    const btn = document.getElementById('audioPlayBtn');
+    btn.classList.remove('is-playing');
+    if (!activeDirectYoutubeUrl) btn.textContent = '▶';
     document.getElementById('audioProgress').style.width = '0%';
     if (activeTrackBtnKey) activeClipState = 'paused';
     syncTrackPlayButtons();
@@ -3872,7 +4173,7 @@ Return ONLY valid JSON:
       return;
     }
 
-    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v210`;
+    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v211`;
     if (tasteCache.has(cacheKey)) { applyTasteUI(item, tasteCache.get(cacheKey), myRunId); return; }
 
     const tracksStr = (item.tracklist || []).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title).join('; ');
@@ -5849,7 +6150,7 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
         'notable_songs', 'litmus_track', 'litmus_artist', 'taste_scored_at'
       ]);
 
-      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v210`);
+      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v211`);
       await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
       await loadStashCache();
       renderStash();
@@ -5888,7 +6189,7 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
       if (!confirm(`Recalibrate all ${targets.length} Stash item(s) against your latest Taste Profile & Soft Spots?`)) return;
     }
 
-    const BATCH_SIZE = 20;
+    const BATCH_SIZE = 10;
     recalibratingStash = true;
     recalibrateProgressText = `⏳ Recalibrating 1–${Math.min(BATCH_SIZE, targets.length)} of ${targets.length}...`;
     updateRecalibrateStashBtn();
@@ -5916,7 +6217,7 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
             year: it.year || '',
             format: it.format || '',
             genres: (it.genres || []).slice(0, 6),
-            sample_tracks: (it.tracklist || []).slice(0, 12).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title),
+            sample_tracks: (it.tracklist || []).slice(0, 24).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title),
             liked_artists_in_spotify: lm.hasProvenance ? lm.likedArtistDetails : (lm.details !== 'None' ? [lm.details] : []),
             liked_tracks_in_spotify: lm.hasProvenance ? lm.likedTrackMatches : lm.matchedTracks,
             playlist_only_artists: lm.hasProvenance ? lm.playlistOnlyArtistDetails : [],
@@ -5936,6 +6237,7 @@ HARD RULES:
 1. PROVENANCE WEIGHTING: Liked/Top/Saved-Album matches deserve a strong boost; Playlist-Only matches (0 Liked Songs) indicate casual familiarity only — state that clearly instead of inflating to 9–10.
 2. Evaluate BOTH the specific album/release (era, genre, studio album vs compilation) AND the artist.
 3. Verdict rules: "KEEP" if score >= 7, "LISTEN" if 5-6, "SELL / SKIP" if <= 4.
+4. For each release, also provide brief musical/pop-culture context ("context_note", 1 short sentence or ""), the best preview track ("litmus_track" & "litmus_artist"), and up to 4 standout/recognizable songs in "notable_songs" (or [] if none).
 
 Releases:
 ${JSON.stringify(payload)}
@@ -5943,7 +6245,18 @@ ${JSON.stringify(payload)}
 Return ONLY valid JSON:
 {
   "scores": [
-    { "idx": number, "score": 1 to 10 integer, "verdict": "KEEP" | "LISTEN" | "SELL / SKIP", "summary": "1-2 punchy sentences speaking to 'you'" }
+    {
+      "idx": number,
+      "score": 1 to 10 integer,
+      "verdict": "KEEP" | "LISTEN" | "SELL / SKIP",
+      "summary": "1-2 punchy sentences speaking to 'you'",
+      "context_note": "1 short neutral sentence of album/pop-culture context, or empty string",
+      "litmus_track": "exact song title from sample_tracks (WITHOUT artist prefix) of the best preview track, or empty string",
+      "litmus_artist": "performing artist of litmus_track",
+      "notable_songs": [
+        { "artist": "performing artist", "title": "exact song title", "reason": "short 5-10 word reason it stands out" }
+      ]
+    }
   ]
 }`;
         const batchRes = await CC.callAI([{ text: prompt }], null, { retryLabel: `Recalibrate ${start + 1}-${endNum}`, maxOutputTokens: 8192 });
@@ -5951,6 +6264,7 @@ Return ONLY valid JSON:
 
         const scoreMap = new Map((batchRes.scores || []).map(s => [s.idx, s]));
         const now = Date.now();
+        const stampedChunk = [];
         for (let i = 0; i < chunk.length; i++) {
           const it = chunk[i];
           const sc = scoreMap.get(i);
@@ -5962,11 +6276,25 @@ Return ONLY valid JSON:
           const prev = { ...it };
           it.taste_score = score;
           it.taste_verdict = verdict;
-          if (sc.summary) it.taste_summary = sc.summary.trim();
+          if (sc.summary) it.taste_summary = String(sc.summary).trim();
+          if (sc.context_note !== undefined) it.context_note = String(sc.context_note || '').trim();
+          if (Array.isArray(sc.notable_songs)) {
+            it.notable_songs = normalizeNotableList(sc.notable_songs, it.artist).slice(0, 4);
+          }
+          if (sc.litmus_track) it.litmus_track = String(sc.litmus_track).trim();
+          else if (!it.litmus_track && it.tracklist?.[0]?.title) it.litmus_track = it.tracklist[0].title;
+          if (sc.litmus_artist !== undefined) it.litmus_artist = String(sc.litmus_artist || '').trim();
           it.taste_scored_at = now;
-          const stamped = CC.stampStashRevision(it, prev, ['taste_score', 'taste_verdict', 'taste_summary', 'taste_scored_at']);
-          await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+          const stamped = CC.stampStashRevision(it, prev, [
+            'taste_score', 'taste_verdict', 'taste_summary', 'context_note',
+            'notable_songs', 'litmus_track', 'litmus_artist', 'taste_scored_at'
+          ]);
+          stampedChunk.push(stamped);
           updatedTotal++;
+        }
+
+        if (stampedChunk.length > 0) {
+          await CC.commitBatchStashUpserts(stampedChunk, true);
         }
 
         await loadStashCache();
@@ -6012,42 +6340,79 @@ Return ONLY valid JSON:
   };
 
   // Direct Stash Detail photo add/replace/remove — works offline, zero Gemini/Discogs calls, zero grade changes!
+  // Manual Spine uploads open the interactive Crop & 90° Rotate modal directly (no blind 90° auto-rotation!).
   window.handleStashPhotoFiles = async (id, slot, fileList) => {
     const files = Array.from(fileList || []);
     if (!files.length) return;
     const it = stashCache.find(x => x.id === id);
     if (!it) return;
 
+    if (slot === 'spine') {
+      setStatus('Loading spine photo for cropping...', true);
+      try {
+        const pair = await decodeBlobToPhotoPair(files[0], {
+          aiMaxDim: 1600,
+          aiQuality: 0.88,
+          saveMaxDim: 1600,
+          saveQuality: 0.84,
+          squarePreview: false
+        });
+        setStatus('', false);
+        openCropModal({
+          dataUrl: pair.saveWebp,
+          title: '✂️ Crop & Rotate Spine',
+          mode: 'spine',
+          onApply: async (croppedWebp, workingSourceWebp) => {
+            const latest = stashCache.find(x => x.id === id);
+            if (!latest) return;
+            const prev = { ...latest };
+            const updated = {
+              ...latest,
+              spine_source_url: workingSourceWebp || pair.saveWebp,
+              spine_thumb_url: croppedWebp,
+              spine_flipped: false
+            };
+            const stamped = CC.stampStashRevision(updated, prev, ['spine_source_url', 'spine_thumb_url', 'spine_flipped']);
+            await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+            await loadStashCache();
+            renderStash();
+            updateCloudUI();
+            scheduleGoogleAutoSync();
+            if (activeStashItem?.id === id) openStashDetail(id, true);
+            toast('✂️ Spine cropped & saved to Stash!');
+          }
+        });
+      } catch (err) {
+        setStatus('', false);
+        toast('Photo error: ' + (err?.message || 'Failed'), 4200);
+      }
+      return;
+    }
+
     const prev = { ...it };
     const nextThumbs = getStashCoverPhotos(it).slice();
-    let nextSpineThumb = it.spine_thumb_url || '';
-    let nextSpineSource = it.spine_source_url || '';
-    let nextSpineFlipped = Boolean(it.spine_flipped);
     const changed = [];
 
     setStatus(`Processing ${files.length} photo(s) locally...`, true);
     try {
       for (const file of files) {
-        if (slot === 'spine') {
-          const pair = await decodeBlobToPhotoPair(file, { aiMaxDim: 1600, aiQuality: 0.88, saveMaxDim: 1600, saveQuality: 0.84, squarePreview: false });
-          nextSpineSource = pair.saveWebp;
-          nextSpineThumb = await normalizeSpineDataUrl(pair.saveWebp, '');
-          nextSpineFlipped = false;
-          changed.push('spine_source_url', 'spine_thumb_url', 'spine_flipped');
-        } else if (slot === 'front') {
-          const pair = await decodeBlobToPhotoPair(file, { aiMaxDim: 1600, aiQuality: 0.88, saveMaxDim: 1600, saveQuality: 0.84, squarePreview: true });
+        const pair = await decodeBlobToPhotoPair(file, {
+          aiMaxDim: 1600,
+          aiQuality: 0.88,
+          saveMaxDim: 1200,
+          saveQuality: 0.82,
+          squarePreview: false
+        });
+        if (slot === 'front') {
           if (nextThumbs.length === 0) nextThumbs.push(pair.saveWebp);
           else nextThumbs[0] = pair.saveWebp;
           changed.push('thumbs', 'thumb_data_url');
         } else if (slot === 'back') {
-          const pair = await decodeBlobToPhotoPair(file, { aiMaxDim: 1600, aiQuality: 0.88, saveMaxDim: 1600, saveQuality: 0.84, squarePreview: true });
           if (nextThumbs.length === 0) nextThumbs.push(pair.saveWebp);
           else if (nextThumbs.length === 1) nextThumbs.push(pair.saveWebp);
           else nextThumbs[1] = pair.saveWebp;
           changed.push('thumbs', 'thumb_data_url');
         } else {
-          // Append by default for Extra / general Add Photos
-          const pair = await decodeBlobToPhotoPair(file, { aiMaxDim: 1600, aiQuality: 0.88, saveMaxDim: 1600, saveQuality: 0.84, squarePreview: nextThumbs.length < 2 });
           nextThumbs.push(pair.saveWebp);
           changed.push('thumbs', 'thumb_data_url');
         }
@@ -6056,10 +6421,7 @@ Return ONLY valid JSON:
       const updated = {
         ...it,
         thumbs: nextThumbs,
-        thumb_data_url: nextThumbs[0] || it.discogs_thumb || '',
-        spine_thumb_url: nextSpineThumb,
-        spine_source_url: nextSpineSource,
-        spine_flipped: nextSpineFlipped
+        thumb_data_url: nextThumbs[0] || it.discogs_thumb || ''
       };
       const stamped = CC.stampStashRevision(updated, prev, Array.from(new Set(changed)));
       await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
@@ -6074,6 +6436,71 @@ Return ONLY valid JSON:
       setStatus('', false);
       toast('Photo error: ' + (err?.message || 'Failed'), 4200);
     }
+  };
+
+  window.openStashPhotoCrop = (id, slot, idx = 0, ev = null) => {
+    if (ev) ev.stopPropagation();
+    const it = stashCache.find(x => x.id === id);
+    if (!it) return;
+    if (slot === 'spine') {
+      const src = it.spine_source_url || it.spine_thumb_url || '';
+      if (!src) return;
+      openCropModal({
+        dataUrl: src,
+        title: '✂️ Crop & Rotate Spine',
+        mode: 'spine',
+        onApply: async (croppedWebp, workingSourceWebp) => {
+          const latest = stashCache.find(x => x.id === id);
+          if (!latest) return;
+          const prev = { ...latest };
+          const updated = {
+            ...latest,
+            spine_source_url: workingSourceWebp || src,
+            spine_thumb_url: croppedWebp,
+            spine_flipped: false
+          };
+          const stamped = CC.stampStashRevision(updated, prev, ['spine_source_url', 'spine_thumb_url', 'spine_flipped']);
+          await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+          await loadStashCache();
+          renderStash();
+          updateCloudUI();
+          scheduleGoogleAutoSync();
+          if (activeStashItem?.id === id) openStashDetail(id, true);
+          toast('✂️ Spine crop saved!');
+        }
+      });
+      return;
+    }
+
+    const photos = getStashCoverPhotos(it);
+    const src = photos[idx] || '';
+    if (!src) return;
+    const slotTitle = idx === 0 ? 'Front' : (idx === 1 ? 'Back' : `Extra ${idx - 1}`);
+    openCropModal({
+      dataUrl: src,
+      title: `✂️ Crop & Rotate ${slotTitle}`,
+      mode: 'cover',
+      onApply: async (croppedWebp) => {
+        const latest = stashCache.find(x => x.id === id);
+        if (!latest) return;
+        const prev = { ...latest };
+        const nextThumbs = getStashCoverPhotos(latest).slice();
+        if (idx >= 0 && idx < nextThumbs.length) nextThumbs[idx] = croppedWebp;
+        const updated = {
+          ...latest,
+          thumbs: nextThumbs,
+          thumb_data_url: nextThumbs[0] || latest.discogs_thumb || ''
+        };
+        const stamped = CC.stampStashRevision(updated, prev, ['thumbs', 'thumb_data_url']);
+        await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+        await loadStashCache();
+        renderStash();
+        updateCloudUI();
+        scheduleGoogleAutoSync();
+        if (activeStashItem?.id === id) openStashDetail(id, true);
+        toast(`✂️ ${slotTitle} crop saved!`);
+      }
+    });
   };
 
   window.removeStashPhotoSlot = async (id, idx, ev) => {
@@ -6116,14 +6543,14 @@ Return ONLY valid JSON:
     toast('Spine removed');
   };
 
-  // Manual 180° Spine Flip in Stash Detail (works on legacy spines without spine_source_url and without AI!)
-  window.flipStashSpine180 = async (id, ev) => {
+  // Manual 90° Spine Rotate in Stash Detail (any orientation 0°/90°/180°/270° reachable in 1-3 taps, zero AI!)
+  window.rotateStashSpine90 = async (id, ev) => {
     if (ev) ev.stopPropagation();
     const it = stashCache.find(x => x.id === id);
     if (!it || !it.spine_thumb_url) return;
     const prev = { ...it };
     const sourceUrl = it.spine_source_url || it.spine_thumb_url;
-    const rotated = await rotateDataUrlByDeg(it.spine_thumb_url, 180, 'image/webp', 0.84, 1200);
+    const rotated = await rotateDataUrlByDeg(it.spine_thumb_url, 90, 'image/webp', 0.82, 960);
     const updated = {
       ...it,
       spine_source_url: sourceUrl,
@@ -6137,8 +6564,9 @@ Return ONLY valid JSON:
     updateCloudUI();
     scheduleGoogleAutoSync();
     if (activeStashItem?.id === id) openStashDetail(id, true);
-    toast('↻ Spine flipped 180° & saved!', 2000);
+    toast('↻ Spine rotated 90° & saved!', 1800);
   };
+  window.flipStashSpine180 = window.rotateStashSpine90;
 
   window.updateLocalIntendedFolder = async (id, folderId) => {
     const it = stashCache.find(x => x.id === id);
@@ -6313,6 +6741,23 @@ Return ONLY valid JSON:
     toast(applyRetained ? `✅ Restored alternate "${c?.field}" value` : 'Conflict dismissed');
   };
 
+  function formatConflictValue(val) {
+    if (val === null || val === undefined || val === '') return '(empty)';
+    if (Array.isArray(val)) {
+      if (!val.length) return '(empty)';
+      const preview = val.slice(0, 3).map(v => {
+        if (v && typeof v === 'object') return v.title || v.name || JSON.stringify(v);
+        return String(v);
+      }).join(', ');
+      return `${val.length} item${val.length === 1 ? '' : 's'}${preview ? ` (${preview}${val.length > 3 ? ', …' : ''})` : ''}`;
+    }
+    if (typeof val === 'object') {
+      try { return JSON.stringify(val).slice(0, 120); } catch (_) { return '(object)'; }
+    }
+    const str = String(val);
+    return str.length > 140 ? `${str.slice(0, 137)}…` : str;
+  }
+
   window.openStashDetail = (id, fromPop = false) => {
     const it = stashCache.find(x => x.id === id);
     if (!it) return;
@@ -6363,7 +6808,7 @@ Return ONLY valid JSON:
       alerts += it.conflicts.map(c => `
         <div class="alert-box alert-other-pressing">
           <div>⚠️ <strong>Sync Conflict on "${esc(c.field)}"</strong></div>
-          <div style="font-size:0.78rem; margin-top:4px;">Current: <code>${esc(String(c.keptVal ?? ''))}</code> · Competing edit: <code>${esc(String(c.retainedVal ?? ''))}</code></div>
+          <div style="font-size:0.78rem; margin-top:4px;">Current: <code>${esc(formatConflictValue(c.keptVal))}</code> · Competing edit: <code>${esc(formatConflictValue(c.retainedVal))}</code></div>
           <div class="inline-actions" style="margin-top:8px;">
             <button type="button" class="btn btn-secondary btn-sm" onclick="resolveStashConflict(${it.id}, '${esc(c.id)}', false)">Keep Current</button>
             <button type="button" class="btn btn-purple btn-sm" onclick="resolveStashConflict(${it.id}, '${esc(c.id)}', true)">Use Competing Edit</button>
@@ -6397,16 +6842,16 @@ Return ONLY valid JSON:
 
     const contextTxt = it.context_note || it.cultural_reason || '';
 
-    // Build responsive Stash Detail Photo Gallery (Front + Back side-by-side square tiles, Spine full-width below with Flip 180°)
+    // Build responsive Stash Detail Photo Gallery (Front + Back side-by-side tiles, Spine strip below with Crop & 90° Rotate)
     const slotLabels = ['FRONT', 'BACK'];
     let galleryHtml = '<div class="photo-gallery" style="margin-bottom:12px;">';
     if (photos.length) {
       const singleCls = photos.length === 1 ? 'single-cover' : '';
       galleryHtml += `<div class="photo-gallery-covers ${singleCls}">${photos.map((src, i) => `
         <div class="photo-tile" onclick="openStashLightbox(${i})" title="Tap to zoom fullscreen">
-          <img src="${esc(src)}" alt="${slotLabels[i] || `Photo ${i + 1}`}" />
+          <img src="${esc(src)}" alt="" />
           <span class="photo-tile-label">${slotLabels[i] || `EXTRA ${i - 1}`}</span>
-          ${stashPhotoManagerOpen ? `<div class="photo-tile-actions"><button type="button" class="photo-tile-btn danger" onclick="removeStashPhotoSlot(${it.id}, ${i}, event)" title="Remove photo">×</button></div>` : ''}
+          ${stashPhotoManagerOpen ? `<div class="photo-tile-actions"><button type="button" class="photo-tile-btn" onclick="openStashPhotoCrop(${it.id}, 'cover', ${i}, event)" title="Crop or rotate photo">✂️ Crop</button><button type="button" class="photo-tile-btn danger" onclick="removeStashPhotoSlot(${it.id}, ${i}, event)" title="Remove photo">×</button></div>` : ''}
         </div>
       `).join('')}</div>`;
     }
@@ -6414,45 +6859,40 @@ Return ONLY valid JSON:
       galleryHtml += `
         <div class="photo-gallery-spine">
           <div class="photo-gallery-spine-bar">
-            <span style="font-size:0.7rem; font-weight:800; letter-spacing:0.06em; color:var(--muted);">SPINE${it.spine_flipped ? ' (FLIPPED 180°)' : ''}</span>
+            <span style="font-size:0.7rem; font-weight:800; letter-spacing:0.06em; color:var(--muted);">SPINE</span>
             <div class="inline-actions" style="gap:4px;">
-              <button type="button" class="photo-tile-btn" onclick="flipStashSpine180(${it.id}, event)" title="Flip spine 180°">↻ Flip 180°</button>
+              <button type="button" class="photo-tile-btn" onclick="openStashPhotoCrop(${it.id}, 'spine', 0, event)" title="Crop & rotate spine">✂️ Crop</button>
+              <button type="button" class="photo-tile-btn" onclick="rotateStashSpine90(${it.id}, event)" title="Rotate spine 90°">↻ 90°</button>
               ${stashPhotoManagerOpen ? `<button type="button" class="photo-tile-btn danger" onclick="removeStashSpine(${it.id}, event)" title="Remove spine">×</button>` : ''}
             </div>
           </div>
           <div class="photo-gallery-spine-imgwrap" onclick="openStashSpineLightbox()" title="Tap to zoom spine">
-            <img src="${esc(it.spine_thumb_url)}" alt="Cropped spine" />
+            <img src="${esc(it.spine_thumb_url)}" alt="" />
           </div>
         </div>
       `;
     }
     galleryHtml += `
-      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; margin-top:6px;">
         <span style="font-size:0.72rem; color:var(--muted);">${(photos.length || it.spine_thumb_url) ? 'Tap any photo to zoom fullscreen' : 'No photos saved yet'}</span>
-        <button type="button" class="btn btn-secondary btn-sm" style="min-height:30px; padding:3px 10px; font-size:0.74rem;" onclick="toggleStashPhotoManager(${it.id})">${stashPhotoManagerOpen ? '✕ Done Managing Photos' : '📷 Add Photos'}</button>
+        <button type="button" class="btn btn-secondary btn-sm" style="min-height:30px; padding:3px 10px; font-size:0.74rem;" onclick="toggleStashPhotoManager(${it.id})">${stashPhotoManagerOpen ? '✕ Done Managing Photos' : '📷 Manage Photos'}</button>
       </div>
     `;
     if (stashPhotoManagerOpen) {
       galleryHtml += `
         <div class="sd-photo-panel">
           <div style="font-size:0.78rem; color:var(--muted); margin-bottom:8px;">
-            Add or replace photos directly (saved locally at 1600×1600 WebP &amp; synced to Drive — zero AI or Discogs writes, grades stay untouched).
+            Choose Camera or Photo Library directly (saved offline as crisp WebP &amp; synced to Drive — zero AI or Discogs writes). Tap <strong>✂️ Crop</strong> on any tile to frame tightly.
           </div>
-          <input id="sdPhotoFrontCam" class="hidden-file" type="file" accept="image/*" capture="environment" onchange="handleStashPhotoFiles(${it.id}, 'front', this.files); this.value='';" />
-          <input id="sdPhotoFrontUp" class="hidden-file" type="file" accept="image/*" onchange="handleStashPhotoFiles(${it.id}, 'front', this.files); this.value='';" />
-          <input id="sdPhotoBackCam" class="hidden-file" type="file" accept="image/*" capture="environment" onchange="handleStashPhotoFiles(${it.id}, 'back', this.files); this.value='';" />
-          <input id="sdPhotoBackUp" class="hidden-file" type="file" accept="image/*" onchange="handleStashPhotoFiles(${it.id}, 'back', this.files); this.value='';" />
-          <input id="sdPhotoSpineCam" class="hidden-file" type="file" accept="image/*" capture="environment" onchange="handleStashPhotoFiles(${it.id}, 'spine', this.files); this.value='';" />
-          <input id="sdPhotoSpineUp" class="hidden-file" type="file" accept="image/*" onchange="handleStashPhotoFiles(${it.id}, 'spine', this.files); this.value='';" />
-          <input id="sdPhotoExtraUp" class="hidden-file" type="file" accept="image/*" multiple onchange="handleStashPhotoFiles(${it.id}, 'extra', this.files); this.value='';" />
+          <input id="sdPhotoFront" class="hidden-file" type="file" accept="image/*" onchange="handleStashPhotoFiles(${it.id}, 'front', this.files); this.value='';" />
+          <input id="sdPhotoBack" class="hidden-file" type="file" accept="image/*" onchange="handleStashPhotoFiles(${it.id}, 'back', this.files); this.value='';" />
+          <input id="sdPhotoSpine" class="hidden-file" type="file" accept="image/*" onchange="handleStashPhotoFiles(${it.id}, 'spine', this.files); this.value='';" />
+          <input id="sdPhotoExtra" class="hidden-file" type="file" accept="image/*" multiple onchange="handleStashPhotoFiles(${it.id}, 'extra', this.files); this.value='';" />
           <div class="inline-actions" style="gap:6px;">
-            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('sdPhotoFrontCam').click()">📷 ${photos[0] ? 'Replace' : 'Add'} Front</button>
-            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('sdPhotoFrontUp').click()">🖼️ Upload Front</button>
-            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('sdPhotoBackCam').click()">📷 ${photos[1] ? 'Replace' : 'Add'} Back</button>
-            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('sdPhotoBackUp').click()">🖼️ Upload Back</button>
-            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('sdPhotoSpineCam').click()">📷 ${it.spine_thumb_url ? 'Replace' : 'Add'} Spine</button>
-            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('sdPhotoSpineUp').click()">🖼️ Upload Spine</button>
-            <button type="button" class="btn btn-green btn-sm" onclick="document.getElementById('sdPhotoExtraUp').click()">➕ Append Extra Photo(s)</button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('sdPhotoFront').click()">📷 ${photos[0] ? 'Replace' : 'Add'} Front</button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('sdPhotoBack').click()">📷 ${photos[1] ? 'Replace' : 'Add'} Back</button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('sdPhotoSpine').click()">📷 ${it.spine_thumb_url ? 'Replace' : 'Add'} Spine</button>
+            <button type="button" class="btn btn-green btn-sm" onclick="document.getElementById('sdPhotoExtra').click()">➕ Extra Photo</button>
           </div>
         </div>
       `;
@@ -6590,9 +7030,19 @@ Return ONLY valid JSON:
         <div class="inline-actions">
           <button class="btn btn-sm" onclick="saveStashEdits(${it.id})">💾 Save Grade &amp; Sync Discogs</button>
           ${(!it.synced_to_discogs && it.discogs_id) ? `<button id="sdBtnPushDiscogs" class="btn btn-green btn-sm" ${needsStashTiebreakConfirm ? 'disabled' : ''} onclick="pushStashToDiscogs(${it.id})">✅ Push to Discogs</button>` : ''}
-          ${(it.synced_to_discogs && !it.discogs_removed && it.discogs_id)
-            ? `<button id="sdBtnDelete" class="btn btn-danger btn-sm" onclick="deleteStashItem(${it.id}, true)">🗑️ Delete from Discogs &amp; Stash</button>`
-            : `<button id="sdBtnDelete" class="btn btn-danger btn-sm" onclick="deleteStashItem(${it.id}, false)">🗑️ Delete from Stash</button>`}
+          ${(() => {
+            const isSyncedCopy = Boolean(it.synced_to_discogs && !it.discogs_removed && it.discogs_id);
+            const curAcct = (cfg.discogsUser || '').trim().toLowerCase();
+            const itemAcct = String(it.discogs_account || '').trim().toLowerCase();
+            const acctMatches = !itemAcct || !curAcct || itemAcct === curAcct;
+            if (isSyncedCopy && acctMatches) {
+              return `<button id="sdBtnDelete" class="btn btn-danger btn-sm" onclick="deleteStashItem(${it.id}, true)">🗑️ Delete from Discogs &amp; Stash</button>`;
+            }
+            if (isSyncedCopy && !acctMatches) {
+              return `<button id="sdBtnDelete" class="btn btn-danger btn-sm" onclick="deleteStashItem(${it.id}, false)">🗑️ Delete from Stash (Local Only)</button>`;
+            }
+            return `<button id="sdBtnDelete" class="btn btn-danger btn-sm" onclick="deleteStashItem(${it.id}, false)">🗑️ Delete from Stash</button>`;
+          })()}
         </div>
       </div>
     `;
@@ -6602,8 +7052,14 @@ Return ONLY valid JSON:
     syncTrackPlayButtons();
     updateStashPushBtnState();
 
-    // Auto-hydrate missing tracklist, country, pressing notes & market values on demand when opening a Discogs-linked item
-    if (hasDiscogs && cfg.discogsToken && (!Number(it.discogs_details_synced_at || 0) || !(it.tracklist || []).length) && !hydratingStashIds.has(it.id)) {
+    // Auto-hydrate missing Discogs details once per session when opening an unhydrated Discogs-linked item
+    if (
+      hasDiscogs &&
+      cfg.discogsToken &&
+      !Number(it.discogs_details_synced_at || 0) &&
+      !autoHydrateAttemptedIds.has(it.id) &&
+      !hydratingStashIds.has(it.id)
+    ) {
       refreshSingleStashDiscogsData(it.id, true);
     }
   };
@@ -6616,22 +7072,33 @@ Return ONLY valid JSON:
       return;
     }
     if (hydratingStashIds.has(id)) return;
+    if (silent) autoHydrateAttemptedIds.add(id);
+    else autoHydrateAttemptedIds.delete(id);
+
     hydratingStashIds.add(id);
     const btn = document.getElementById('sdBtnRefreshDiscogs');
     if (btn) { btn.disabled = true; btn.textContent = '⏳ Loading Discogs...'; }
+    let didUpdate = false;
     try {
       const res = await CC.enrichSyncedDiscogsStashItems({
         stashIds: [id],
         forceRefresh: !silent,
         quiet: silent
       });
+      didUpdate = Number(res.updatedRows || 0) > 0;
       await loadStashCache();
       renderStash();
       updateCloudUI();
-      if (res.updatedRows > 0) scheduleGoogleAutoSync();
+      if (didUpdate) scheduleGoogleAutoSync();
       if (!silent) {
         setStatus('', false);
-        toast(res.updatedRows > 0 ? '✅ Updated tracklist & Discogs values!' : 'Discogs details could not be fetched', 3200);
+        if (didUpdate && res.statsFailedReleases > 0) {
+          toast('⚠️ Updated details, but Discogs market prices were unavailable — kept last known price', 4600);
+        } else if (didUpdate) {
+          toast('✅ Updated tracklist & Discogs values!', 3200);
+        } else {
+          toast('Discogs details could not be fetched', 3200);
+        }
       }
     } catch (err) {
       if (!silent) {
@@ -6640,7 +7107,14 @@ Return ONLY valid JSON:
       }
     } finally {
       hydratingStashIds.delete(id);
-      if (activeStashItem?.id === id) openStashDetail(id, true);
+      if (activeStashItem?.id === id) {
+        if (didUpdate || !silent) {
+          openStashDetail(id, true);
+        } else {
+          const b = document.getElementById('sdBtnRefreshDiscogs');
+          if (b) { b.disabled = false; b.textContent = '🔄 Refresh Discogs'; }
+        }
+      }
     }
   };
 
@@ -7370,13 +7844,14 @@ Return ONLY valid JSON:
         populateFolders();
         updateDiscogsCollectionUI();
         await loadStashCache();
+        autoHydrateAttemptedIds.clear();
         renderStash();
         if (activeStashItem?.id) openStashDetail(activeStashItem.id, true);
         updateCloudUI();
         scheduleGoogleAutoSync();
 
-        // Automatically hydrate tracklists, pressing notes & market values for any Discogs copies missing details
-        const missingDetailCount = stashCache.filter(x => Number(x.discogs_id || 0) > 0 && (!Number(x.discogs_details_synced_at || 0) || !(x.tracklist || []).length)).length;
+        // Automatically hydrate tracklists, pressing notes & market values for any Discogs copies not yet hydrated
+        const missingDetailCount = stashCache.filter(x => Number(x.discogs_id || 0) > 0 && !Number(x.discogs_details_synced_at || 0)).length;
         let enrichRes = null;
         if (missingDetailCount > 0 && cfg.discogsToken) {
           enrichRes = await CC.enrichSyncedDiscogsStashItems({
@@ -7888,8 +8363,10 @@ Return ONLY valid JSON:
     CC.setStatusCallback(setStatus);
     CC.setRateCallback(updateRatePill);
     await CC.openDB();
-    // Automatically repair any verified duplicate Discogs copies locally on startup (zero Discogs/Drive writes!)
+    // Automatically repair any verified duplicate Discogs copies, purge legacy false conflicts & compact outbox on startup (zero Discogs/Drive writes!)
     const startupRepair = await CC.repairLocalDiscogsDuplicates().catch(() => null);
+    await CC.purgeFalseConflicts().catch(() => null);
+    await CC.coalesceCloudOutbox().catch(() => null);
     await loadStashCache();
     if (startupRepair?.repairSummary) {
       setTimeout(() => toast(`🧹 ${startupRepair.repairSummary}`, 5200), 600);

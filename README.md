@@ -2,21 +2,21 @@
 
 **Live App:** [softspot.k1s.co](https://softspot.k1s.co) · **Short Link:** [ss.k1s.co](https://ss.k1s.co)
 
-A zero-backend, monochrome industrial Progressive Web App (PWA) for scanning, verifying, grading, pricing, and cataloging physical music media (**Cassettes, CDs, and Vinyl**) in the field at thrift stores/record shops or at home on phone and PC.
+A zero-backend, sharp monochrome industrial Progressive Web App (PWA) for scanning, verifying, grading, pricing, and cataloging physical media (**Cassettes, CDs, Vinyl, and Other Discogs Media** — 8-Track, Reel-To-Reel, MiniDisc, DAT, DVD, VHS, LaserDisc, Blu-ray, Shellac, SACD, and more) in the field at thrift stores/record shops or at home on phone and PC.
 
 ---
 
-## Core Features (v2.0.2)
+## Core Features (v2.1.1)
 
 | Area | Highlights |
 | --- | --- |
-| **3-Shot Single Item Scan & Auto-UPC** | Guided **Front + Side A → Back + Side B → Optional Spine** capture flow (`1600×1600` uncropped square-fitted WebP cover previews + landscape-normalized spines with **↻ Flip 180°**), live `BarcodeDetector` UPC locking, Sony-style red **Focus Peaking**, rear/ultrawide lens & `0.5x` zoom switching, and tap-to-zoom blur inspection. |
+| **3-Shot Single Item Scan & Auto-UPC** | Guided **Front + Side A → Back + Side B → Optional Spine** capture flow, live `BarcodeDetector` UPC locking, Sony-style red **Focus Peaking**, rear/ultrawide lens & `0.5x` zoom switching, multi-media **Other ▾** format selector, and tap-to-zoom blur inspection. |
 | **Multi-Shot Pile / Shelf Scanner** | Snap or upload **1–4 close-up shelf sections** at `3072px` ultra-high detail (`MEDIA_RESOLUTION_ULTRA_HIGH`) with smart overlap deduplication (`artist\|title\|format` + cat# guard), simultaneous **2-finger pinch + pan zoom**, rotated SVG polygon spotlights, progressive pin rendering, owned-collection badges, and non-blocking rough Discogs pricing. |
-| **Zero-Guessing Discogs Verification & Folder Mirroring** | **Hard Format Gate** (`Cassette ≠ CD ≠ Vinyl`), **Top-15 Fast Pass** with automatic `[r=ID]` sibling traversal, cached 25-item **Deep Search**, conservative highest-`have` tie-breaker confirmation, **🔄 Sync with Discogs** mirroring your collection copies & actual Discogs folders 1-to-1 in Stash (preserving empty custom folders and renames), and in-place **📁 Move to Folder** in Stash Detail. |
-| **Direct Stash Photo Gallery & Spine Orientation** | Responsive side-by-side square gallery for Front & Back covers plus full-width horizontal Spine strip, inline **📷 Add Photos** directly inside Stash Detail (works offline without AI, Discogs writes, or grade changes), and one-tap **↻ Flip 180°** synced across devices and the `SPINES` shelf. |
-| **Goldmine Grading & Voice Re-Grade** | Optional **"Grade in one go"** toggle (defaults to `Not Graded` for fast thrift scanning so you never coerce ungraded items on Discogs), one-tap on-demand **✨ AI Grade Photos**, spine cut-out detection (hole punches, saw cuts, notches), and continuous hands-free **🎤 AI Voice Re-Grade**. |
-| **Personal Taste Engine & Resumable Spotify Sync** | Editable **Taste Profile + Soft Spots**, local zero-AI **Spotify library matching** (**💚 Sync Liked Songs** fast pass or optional **🎧 Full Library Pass** with page-by-page checkpointing and **▶ Resume Spotify Sync** on rate limits/reloads), Stash taste recalibration, and era/album-aware 30s audio previews (Apple Music & Deezer) with album art and direct YouTube fallback. |
-| **Safe Two-Device Google Drive Sync** | Private `drive.appdata` sync using immutable versioned batches (`ss_v2_batch_*.json`), SHA-256 deduplicated photo blobs, deterministic field-level merging with conflict retention, deletion tombstones, and account-switch protection across phone and PC. |
+| **Zero-Guessing Discogs Sync, Hydration & Folder Mirroring** | **Hard Format Gate** across all Discogs formats, **Top-15 Fast Pass** + `[r=ID]` sibling traversal, cached 25-item **Deep Search**, **🔄 Sync with Discogs** mirroring copies & folders 1-to-1 while automatically hydrating tracklists, pressing notes & market values (preserving last known prices if stats fail), in-place **📁 Move to Folder**, and account-guarded **🗑️ Delete from Discogs & Stash** alongside local-only support. |
+| **Direct Stash Photo Manager & Interactive Crop/Rotate** | Streamlined 4-button Stash photo manager (**Front / Back / Spine / Extra**) with an offline pure-Canvas **✂️ Crop & Rotate** modal, one-tap **↻ 90°** spine rotation, and crisp WebP storage synced across devices and the `SPINES` shelf. |
+| **Goldmine Grading & Voice Re-Grade** | Optional **"Grade in one go"** toggle (defaults to `Not Graded` for fast thrift scanning), one-tap on-demand **✨ AI Grade Photos**, spine cut-out detection (hole punches, saw cuts, notches), and continuous hands-free **🎤 AI Voice Re-Grade**. |
+| **Personal Taste Engine & Resumable Spotify Sync** | Editable **Taste Profile + Soft Spots**, local zero-AI **Spotify library matching** (**💚 Sync Liked Songs** fast pass or optional **🎧 Full Library Pass** with page-by-page checkpointing and **▶ Resume Spotify Sync**), batch Stash recalibration with notable songs & litmus tracks, and overlaid-art 30s audio previews (Apple Music & Deezer) with direct YouTube fallback. |
+| **Safe Two-Device Google Drive Sync** | Private `drive.appdata` sync using coalesced immutable versioned batches (`ss_v2_batch_*.json`), SHA-256 deduplicated photo blobs, deterministic field-level merging (conflicts strictly scoped to genuine cross-device user edits), deletion tombstones, and account-switch protection across phone and PC. |
 
 ---
 
@@ -36,7 +36,7 @@ A zero-backend, monochrome industrial Progressive Web App (PWA) for scanning, ve
 
 ## Upgrading & Domain Migration Notes
 
-- **Update Both Phone & PC to v2.0.2:** v2.0.2 introduces immutable versioned Drive batches (`ss_v2_batch_*.json`) and automatically reads legacy v2.0.1 snapshots (`softspot_state.json` / `cratecheck_state.json`) and `delta_*.json` files as migration inputs. Update **both** your phone and PC to v2.0.2 before relying on two-device Drive sync so an older client never overwrites a legacy snapshot.
+- **Update Both Phone & PC to v2.1.1:** v2.1.1 uses coalesced immutable versioned Drive batches (`ss_v2_batch_*.json`), automatically repairs verified duplicate Discogs copies, purges legacy false conflicts, and reads legacy v2.0.1 snapshots (`softspot_state.json` / `cratecheck_state.json`) and `delta_*.json` files as migration inputs. Update **both** your phone and PC to v2.1.1 for the cleanest two-device Drive sync.
 - **Migrating a Local-Only Stash from an Old Domain:** Browser IndexedDB storage is scoped per origin (`https://old-domain` vs `https://softspot.k1s.co`). If you have an unsynced local-only Stash on an older domain:
   1. Open the old domain → **Settings → 5. Data, Backup & Workflow Guide** → tap **⬇️ Export JSON**.
   2. Open Soft Spot on the new domain → **Settings → 5. Data, Backup & Workflow Guide** → tap **⬆️ Restore JSON**.
@@ -56,7 +56,7 @@ A zero-backend, monochrome industrial Progressive Web App (PWA) for scanning, ve
 
 Soft Spot requires **zero build step** and runs on any static host (such as GitHub Pages):
 
-1. Fork or clone this repository and point GitHub Pages (or any static web server) at the active version directory (e.g., `v2.0.2/` or copied to root).
+1. Fork or clone this repository and point GitHub Pages (or any static web server) at the active version directory (e.g., `v2.1.1/` or copied to root).
 2. *(Optional)* Add a `CNAME` file for your custom subdomain (e.g., `softspot.yourdomain.com`) with HTTPS enabled (required for in-app Camera, Spotify PKCE, and Google Sign-In).
 3. *(Optional)* To use your own Google Cloud OAuth Client ID for Drive Sync:
    - Enable the **Google Drive API** in [Google Cloud Console](https://console.cloud.google.com/apis/library/drive.googleapis.com).

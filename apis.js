@@ -1240,11 +1240,33 @@
 
     if (forceRefresh) CC.releaseDetailCache.delete(id);
     const release = await CC.getReleaseCached(id);
-    const stats = await CC.discogsFetch(`/marketplace/stats/${id}`).catch(() => ({}));
 
+    let statsOk = false;
+    let stats = null;
+    try {
+      const sRes = await CC.discogsFetch(`/marketplace/stats/${id}`);
+      if (sRes && typeof sRes === 'object') {
+        stats = sRes;
+        statsOk = true;
+      }
+    } catch (_) {
+      statsOk = false;
+      stats = null;
+    }
+
+    let suggestionsOk = false;
     let suggestions = null;
     if (CC.cfg.fetchVgSuggestions !== false) {
-      suggestions = await CC.discogsFetch(`/marketplace/price_suggestions/${id}`).catch(() => null);
+      try {
+        const sugRes = await CC.discogsFetch(`/marketplace/price_suggestions/${id}`);
+        if (sugRes && typeof sugRes === 'object') {
+          suggestions = sugRes;
+          suggestionsOk = true;
+        }
+      } catch (_) {
+        suggestionsOk = false;
+        suggestions = null;
+      }
     }
 
     const tracklist = (release.tracklist || [])
@@ -1255,18 +1277,18 @@
         title: String(t.title || '').trim()
       }));
 
-    const lowestPrice = stats?.lowest_price?.value ?? release.lowest_price ?? null;
-    const lowestCurrency = stats?.lowest_price?.currency || 'USD';
-    const numForSale = stats?.num_for_sale ?? release.num_for_sale ?? 0;
-    const vgPlusPrice = suggestions?.['Very Good Plus (VG+)']?.value ?? null;
-    const vgPlusCurrency = suggestions?.['Very Good Plus (VG+)']?.currency || lowestCurrency || 'USD';
-    const estPrice = vgPlusPrice ?? lowestPrice;
-    const estCurrency = vgPlusPrice !== null ? vgPlusCurrency : lowestCurrency;
-    const estUsd = CC.toApproxUsd(estPrice, estCurrency);
+    const lowestPrice = statsOk ? (stats?.lowest_price?.value ?? release.lowest_price ?? null) : null;
+    const lowestCurrency = statsOk ? (stats?.lowest_price?.currency || 'USD') : 'USD';
+    const numForSale = statsOk ? (stats?.num_for_sale ?? release.num_for_sale ?? 0) : null;
+    const vgPlusPrice = suggestionsOk ? (suggestions?.['Very Good Plus (VG+)']?.value ?? null) : null;
+    const vgPlusCurrency = suggestionsOk ? (suggestions?.['Very Good Plus (VG+)']?.currency || lowestCurrency || 'USD') : 'USD';
+    const estPrice = statsOk ? (vgPlusPrice ?? lowestPrice) : null;
+    const estCurrency = statsOk ? (vgPlusPrice !== null ? vgPlusCurrency : lowestCurrency) : 'USD';
+    const estUsd = statsOk ? CC.toApproxUsd(estPrice, estCurrency) : null;
     const have = Number(release.community?.have ?? 0);
     const want = Number(release.community?.want ?? 0);
-    const isHighValue = estUsd !== null && estUsd >= Number(CC.cfg.threshold || 20);
-    const isScarce = numForSale === 0 && (want >= 10 || (want > have && want >= 5));
+    const isHighValue = statsOk ? (estUsd !== null && estUsd >= Number(CC.cfg.threshold || 20)) : false;
+    const isScarce = statsOk ? (numForSale === 0 && (want >= 10 || (want > have && want >= 5))) : false;
 
     return {
       discogs_id: id,
@@ -1283,6 +1305,8 @@
       pressing_notes: buildDiscogsPressingNotes(release),
       discogs_thumb: release.thumb || release.images?.[0]?.uri150 || '',
       discogs_url: release.uri || `https://www.discogs.com/release/${id}`,
+      stats_ok: statsOk,
+      suggestions_ok: suggestionsOk,
       lowest_price: lowestPrice,
       lowest_currency: lowestCurrency,
       vg_plus_price: vgPlusPrice,
@@ -1301,13 +1325,13 @@
 
   function needsDiscogsDetailHydration(it) {
     if (!it || !Number(it.discogs_id || 0)) return false;
-    if (!Number(it.discogs_details_synced_at || 0)) return true;
-    if (!Array.isArray(it.tracklist) || it.tracklist.length === 0) return true;
-    return false;
+    if (Number(it.discogs_details_synced_at || 0) > 0) return false;
+    return true;
   }
 
   // Hydrate missing tracklists, pressing notes, country, and marketplace values for Discogs-linked Stash items.
-  // Deduplicates by discogs_id, respects the 58/min rate limiter, commits atomically per release without touching local photos/grades/notes!
+  // Deduplicates by discogs_id, respects the 58/min rate limiter, preserves last known prices when stats fail,
+  // commits Stash rows incrementally without touching local photos/grades/notes, and enqueues ONE combined Drive outbox batch!
   CC.enrichSyncedDiscogsStashItems = async (opts = {}) => {
     const {
       stashIds = null,
@@ -1318,7 +1342,7 @@
     } = opts || {};
 
     if (!CC.cfg.discogsToken) {
-      return { hydratedReleases: 0, updatedRows: 0, failedReleases: 0, cancelled: false, totalTargets: 0 };
+      return { hydratedReleases: 0, updatedRows: 0, failedReleases: 0, statsFailedReleases: 0, cancelled: false, totalTargets: 0 };
     }
 
     const stashIdSet = Array.isArray(stashIds) ? new Set(stashIds.map(Number)) : null;
@@ -1340,7 +1364,7 @@
     }
 
     if (!targetRelIds.length) {
-      return { hydratedReleases: 0, updatedRows: 0, failedReleases: 0, cancelled: false, totalTargets: 0 };
+      return { hydratedReleases: 0, updatedRows: 0, failedReleases: 0, statsFailedReleases: 0, cancelled: false, totalTargets: 0 };
     }
 
     discogsEnrichCancelled = false;
@@ -1348,6 +1372,8 @@
     let hydratedReleases = 0;
     let updatedRows = 0;
     let failedReleases = 0;
+    let statsFailedReleases = 0;
+    const runOutboxOpsBySync = new Map();
 
     try {
       for (let i = 0; i < targetRelIds.length; i++) {
@@ -1369,12 +1395,12 @@
           continue;
         }
         if (discogsEnrichCancelled) break;
+        if (!details.stats_ok) statsFailedReleases++;
 
         // Atomically apply hydrated fields to ALL Stash rows matching this releaseId,
-        // strictly preserving local photos, spine, grades, notes, taste, and folder!
+        // strictly preserving local photos, spine, grades, notes, taste, folder, AND last-known prices when stats_ok === false!
         const appliedCount = await withLocalCommitLock(async () => {
           const curStash = await CC.idbGetAll('stash');
-          const outboxBefore = await CC.getCloudOutbox();
           const matching = curStash.filter(x => {
             if (Number(x.discogs_id || 0) !== rid) return false;
             if (stashIdSet && !stashIdSet.has(Number(x.id))) return false;
@@ -1383,7 +1409,6 @@
           if (!matching.length) return 0;
 
           const toPut = [];
-          const ops = [];
           for (const row of matching) {
             const next = { ...row };
             const changed = [];
@@ -1411,46 +1436,44 @@
             }
             if (details.discogs_url) applyIfVal('discogs_url', details.discogs_url, true);
 
-            applyIfVal('lowest_price', details.lowest_price, false);
-            applyIfVal('lowest_currency', details.lowest_currency, false);
-            applyIfVal('vg_plus_price', details.vg_plus_price, false);
-            applyIfVal('vg_plus_currency', details.vg_plus_currency, false);
-            applyIfVal('est_price', details.est_price, false);
-            applyIfVal('est_currency', details.est_currency, false);
-            applyIfVal('est_usd', details.est_usd, false);
-            applyIfVal('num_for_sale', details.num_for_sale, false);
             applyIfVal('have', details.have, false);
             applyIfVal('want', details.want, false);
-            applyIfVal('is_high_value', details.is_high_value, false);
-            applyIfVal('is_scarce', details.is_scarce, false);
+
+            if (details.suggestions_ok) {
+              applyIfVal('vg_plus_price', details.vg_plus_price, false);
+              applyIfVal('vg_plus_currency', details.vg_plus_currency, false);
+            }
+            if (details.stats_ok) {
+              applyIfVal('lowest_price', details.lowest_price, false);
+              applyIfVal('lowest_currency', details.lowest_currency, false);
+              applyIfVal('num_for_sale', details.num_for_sale, false);
+              applyIfVal('is_scarce', details.is_scarce, false);
+
+              const effVgPrice = details.suggestions_ok ? details.vg_plus_price : (next.vg_plus_price ?? null);
+              const effVgCur = details.suggestions_ok ? details.vg_plus_currency : (next.vg_plus_currency || details.lowest_currency || 'USD');
+              const effEstPrice = effVgPrice ?? details.lowest_price;
+              const effEstCur = effVgPrice !== null ? effVgCur : details.lowest_currency;
+              const effEstUsd = CC.toApproxUsd(effEstPrice, effEstCur);
+              const effHighVal = effEstUsd !== null && effEstUsd >= Number(CC.cfg.threshold || 20);
+
+              applyIfVal('est_price', effEstPrice, false);
+              applyIfVal('est_currency', effEstCur, false);
+              applyIfVal('est_usd', effEstUsd, false);
+              applyIfVal('is_high_value', effHighVal, false);
+            }
+
             applyIfVal('discogs_details_synced_at', details.discogs_details_synced_at, false);
 
             const stamped = CC.stampStashRevision(next, row, changed.length ? changed : ['discogs_details_synced_at']);
             toPut.push(stamped);
             const opCopy = { ...stamped };
             delete opCopy.id;
-            ops.push({ type: 'upsert_stash', sync_id: stamped.sync_id, record: opCopy });
+            runOutboxOpsBySync.set(stamped.sync_id, { type: 'upsert_stash', sync_id: stamped.sync_id, record: opCopy });
           }
 
-          const nextQueue = outboxBefore.slice();
-          if (ops.length > 0) {
-            nextQueue.push({
-              batchId: CC.newBatchId(),
-              accountEmail: CC.cfg.googleBoundEmail || CC.cfg.googleEmail || '',
-              createdAt: Date.now(),
-              deviceId: CC.getDeviceId(),
-              status: 'queued',
-              ops
-            });
-          }
-
-          await CC.idbAtomicWrite(({ stashStore, metaStore }) => {
+          await CC.idbAtomicWrite(({ stashStore }) => {
             for (const rec of toPut) stashStore.put(rec);
-            if (ops.length > 0) {
-              metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: nextQueue } });
-            }
           });
-          if (ops.length > 0) CC.setPendingCloudChanges(nextQueue.length);
           return toPut.length;
         });
 
@@ -1465,16 +1488,38 @@
         hydratedReleases,
         updatedRows,
         failedReleases,
+        statsFailedReleases,
         cancelled: Boolean(discogsEnrichCancelled),
         totalTargets: targetRelIds.length
       };
     } finally {
+      if (runOutboxOpsBySync.size > 0) {
+        try {
+          await withLocalCommitLock(async () => {
+            const outboxBefore = await CC.getCloudOutbox();
+            const nextQueue = outboxBefore.slice();
+            nextQueue.push({
+              batchId: CC.newBatchId(),
+              accountEmail: CC.cfg.googleBoundEmail || CC.cfg.googleEmail || '',
+              createdAt: Date.now(),
+              deviceId: CC.getDeviceId(),
+              status: 'queued',
+              ops: Array.from(runOutboxOpsBySync.values())
+            });
+            await CC.idbAtomicWrite(({ metaStore }) => {
+              metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: nextQueue } });
+            });
+            CC.setPendingCloudChanges(nextQueue.length);
+          });
+        } catch (_) {}
+      }
       discogsEnrichRunning = false;
     }
   };
 
   // Delete a Discogs-synced copy from BOTH Discogs AND Local Stash (+ Drive tombstone).
-  // Confirms live folder & instance first so remote folder moves work cleanly and ambiguous legacy copies are never guessed!
+  // Enforces Discogs account ownership, confirms live folder & instance first so remote folder moves work cleanly,
+  // and refuses to guess on ambiguous legacy multi-copy items!
   CC.deleteDiscogsAndStashCopy = async (stashItem, opts = {}) => {
     const { deleteRemote = true } = opts || {};
     if (!stashItem) throw new Error('Stash item not found');
@@ -1489,14 +1534,27 @@
       if (!account || !CC.cfg.discogsToken) {
         throw new Error('Connect and verify your Discogs account in Settings to delete this synced copy from Discogs');
       }
+      const itemAcct = String(stashItem.discogs_account || '').trim();
+      if (itemAcct && itemAcct.toLowerCase() !== account.toLowerCase()) {
+        throw new Error(`This copy belongs to Discogs account @${itemAcct}, not @${account} — switch accounts or delete locally only.`);
+      }
+
+      const verifySameAccount = () => {
+        if ((CC.cfg.discogsUser || '').trim().toLowerCase() !== account.toLowerCase()) {
+          throw new Error('Discogs account changed during delete — aborted safely');
+        }
+      };
+
       const relId = Number(stashItem.discogs_id);
       const liveInsts = await CC.findDiscogsInstances(relId, { throwOnError: true });
+      verifySameAccount();
 
       if (stashItem.discogs_instance_id) {
         const instId = Number(stashItem.discogs_instance_id);
         const live = liveInsts.find(r => Number(r.instance_id) === instId);
         if (live) {
           const actualFolderId = String(live.folder_id ?? stashItem.discogs_folder_id ?? '1');
+          verifySameAccount();
           await CC.deleteDiscogsInstance(actualFolderId, relId, instId);
           remoteStatus = 'deleted_remote';
           deletedInstanceId = instId;
@@ -1512,6 +1570,7 @@
         } else if (liveInsts.length === 1) {
           const only = liveInsts[0];
           const actualFolderId = String(only.folder_id ?? stashItem.discogs_folder_id ?? '1');
+          verifySameAccount();
           await CC.deleteDiscogsInstance(actualFolderId, relId, Number(only.instance_id));
           remoteStatus = 'deleted_remote';
           deletedInstanceId = Number(only.instance_id);
@@ -1642,14 +1701,18 @@
           }
         } catch (netErr) {
           if (netErr.name === 'AbortError' || signal.aborted) throw new DOMException('Cancelled by user', 'AbortError');
-          statusCb(`${retryLabel}: connection hiccup — retrying in 5s (try #${attempt + 1})...`, true, { cancellable: true });
-          await CC.sleep(5000, signal);
+          for (let sec = 5; sec >= 1; sec--) {
+            statusCb(`${retryLabel}: connection hiccup — retrying in ${sec}s (try #${attempt + 1})...`, true, { cancellable: true });
+            await CC.sleep(1000, signal);
+          }
           continue;
         }
 
         if ([500, 502, 503, 504].includes(res.status)) {
-          statusCb(`${retryLabel} busy (HTTP ${res.status}) — retrying in 5s (try #${attempt + 1})...`, true, { cancellable: true });
-          await CC.sleep(5000, signal);
+          for (let sec = 5; sec >= 1; sec--) {
+            statusCb(`${retryLabel} busy (HTTP ${res.status}) — retrying in ${sec}s (try #${attempt + 1})...`, true, { cancellable: true });
+            await CC.sleep(1000, signal);
+          }
           continue;
         }
 
@@ -3431,6 +3494,31 @@
     return out;
   }
 
+  CC.USER_CONFLICT_FIELDS = new Set([
+    'media_condition',
+    'sleeve_condition',
+    'condition_note',
+    'title',
+    'artist',
+    'catno',
+    'discogs_id'
+  ]);
+
+  function isMergeValueEmpty(field, val) {
+    if (val === undefined || val === null || val === '') return true;
+    if (Array.isArray(val) && val.length === 0) return true;
+    if ((field === 'media_condition' || field === 'sleeve_condition') && val === 'Not Graded') return true;
+    return false;
+  }
+
+  function isGenuineConflictEntry(c) {
+    if (!c || !c.field) return false;
+    if (!CC.USER_CONFLICT_FIELDS.has(c.field)) return false;
+    if (isMergeValueEmpty(c.field, c.retainedVal)) return false;
+    if (isMergeValueEmpty(c.field, c.keptVal)) return false;
+    return true;
+  }
+
   CC.mergeStashRecordsDeterministic = (localRec, remoteRec, opts = {}) => {
     const { localUnsynced = false, duplicateMerge = false } = opts || {};
     if (!localRec) return { merged: { ...remoteRec }, conflicts: [] };
@@ -3453,9 +3541,9 @@
     }
 
     const merged = { ...localRec };
-    const conflicts = Array.isArray(localRec.conflicts) ? localRec.conflicts.slice() : [];
+    const conflicts = (Array.isArray(localRec.conflicts) ? localRec.conflicts : []).filter(isGenuineConflictEntry);
     (Array.isArray(remoteRec.conflicts) ? remoteRec.conflicts : []).forEach(c => {
-      if (c && !conflicts.some(x => x.id === c.id)) conflicts.push(c);
+      if (isGenuineConflictEntry(c) && !conflicts.some(x => x.id === c.id)) conflicts.push(c);
     });
     const mergedFieldRevs = Object.assign({}, localRec.field_revs || {});
     const locFRevs = localRec.field_revs || {};
@@ -3536,20 +3624,18 @@
         continue;
       }
 
-      const isGradeField = f === 'media_condition' || f === 'sleeve_condition';
-      const lEmpty = lv === undefined || lv === null || lv === '' || (Array.isArray(lv) && lv.length === 0) || (duplicateMerge && isGradeField && lv === 'Not Graded');
-      const rEmpty = rv === undefined || rv === null || rv === '' || (Array.isArray(rv) && rv.length === 0) || (duplicateMerge && isGradeField && rv === 'Not Graded');
-
-      // Prefer non-empty when the other side is empty/ungraded (or never touched this field)
+      const lEmpty = isMergeValueEmpty(f, lv);
+      const rEmpty = isMergeValueEmpty(f, rv);
       const lMeta = locFRevs[f] || null;
       const rMeta = remFRevs[f] || null;
 
-      if (lEmpty && !rEmpty && (!lMeta || duplicateMerge)) {
+      // Populated value ALWAYS wins silently over empty/ungraded (zero false conflicts!)
+      if (lEmpty && !rEmpty) {
         merged[f] = rv;
         if (rMeta) mergedFieldRevs[f] = rMeta;
         continue;
       }
-      if (rEmpty && !lEmpty && (!rMeta || duplicateMerge)) {
+      if (rEmpty && !lEmpty) {
         continue;
       }
 
@@ -3563,7 +3649,7 @@
         continue;
       }
 
-      // Both sides edited the same field -> converge deterministically by (ts, rev) and retain competing value!
+      // Both sides edited the same non-empty field -> converge deterministically by (ts, rev)
       const lFieldTs = lMeta ? Number(lMeta.ts || locTs) : locTs;
       const rFieldTs = rMeta ? Number(rMeta.ts || remTs) : remTs;
       const lFieldRev = lMeta ? String(lMeta.rev || locRev) : locRev;
@@ -3579,13 +3665,14 @@
         ? (rMeta || { ts: rFieldTs, rev: rFieldRev })
         : (lMeta || { ts: lFieldTs, rev: lFieldRev });
 
-      // Retain competing value for user-meaningful fields
-      const nonConflictFields = new Set([
-        'updated_at', 'num_for_sale', 'have', 'want', 'lowest_price', 'vg_plus_price', 'est_price', 'est_usd',
-        'discogs_folder_verified_at', 'discogs_account', 'discogs_thumb', 'discogs_url', 'genres', 'spotify_matches',
-        'pending_discogs_sync', 'pending_field_sync', 'pending_folder_move'
-      ]);
-      if (!nonConflictFields.has(f)) {
+      // Restrict conflict banners STRICTLY to genuine cross-device edits on USER_CONFLICT_FIELDS!
+      const sameDevice = Boolean(lMeta?.deviceId && rMeta?.deviceId && lMeta.deviceId === rMeta.deviceId);
+      if (
+        CC.USER_CONFLICT_FIELDS.has(f) &&
+        !sameDevice &&
+        !isMergeValueEmpty(f, keptVal) &&
+        !isMergeValueEmpty(f, retainedVal)
+      ) {
         const cEntry = {
           id: `${localRec.sync_id}:${f}:${Math.max(lFieldTs, rFieldTs)}`,
           sync_id: localRec.sync_id,
@@ -3619,10 +3706,163 @@
     merged.rev = compareRevMeta(remTs, remRev, locTs, locRev) > 0 ? (remRev || locRev) : (locRev || remRev);
     merged.created_at = Math.min(Number(localRec.created_at || merged.updated_at), Number(remoteRec.created_at || merged.updated_at));
     if (conflicts.length) merged.conflicts = conflicts.slice(-10);
+    else delete merged.conflicts;
     if (localRec.id !== undefined) merged.id = localRec.id;
 
     return { merged, conflicts: newConflicts };
   };
+
+  // Purge legacy false conflicts (derived/AI/hydrated fields or empty retainedVal) from Stash & cloud_sync_meta_v2
+  CC.purgeFalseConflicts = async () => withLocalCommitLock(async () => {
+    const stash = await CC.idbGetAll('stash');
+    const syncMeta = await CC.getCloudSyncMeta();
+    const toUpdate = [];
+    let purgedCount = 0;
+
+    for (const it of stash) {
+      if (!Array.isArray(it.conflicts) || it.conflicts.length === 0) continue;
+      const kept = it.conflicts.filter(isGenuineConflictEntry);
+      if (kept.length !== it.conflicts.length) {
+        purgedCount += (it.conflicts.length - kept.length);
+        const next = { ...it };
+        if (kept.length) next.conflicts = kept;
+        else delete next.conflicts;
+        toUpdate.push(next);
+      }
+    }
+
+    const prevMetaLen = (syncMeta.conflicts || []).length;
+    const keptMeta = (syncMeta.conflicts || []).filter(isGenuineConflictEntry);
+    const metaChanged = keptMeta.length !== prevMetaLen;
+    if (metaChanged) {
+      purgedCount += (prevMetaLen - keptMeta.length);
+      syncMeta.conflicts = keptMeta;
+    }
+
+    if (toUpdate.length > 0 || metaChanged) {
+      await CC.idbAtomicWrite(({ stashStore, metaStore }) => {
+        for (const rec of toUpdate) stashStore.put(rec);
+        if (metaChanged) metaStore.put({ key: CLOUD_META_KEY, value: syncMeta });
+      });
+    }
+    return { purgedCount, updatedItems: toUpdate.length };
+  });
+
+  // Coalesce queued cloud outbox batches per accountEmail into ONE compact batch (keeping latest op per sync_id / singleton key)
+  CC.coalesceCloudOutbox = async () => withLocalCommitLock(async () => {
+    const rawQueue = await CC.getCloudOutbox();
+    if (rawQueue.length <= 1) {
+      CC.setPendingCloudChanges(rawQueue.length);
+      return { before: rawQueue.length, after: rawQueue.length };
+    }
+
+    const byAccount = new Map();
+    for (const batch of rawQueue) {
+      const acctKey = String(batch?.accountEmail || '').trim().toLowerCase();
+      if (!byAccount.has(acctKey)) byAccount.set(acctKey, []);
+      byAccount.get(acctKey).push(batch);
+    }
+
+    const compacted = [];
+    for (const [, group] of byAccount.entries()) {
+      if (group.length === 1) {
+        compacted.push(group[0]);
+        continue;
+      }
+      const opByKey = new Map();
+      const orderedKeys = [];
+      const setOp = (key, op) => {
+        if (!opByKey.has(key)) orderedKeys.push(key);
+        opByKey.set(key, op);
+      };
+      let isFullSeed = false;
+      let latestCreatedAt = 0;
+      let accountEmail = '';
+      let deviceId = CC.getDeviceId();
+      let idxCounter = 0;
+
+      for (const b of group) {
+        if (b.isFullSeed) isFullSeed = true;
+        if (Number(b.createdAt || 0) > latestCreatedAt) latestCreatedAt = Number(b.createdAt || 0);
+        if (b.accountEmail) accountEmail = b.accountEmail;
+        if (b.deviceId) deviceId = b.deviceId;
+        for (const op of (b.ops || [])) {
+          if (!op || !op.type) continue;
+          if ((op.type === 'upsert_stash' || op.type === 'delete_stash') && op.sync_id) {
+            setOp(`stash:${op.sync_id}`, op);
+          } else if (op.type === 'retire_sync_id' && op.retired_sync_id) {
+            setOp(`retire:${op.retired_sync_id}`, op);
+          } else if (['prefs', 'discogs_index', 'spotify_profile', 'taste_profile'].includes(op.type)) {
+            setOp(`single:${op.type}`, op);
+          } else {
+            setOp(`other:${idxCounter++}`, op);
+          }
+        }
+      }
+
+      const ops = orderedKeys.map(k => opByKey.get(k)).filter(Boolean);
+      if (ops.length > 0) {
+        const mergedBatch = {
+          batchId: CC.newBatchId(),
+          accountEmail,
+          createdAt: latestCreatedAt || Date.now(),
+          deviceId,
+          status: 'queued',
+          ops
+        };
+        if (isFullSeed) mergedBatch.isFullSeed = true;
+        compacted.push(mergedBatch);
+      }
+    }
+
+    await CC.idbAtomicWrite(({ metaStore }) => {
+      metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: compacted } });
+    });
+    CC.setPendingCloudChanges(compacted.length);
+    return { before: rawQueue.length, after: compacted.length };
+  });
+
+  // Commit multiple Stash upserts + ONE combined Drive outbox batch atomically
+  CC.commitBatchStashUpserts = async (records = [], queueOutbox = true) => withLocalCommitLock(async () => {
+    const valid = (Array.isArray(records) ? records : []).filter(Boolean);
+    if (!valid.length) return { count: 0 };
+    const outboxBefore = await CC.getCloudOutbox();
+    const aliases = await CC.getSyncIdAliases();
+    const toPut = [];
+    const ops = [];
+
+    for (const raw of valid) {
+      let rec = { ...raw };
+      if (!rec.sync_id) rec.sync_id = CC.generateSyncId();
+      rec.sync_id = resolveCanonicalSyncId(rec.sync_id, aliases);
+      if (!rec.rev) rec = CC.stampStashRevision(rec, null);
+      toPut.push(rec);
+      const opCopy = { ...rec };
+      delete opCopy.id;
+      ops.push({ type: 'upsert_stash', sync_id: rec.sync_id, record: opCopy });
+    }
+
+    const nextQueue = outboxBefore.slice();
+    if (queueOutbox && ops.length > 0) {
+      nextQueue.push({
+        batchId: CC.newBatchId(),
+        accountEmail: CC.cfg.googleBoundEmail || CC.cfg.googleEmail || '',
+        createdAt: Date.now(),
+        deviceId: CC.getDeviceId(),
+        status: 'queued',
+        ops
+      });
+    }
+
+    await CC.idbAtomicWrite(({ stashStore, metaStore }) => {
+      for (const rec of toPut) stashStore.put(rec);
+      if (queueOutbox && ops.length > 0) {
+        metaStore.put({ key: CLOUD_OUTBOX_KEY, value: { queue: nextQueue } });
+      }
+    });
+    if (queueOutbox && ops.length > 0) CC.setPendingCloudChanges(nextQueue.length);
+    return { count: toPut.length, pendingCount: nextQueue.length };
+  });
 
   // Deduplicate & deterministically merge records sharing a verified (discogs_account, discogs_id, discogs_instance_id)
   // NEVER merges local-only rows, removed rows, or rows without both confirmed account and instance_id!
@@ -4407,7 +4647,8 @@
       CC.persistCfg();
     }
 
-    // 2. Atomically snapshot current outbox queue and mark 'uploading' under commit lock BEFORE network writes
+    // 2. Coalesce redundant queued outbox batches, then atomically snapshot & mark 'uploading' under commit lock BEFORE network writes
+    await CC.coalesceCloudOutbox();
     const batchesToUpload = await withLocalCommitLock(async () => {
       const currentOutbox = await CC.getCloudOutbox();
       const marked = currentOutbox.map(b => ({ ...b, status: 'uploading' }));
