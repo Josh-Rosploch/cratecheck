@@ -1680,10 +1680,12 @@
         throw new Error('Connect and verify your Discogs account in Settings to delete this synced copy from Discogs');
       }
       const itemAcct = String(stashItem.discogs_account || '').trim();
-      if (!itemAcct && !stashItem.discogs_instance_id) {
-        throw new Error('This legacy synced entry lacks both a Discogs account and instance ID — run Sync with Discogs first to link the exact copy safely before deleting from Discogs.');
+      const instNum = Number(stashItem.discogs_instance_id);
+      const hasValidInst = Number.isInteger(instNum) && instNum > 0;
+      if (!itemAcct || !hasValidInst) {
+        throw new Error('This synced copy is missing a verified Discogs account or exact instance ID — run Sync with Discogs first to link the exact copy safely before deleting from Discogs.');
       }
-      if (itemAcct && itemAcct.toLowerCase() !== account.toLowerCase()) {
+      if (itemAcct.toLowerCase() !== account.toLowerCase()) {
         throw new Error(`This copy belongs to Discogs account @${itemAcct}, not @${account} — switch accounts or delete locally only.`);
       }
 
@@ -1697,35 +1699,17 @@
       const liveInsts = await CC.findDiscogsInstances(relId, { throwOnError: true });
       verifySameAccount();
 
-      if (stashItem.discogs_instance_id) {
-        const instId = Number(stashItem.discogs_instance_id);
-        const live = liveInsts.find(r => Number(r.instance_id) === instId);
-        if (live) {
-          const actualFolderId = String(live.folder_id ?? stashItem.discogs_folder_id ?? '1');
-          verifySameAccount();
-          await CC.deleteDiscogsInstance(actualFolderId, relId, instId);
-          remoteStatus = 'deleted_remote';
-          deletedInstanceId = instId;
-          deletedFolderId = actualFolderId;
-        } else {
-          // Already absent on Discogs — safe to remove locally without failing
-          remoteStatus = 'already_absent';
-        }
+      const live = liveInsts.find(r => Number(r.instance_id) === instNum);
+      if (live) {
+        const actualFolderId = String(live.folder_id ?? stashItem.discogs_folder_id ?? '1');
+        verifySameAccount();
+        await CC.deleteDiscogsInstance(actualFolderId, relId, instNum);
+        remoteStatus = 'deleted_remote';
+        deletedInstanceId = instNum;
+        deletedFolderId = actualFolderId;
       } else {
-        // Legacy synced record lacking discogs_instance_id
-        if (liveInsts.length === 0) {
-          remoteStatus = 'already_absent';
-        } else if (liveInsts.length === 1) {
-          const only = liveInsts[0];
-          const actualFolderId = String(only.folder_id ?? stashItem.discogs_folder_id ?? '1');
-          verifySameAccount();
-          await CC.deleteDiscogsInstance(actualFolderId, relId, Number(only.instance_id));
-          remoteStatus = 'deleted_remote';
-          deletedInstanceId = Number(only.instance_id);
-          deletedFolderId = actualFolderId;
-        } else {
-          throw new Error(`You own ${liveInsts.length} copies of release #${relId} on Discogs and this legacy Stash entry isn't linked to a specific copy — run Sync with Discogs first so the exact copy can be deleted safely.`);
-        }
+        // Already absent on Discogs — safe to remove locally without failing
+        remoteStatus = 'already_absent';
       }
     }
 
@@ -1843,13 +1827,25 @@
     return out.join('').trim();
   }
 
+  function stripLeadingThinkAndFences(str) {
+    let s = String(str || '').trim();
+    let prev;
+    do {
+      prev = s;
+      // Strip ONLY leading outside-JSON <think>...</think> wrappers and outer code fences (never touch text inside quoted JSON strings!)
+      s = s.replace(/^\s*<think>[\s\S]*?<\/think>\s*/i, '');
+      s = s.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    } while (s !== prev);
+    return s;
+  }
+
   function cleanJsonText(raw, opts = {}) {
     const { expectedRootType = 'object', validate = null } = (opts && typeof opts === 'object') ? opts : {};
-    const noThink = String(raw || '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-    const cleaned = noThink
-      .replace(/^```(?:json)?\s*/i, '')
-      .replace(/\s*```\s*$/i, '')
-      .trim();
+    const throwParseErr = (msg = 'Could not parse AI JSON response') => {
+      const err = new Error(msg);
+      err.code = 'AI_JSON_PARSE';
+      throw err;
+    };
 
     const matchesExpected = (val) => {
       if (expectedRootType === 'object') {
@@ -1867,52 +1863,73 @@
       return true;
     };
 
-    const tryParseAndValidate = (text) => {
-      if (!text) return { ok: false, val: null };
+    const rawTrimmed = String(raw || '').trim();
+    if (!rawTrimmed) throwParseErr();
+
+    // 1. Try strict JSON.parse FIRST before stripping <think> so literal "<think>...</think>" inside quoted strings is preserved verbatim!
+    let rawParsedOk = false;
+    let rawParsedVal = null;
+    try {
+      rawParsedVal = JSON.parse(rawTrimmed);
+      rawParsedOk = true;
+    } catch (_) {}
+    if (rawParsedOk) {
+      if (matchesExpected(rawParsedVal)) return rawParsedVal;
+      // Valid JSON whose root type/validation fails (e.g. Array when expecting Object) -> throw immediately, NEVER extract inner {...}!
+      throwParseErr('AI JSON root shape did not match expected schema');
+    }
+
+    // 2. Strip ONLY leading <think>...</think> wrappers and outer code fences, then try strict + string-aware repaired full parse
+    const cleaned = stripLeadingThinkAndFences(rawTrimmed);
+    if (!cleaned) throwParseErr();
+
+    for (const fullCand of [cleaned, repairJsonStringAware(cleaned)]) {
+      let parsedOk = false;
+      let parsedVal = null;
       try {
-        const parsed = JSON.parse(text);
-        if (matchesExpected(parsed)) return { ok: true, val: parsed };
+        parsedVal = JSON.parse(fullCand);
+        parsedOk = true;
       } catch (_) {}
-      return { ok: false, val: null };
-    };
+      if (parsedOk) {
+        if (matchesExpected(parsedVal)) return parsedVal;
+        // Full text parsed as valid JSON with wrong root type / failed validation -> throw immediately!
+        throwParseErr('AI JSON root shape did not match expected schema');
+      }
+    }
 
-    const direct = tryParseAndValidate(cleaned);
-    if (direct.ok) return direct.val;
-
-    // Extract outermost span strictly matching expectedRootType
-    // (When expectedRootType === 'object', NEVER fall back to an inner [...] array!)
-    const candidates = [];
+    // 3. Only extract a substring when there is non-JSON wrapper text whose FIRST structural character matches expectedRootType
     const firstObj = cleaned.indexOf('{');
     const lastObj = cleaned.lastIndexOf('}');
     const firstArr = cleaned.indexOf('[');
     const lastArr = cleaned.lastIndexOf(']');
-    const objSpan = (firstObj !== -1 && lastObj > firstObj) ? cleaned.slice(firstObj, lastObj + 1) : '';
-    const arrSpan = (firstArr !== -1 && lastArr > firstArr) ? cleaned.slice(firstArr, lastArr + 1) : '';
+    let span = '';
 
     if (expectedRootType === 'object') {
-      if (objSpan) candidates.push(objSpan);
+      if (firstObj !== -1 && lastObj > firstObj && (firstArr === -1 || firstObj < firstArr)) {
+        span = cleaned.slice(firstObj, lastObj + 1);
+      }
     } else if (expectedRootType === 'array') {
-      if (arrSpan) candidates.push(arrSpan);
+      if (firstArr !== -1 && lastArr > firstArr && (firstObj === -1 || firstArr < firstObj)) {
+        span = cleaned.slice(firstArr, lastArr + 1);
+      }
     } else {
-      if (firstArr !== -1 && (firstObj === -1 || firstArr < firstObj)) {
-        if (arrSpan) candidates.push(arrSpan);
-        if (objSpan) candidates.push(objSpan);
-      } else {
-        if (objSpan) candidates.push(objSpan);
-        if (arrSpan) candidates.push(arrSpan);
+      if (firstArr !== -1 && lastArr > firstArr && (firstObj === -1 || firstArr < firstObj)) {
+        span = cleaned.slice(firstArr, lastArr + 1);
+      } else if (firstObj !== -1 && lastObj > firstObj) {
+        span = cleaned.slice(firstObj, lastObj + 1);
       }
     }
-    candidates.push(cleaned);
 
-    for (const cand of candidates) {
-      const repaired = repairJsonStringAware(cand);
-      const res = tryParseAndValidate(repaired);
-      if (res.ok) return res.val;
+    if (span) {
+      for (const sCand of [span, repairJsonStringAware(span)]) {
+        try {
+          const parsed = JSON.parse(sCand);
+          if (matchesExpected(parsed)) return parsed;
+        } catch (_) {}
+      }
     }
 
-    const err = new Error('Could not parse AI JSON response');
-    err.code = 'AI_JSON_PARSE';
-    throw err;
+    throwParseErr();
   }
   CC.cleanJsonText = cleanJsonText;
 
@@ -3513,6 +3530,56 @@
           fMeta[k] = entry;
         }
       });
+
+      // CRDT per-photo extra_added & extra_tombstones tracking alongside photo_slots.extras
+      const extraAdded = Object.assign({}, prevSlots.extra_added || {}, nextSlots.extra_added || {});
+      const extraTombstones = Object.assign({}, prevSlots.extra_tombstones || {}, nextSlots.extra_tombstones || {});
+      const baseExtraMeta = {
+        ts: Number(prevRecord?.field_revs?.['photo_slots.extras']?.ts || prevRecord?.updated_at || prevRecord?.created_at || 1),
+        rev: String(prevRecord?.field_revs?.['photo_slots.extras']?.rev || prevRecord?.rev || ''),
+        ...(prevRecord?.field_revs?.['photo_slots.extras']?.deviceId ? { deviceId: prevRecord.field_revs['photo_slots.extras'].deviceId } : {})
+      };
+      const prevExtraKeys = new Set();
+      prevSlots.extras.forEach(src => {
+        const k = CC.getPhotoKey(src);
+        if (!k) return;
+        prevExtraKeys.add(k);
+        if (!extraAdded[k]) extraAdded[k] = { ...baseExtraMeta };
+      });
+      const nextExtraKeys = new Set();
+      nextSlots.extras.forEach(src => {
+        const k = CC.getPhotoKey(src);
+        if (!k) return;
+        nextExtraKeys.add(k);
+      });
+
+      if (prevRecord) {
+        prevExtraKeys.forEach(k => {
+          if (!nextExtraKeys.has(k)) {
+            extraTombstones[k] = { ts: now, rev, deviceId };
+          }
+        });
+        nextExtraKeys.forEach(k => {
+          const tomb = extraTombstones[k];
+          const add = extraAdded[k];
+          const wasTombstoned = Boolean(tomb && (!add || compareRevMeta(Number(tomb.ts || 0), String(tomb.rev || ''), Number(add.ts || 0), String(add.rev || '')) >= 0));
+          if (!prevExtraKeys.has(k) || wasTombstoned) {
+            extraAdded[k] = { ts: now, rev, deviceId };
+          }
+        });
+      } else {
+        nextExtraKeys.forEach(k => {
+          if (!extraAdded[k]) extraAdded[k] = { ts: now, rev, deviceId };
+        });
+      }
+
+      rec.photo_slots = {
+        front: nextSlots.front,
+        back: nextSlots.back,
+        extras: nextSlots.extras,
+        extra_added: extraAdded,
+        extra_tombstones: extraTombstones
+      };
     }
 
     rec.field_revs = fRevs;
@@ -3583,13 +3650,48 @@
     });
   }
 
+  function hashString64Hex(str) {
+    const s = String(str || '');
+    let h1 = 0x811c9dc5;
+    let h2 = 0x01000193;
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      h1 ^= c;
+      h1 = Math.imul(h1, 0x01000193) >>> 0;
+      h2 ^= (c + i);
+      h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
+    }
+    return h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0');
+  }
+
+  // Fast synchronous deterministic photo key helper for CRDT extra-slot tracking
+  CC.getPhotoKey = (src) => {
+    const s = String(src || '').trim();
+    if (!s) return '';
+    if (s.startsWith('gdrive:')) return s;
+    if (s.startsWith('data:image/')) return 'fp_' + hashString64Hex(s);
+    return s;
+  };
+
+  function cleanExtraMetaMap(obj) {
+    const out = {};
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+      for (const [k, v] of Object.entries(obj)) {
+        if (k && v && typeof v === 'object') out[String(k)] = { ...v };
+      }
+    }
+    return out;
+  }
+
   // Stable named photo slots helper (migrates legacy positional thumbs cleanly)
   CC.normalizePhotoSlots = (rec) => {
     if (rec && rec.photo_slots && typeof rec.photo_slots === 'object') {
       return {
         front: String(rec.photo_slots.front || ''),
         back: String(rec.photo_slots.back || ''),
-        extras: Array.isArray(rec.photo_slots.extras) ? rec.photo_slots.extras.filter(Boolean).map(String) : []
+        extras: Array.isArray(rec.photo_slots.extras) ? rec.photo_slots.extras.filter(Boolean).map(String) : [],
+        extra_added: cleanExtraMetaMap(rec.photo_slots.extra_added),
+        extra_tombstones: cleanExtraMetaMap(rec.photo_slots.extra_tombstones)
       };
     }
     const legacy = Array.isArray(rec?.thumbs) && rec.thumbs.length
@@ -3600,7 +3702,9 @@
     return {
       front: legacy[0] || '',
       back: legacy[1] || '',
-      extras: legacy.slice(2)
+      extras: legacy.slice(2),
+      extra_added: {},
+      extra_tombstones: {}
     };
   };
 
@@ -4230,12 +4334,32 @@
         continue;
       }
 
-      // Independent per-slot photo_slots merge (photo_slots.front, photo_slots.back, photo_slots.extras)
+      // Independent per-slot photo_slots merge (photo_slots.front, photo_slots.back, photo_slots.extras with per-photo CRDT maps)
       if (f === 'photo_slots') {
         const slL = CC.normalizePhotoSlots({ photo_slots: lv, thumbs: localRec.thumbs, thumb_data_url: localRec.thumb_data_url });
         const slR = CC.normalizePhotoSlots({ photo_slots: rv, thumbs: remoteRec.thumbs, thumb_data_url: remoteRec.thumb_data_url });
         const parentLMeta = locFRevs.photo_slots || localRec._fieldMeta?.photo_slots || null;
         const parentRMeta = remFRevs.photo_slots || remoteRec._fieldMeta?.photo_slots || null;
+
+        const mergeExtraMetaMaps = (mL, mR) => {
+          const out = {};
+          const keys = new Set([...Object.keys(mL || {}), ...Object.keys(mR || {})]);
+          for (const k of keys) {
+            const a = mL?.[k] || null;
+            const b = mR?.[k] || null;
+            if (a && !b) { out[k] = { ...a }; continue; }
+            if (b && !a) { out[k] = { ...b }; continue; }
+            if (a && b) {
+              out[k] = compareRevMeta(Number(b.ts || 0), String(b.rev || ''), Number(a.ts || 0), String(a.rev || '')) > 0
+                ? { ...b }
+                : { ...a };
+            }
+          }
+          return out;
+        };
+
+        const mergedExtraAdded = mergeExtraMetaMaps(slL.extra_added, slR.extra_added);
+        const mergedExtraTombstones = mergeExtraMetaMaps(slL.extra_tombstones, slR.extra_tombstones);
 
         if (duplicateMerge) {
           const combinedExtras = mergePhotoListsUnique(slL.extras, slR.extras);
@@ -4243,7 +4367,7 @@
           const back = slL.back || slR.back || '';
           if (slL.front && slR.front && slL.front !== slR.front && !combinedExtras.includes(slR.front)) combinedExtras.push(slR.front);
           if (slL.back && slR.back && slL.back !== slR.back && !combinedExtras.includes(slR.back)) combinedExtras.push(slR.back);
-          merged.photo_slots = { front, back, extras: combinedExtras };
+          merged.photo_slots = { front, back, extras: combinedExtras, extra_added: mergedExtraAdded, extra_tombstones: mergedExtraTombstones };
           ['photo_slots.front', 'photo_slots.back', 'photo_slots.extras'].forEach(sk => {
             const lm = locFRevs[sk] || localRec._fieldMeta?.[sk] || parentLMeta;
             const rm = remFRevs[sk] || remoteRec._fieldMeta?.[sk] || parentRMeta;
@@ -4273,8 +4397,9 @@
             return lSubVal;
           }
 
-          // 3-way ancestry & concurrent union merge for photo_slots.extras:
-          // Direct descendant honors intentional removals; concurrent edits on different devices union both extras!
+          // Per-photo CRDT merge for photo_slots.extras:
+          // Direct descendant honors removals; concurrent edits union both sides' extras while excluding
+          // every photo whose extra_tombstones[key] is newer than or equal to its extra_added[key].
           if (subKey === 'photo_slots.extras' && isArr) {
             if (rm?.parentRev && lm?.rev && rm.parentRev === lm.rev) {
               mergedFieldRevs[subKey] = rm;
@@ -4284,17 +4409,49 @@
               mergedFieldRevs[subKey] = lm;
               return lSubVal;
             }
+            const lSubTsU = Number(lm?.ts || locTs);
+            const rSubTsU = Number(rm?.ts || remTs);
+            const lSubRevU = String(lm?.rev || locRev);
+            const rSubRevU = String(rm?.rev || remRev);
+            const rWinsU = compareRevMeta(rSubTsU, rSubRevU, lSubTsU, lSubRevU) > 0;
+            const hasCrdtMeta = Object.keys(mergedExtraAdded).length > 0 || Object.keys(mergedExtraTombstones).length > 0;
             const lDev = String(lm?.deviceId || '');
             const rDev = String(rm?.deviceId || '');
             const sameDevice = Boolean(lDev && rDev && lDev === rDev);
-            if (!sameDevice && Array.isArray(lSubVal) && lSubVal.length > 0 && Array.isArray(rSubVal) && rSubVal.length > 0) {
-              const lSubTsU = Number(lm?.ts || locTs);
-              const rSubTsU = Number(rm?.ts || remTs);
-              const lSubRevU = String(lm?.rev || locRev);
-              const rSubRevU = String(rm?.rev || remRev);
-              const rWinsU = compareRevMeta(rSubTsU, rSubRevU, lSubTsU, lSubRevU) > 0;
+
+            if (hasCrdtMeta || (!sameDevice && Array.isArray(lSubVal) && lSubVal.length > 0 && Array.isArray(rSubVal) && rSubVal.length > 0)) {
               mergedFieldRevs[subKey] = rWinsU ? (rm || { ts: rSubTsU, rev: rSubRevU }) : (lm || { ts: lSubTsU, rev: lSubRevU });
-              return mergePhotoListsUnique(rWinsU ? rSubVal : lSubVal, rWinsU ? lSubVal : rSubVal);
+              const firstList = rWinsU ? rSubVal : lSubVal;
+              const secondList = rWinsU ? lSubVal : rSubVal;
+              const byKey = new Map();
+              const addSrc = (src) => {
+                const s = String(src || '').trim();
+                if (!s) return;
+                const k = CC.getPhotoKey(s);
+                if (!k) return;
+                if (!byKey.has(k)) {
+                  byKey.set(k, s);
+                } else if (byKey.get(k).startsWith('gdrive:') && s.startsWith('data:image/')) {
+                  byKey.set(k, s);
+                }
+              };
+              (Array.isArray(firstList) ? firstList : []).forEach(addSrc);
+              (Array.isArray(secondList) ? secondList : []).forEach(addSrc);
+
+              const surviving = [];
+              for (const [k, src] of byKey.entries()) {
+                const tomb = mergedExtraTombstones[k];
+                if (tomb) {
+                  const add = mergedExtraAdded[k];
+                  const delTs = Number(tomb.ts || 0);
+                  const delRev = String(tomb.rev || '');
+                  const addTs = Number(add?.ts || 0);
+                  const addRev = String(add?.rev || '');
+                  if (compareRevMeta(delTs, delRev, addTs, addRev) >= 0) continue;
+                }
+                surviving.push(src);
+              }
+              return surviving;
             }
           }
 
@@ -4329,7 +4486,9 @@
         merged.photo_slots = {
           front: String(mergedFront || ''),
           back: String(mergedBack || ''),
-          extras: Array.isArray(mergedExtras) ? mergedExtras.filter(Boolean).map(String) : []
+          extras: Array.isArray(mergedExtras) ? mergedExtras.filter(Boolean).map(String) : [],
+          extra_added: mergedExtraAdded,
+          extra_tombstones: mergedExtraTombstones
         };
         const maxSlotMeta = [
           mergedFieldRevs['photo_slots.front'],
@@ -5228,6 +5387,49 @@
         return s;
       };
 
+      const hydrateExtraMetaMapFromCache = (mapObj) => {
+        const out = {};
+        if (!mapObj || typeof mapObj !== 'object' || Array.isArray(mapObj)) return out;
+        for (const [rawKey, meta] of Object.entries(mapObj)) {
+          if (!rawKey || !meta || typeof meta !== 'object') continue;
+          let mappedKey = String(rawKey);
+          if (mappedKey.startsWith('gdrive:')) {
+            const fname = mappedKey.slice(7);
+            if (dlCache.has(fname)) mappedKey = CC.getPhotoKey(dlCache.get(fname));
+          }
+          const prev = out[mappedKey];
+          if (!prev || compareRevMeta(Number(meta.ts || 0), String(meta.rev || ''), Number(prev.ts || 0), String(prev.rev || '')) > 0) {
+            out[mappedKey] = { ...meta };
+          }
+        }
+        return out;
+      };
+
+      const hydrateItemPhotosFromCache = (rawObj) => {
+        if (!rawObj || typeof rawObj !== 'object') return rawObj;
+        const item = { ...rawObj };
+        if (item.photo_slots && typeof item.photo_slots === 'object') {
+          item.photo_slots = {
+            front: hydrateFromCache(item.photo_slots.front || ''),
+            back: hydrateFromCache(item.photo_slots.back || ''),
+            extras: Array.isArray(item.photo_slots.extras) ? item.photo_slots.extras.map(hydrateFromCache).filter(Boolean) : [],
+            extra_added: hydrateExtraMetaMapFromCache(item.photo_slots.extra_added),
+            extra_tombstones: hydrateExtraMetaMapFromCache(item.photo_slots.extra_tombstones)
+          };
+          const derived = CC.deriveThumbsFromSlots(item.photo_slots, item.discogs_thumb || '');
+          item.thumbs = derived.thumbs;
+          item.thumb_data_url = derived.thumb_data_url;
+        } else {
+          if (Array.isArray(item.thumbs)) {
+            item.thumbs = item.thumbs.map(hydrateFromCache).filter(Boolean);
+          }
+          if (item.thumb_data_url) item.thumb_data_url = hydrateFromCache(item.thumb_data_url);
+        }
+        if (item.spine_thumb_url) item.spine_thumb_url = hydrateFromCache(item.spine_thumb_url);
+        if (item.spine_source_url) item.spine_source_url = hydrateFromCache(item.spine_source_url);
+        return item;
+      };
+
       await CC.idbAtomicWrite(({ stashStore, metaStore }) => {
         const allReq = stashStore.getAll();
         allReq.onsuccess = () => {
@@ -5259,30 +5461,31 @@
               const mergedAliases = mergeAliasMaps(localAliases, cloudAliases);
               const unsyncedSyncIds = collectUnsyncedSyncIds(outboxQueue, mergedAliases);
 
-              // Fold cloud items resolving any retired sync_ids into their canonical surviving sync_id
+              // Hydrate remote photos from dlCache BEFORE folding/merging against localBySync
+              // so identical local data:image/... and downloaded Drive photos compare equal and never duplicate!
               const cloudStashBySync = new Map();
               for (const rawIt of cloudRawItems) {
                 if (!rawIt?.sync_id) continue;
                 const canonSid = resolveCanonicalSyncId(rawIt.sync_id, mergedAliases);
-                const it = canonSid === rawIt.sync_id ? { ...rawIt } : { ...rawIt, sync_id: canonSid };
+                const hydratedRemote = hydrateItemPhotosFromCache(canonSid === rawIt.sync_id ? rawIt : { ...rawIt, sync_id: canonSid });
                 const prev = cloudStashBySync.get(canonSid);
                 if (!prev) {
-                  cloudStashBySync.set(canonSid, it);
+                  cloudStashBySync.set(canonSid, hydratedRemote);
                 } else {
-                  const mRes = CC.mergeStashRecordsDeterministic(prev, it, { duplicateMerge: rawIt.sync_id !== canonSid });
+                  const mRes = CC.mergeStashRecordsDeterministic(prev, hydratedRemote, { duplicateMerge: rawIt.sync_id !== canonSid });
                   mRes.merged.sync_id = canonSid;
                   cloudStashBySync.set(canonSid, mRes.merged);
                 }
               }
 
-              // Normalize local rows & collapse any local rows pointing to a retired sync_id
+              // Normalize & hydrate local rows & collapse any local rows pointing to a retired sync_id
               const localBySync = new Map();
               const localIdsToDelete = [];
               let retiredLocalMergedCount = 0;
               for (const rawLoc of rawLocalStash) {
                 const origSid = rawLoc.sync_id || CC.generateSyncId();
                 const canonSid = resolveCanonicalSyncId(origSid, mergedAliases);
-                const loc = { ...rawLoc, sync_id: canonSid };
+                const loc = hydrateItemPhotosFromCache({ ...rawLoc, sync_id: canonSid });
                 const prev = localBySync.get(canonSid);
                 if (!prev) {
                   localBySync.set(canonSid, loc);
@@ -5332,24 +5535,8 @@
                 combinedBeforeDedupe.push(rec);
               }
 
-              for (const item of combinedBeforeDedupe) {
-                if (item.photo_slots && typeof item.photo_slots === 'object') {
-                  item.photo_slots = {
-                    front: hydrateFromCache(item.photo_slots.front || ''),
-                    back: hydrateFromCache(item.photo_slots.back || ''),
-                    extras: Array.isArray(item.photo_slots.extras) ? item.photo_slots.extras.map(hydrateFromCache).filter(Boolean) : []
-                  };
-                  const derived = CC.deriveThumbsFromSlots(item.photo_slots, item.discogs_thumb || '');
-                  item.thumbs = derived.thumbs;
-                  item.thumb_data_url = derived.thumb_data_url;
-                } else {
-                  if (Array.isArray(item.thumbs)) {
-                    item.thumbs = item.thumbs.map(hydrateFromCache).filter(Boolean);
-                  }
-                  if (item.thumb_data_url) item.thumb_data_url = hydrateFromCache(item.thumb_data_url);
-                }
-                if (item.spine_thumb_url) item.spine_thumb_url = hydrateFromCache(item.spine_thumb_url);
-                if (item.spine_source_url) item.spine_source_url = hydrateFromCache(item.spine_source_url);
+              for (let idx = 0; idx < combinedBeforeDedupe.length; idx++) {
+                combinedBeforeDedupe[idx] = hydrateItemPhotosFromCache(combinedBeforeDedupe[idx]);
               }
 
               const repair = CC.dedupeAndMergeStashRecords(combinedBeforeDedupe, mergedAliases);
@@ -5674,14 +5861,33 @@
       const out = { ...rec };
       delete out.id;
       if (out.photo_slots && typeof out.photo_slots === 'object') {
+        const keyRemap = new Map();
         const extras = [];
         for (const e of (Array.isArray(out.photo_slots.extras) ? out.photo_slots.extras : [])) {
-          extras.push(await uploadPhotoIfMissing(e));
+          const origKey = CC.getPhotoKey(e);
+          const ref = await uploadPhotoIfMissing(e);
+          if (origKey && ref) keyRemap.set(origKey, ref);
+          extras.push(ref);
         }
+        const remapExtraMeta = async (mapObj) => {
+          const resMap = {};
+          if (!mapObj || typeof mapObj !== 'object' || Array.isArray(mapObj)) return resMap;
+          for (const [k, v] of Object.entries(mapObj)) {
+            if (!k || !v || typeof v !== 'object') continue;
+            let nextK = keyRemap.get(k) || k;
+            if (nextK.startsWith('data:image/')) {
+              nextK = await uploadPhotoIfMissing(nextK);
+            }
+            resMap[nextK] = { ...v };
+          }
+          return resMap;
+        };
         out.photo_slots = {
           front: out.photo_slots.front ? await uploadPhotoIfMissing(out.photo_slots.front) : '',
           back: out.photo_slots.back ? await uploadPhotoIfMissing(out.photo_slots.back) : '',
-          extras: extras.filter(Boolean)
+          extras: extras.filter(Boolean),
+          extra_added: await remapExtraMeta(out.photo_slots.extra_added),
+          extra_tombstones: await remapExtraMeta(out.photo_slots.extra_tombstones)
         };
         const derived = CC.deriveThumbsFromSlots(out.photo_slots, out.discogs_thumb || '');
         out.thumbs = derived.thumbs;
@@ -5850,6 +6056,16 @@
     const incomingSpotify = (data?.spotifyProfile && typeof data.spotifyProfile === 'object')
       ? data.spotifyProfile
       : null;
+    const backupSource = String(
+      data?.deviceId ||
+      data?.sourceId ||
+      data?.backupSource ||
+      data?.spotifyProfile?.accountId ||
+      data?.discogsUser ||
+      data?.cfg?.discogsUser ||
+      ''
+    ).trim().toLowerCase();
+    const backupSourceHash = backupSource ? hashString64Hex(backupSource) : '';
 
     let totalStashCount = 0;
     let changedStashCount = 0;
@@ -5911,10 +6127,32 @@
           });
 
           // 4. Merge incoming stash preserving original rev / updated_at / field_revs / _fieldMeta
-          //    Multiple legacy items sharing the exact same fingerprint get deterministic #2, #3, ... suffixes in array order.
+          //    For legacy backups lacking sync_id: anchor identity on original row id (legacy_orig_id) + source/created_at
+          //    before falling back to deterministic fingerprint + occurrence index (#2, #3, ...).
+          const findLiveByLegacyOrigId = (origId, rawItem) => {
+            const origStr = String(origId);
+            const rawCreated = Number(rawItem?.created_at || 0);
+            const rawDiscogsId = Number(rawItem?.discogs_id || 0);
+            const rawCatNorm = CC.norm(rawItem?.catno || '');
+            const rawFmtNorm = CC.norm(rawItem?.format || '');
+            for (const existing of bySyncId.values()) {
+              if (existing?.legacy_orig_id === undefined || existing?.legacy_orig_id === null) continue;
+              if (String(existing.legacy_orig_id) !== origStr) continue;
+              if (rawCreated > 0) {
+                if (Number(existing.created_at || 0) === rawCreated) return existing.sync_id;
+              } else {
+                const sameDiscogs = rawDiscogsId > 0 && Number(existing.discogs_id || 0) === rawDiscogsId;
+                const sameCatFmt = Boolean(rawCatNorm && CC.norm(existing.catno || '') === rawCatNorm && CC.norm(existing.format || '') === rawFmtNorm);
+                if (sameDiscogs || sameCatFmt) return existing.sync_id;
+              }
+            }
+            return '';
+          };
+
           const incomingFpCounts = new Map();
           for (const rawItem of incomingStash) {
             if (!rawItem || typeof rawItem !== 'object') continue;
+            const origId = (rawItem.id !== undefined && rawItem.id !== null && String(rawItem.id).trim() !== '') ? rawItem.id : null;
             const imp = { ...rawItem };
             delete imp.id;
             const baseFp = computeLegacyFingerprintSyncId(imp);
@@ -5922,7 +6160,24 @@
             incomingFpCounts.set(baseFp, occ);
             const occFp = occ > 1 ? `${baseFp}#${occ}` : baseFp;
             if (!imp.sync_id) {
-              imp.sync_id = legacyFpToSyncId.get(occFp) || occFp;
+              if (origId !== null) {
+                imp.legacy_orig_id = origId;
+                if (backupSource) imp.legacy_source = backupSource;
+                if (backupSourceHash) {
+                  imp.sync_id = `legacy_src_${backupSourceHash}_id_${String(origId)}`;
+                } else {
+                  const matchedSid = findLiveByLegacyOrigId(origId, rawItem);
+                  if (matchedSid) {
+                    imp.sync_id = matchedSid;
+                  } else if (Number(rawItem.created_at || 0) > 0) {
+                    imp.sync_id = `legacy_id_${String(origId)}_c_${Number(rawItem.created_at)}`;
+                  } else {
+                    imp.sync_id = legacyFpToSyncId.get(occFp) || occFp;
+                  }
+                }
+              } else {
+                imp.sync_id = legacyFpToSyncId.get(occFp) || occFp;
+              }
             }
             imp.sync_id = resolveCanonicalSyncId(imp.sync_id, mergedAliases);
             if (!legacyFpToSyncId.has(occFp)) legacyFpToSyncId.set(occFp, imp.sync_id);
@@ -5942,10 +6197,14 @@
               const res = CC.mergeStashRecordsDeterministic(existing, imp);
               const nextRec = { ...res.merged, sync_id: imp.sync_id };
               if (existing.id !== undefined) nextRec.id = existing.id;
+              if (nextRec.legacy_orig_id === undefined && imp.legacy_orig_id !== undefined) nextRec.legacy_orig_id = imp.legacy_orig_id;
+              if (nextRec.legacy_source === undefined && imp.legacy_source !== undefined) nextRec.legacy_source = imp.legacy_source;
               bySyncId.set(imp.sync_id, nextRec);
             } else {
               const canonical = CC.mergeStashRecordsDeterministic(imp, imp).merged;
               canonical.sync_id = imp.sync_id;
+              if (imp.legacy_orig_id !== undefined) canonical.legacy_orig_id = imp.legacy_orig_id;
+              if (imp.legacy_source !== undefined) canonical.legacy_source = imp.legacy_source;
               bySyncId.set(imp.sync_id, canonical);
             }
           }

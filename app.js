@@ -65,6 +65,7 @@
   let camIgnoredUpc = '';
   let camIgnoredUpcMisses = 0;
   let camOpenSeq = 0;
+  let camReplaceSlotOnMax = false;
   let inspectSeq = 0;
   let stageSeq = 0;
   let batchAutoCropCancelled = false;
@@ -442,6 +443,7 @@
     camZoomWideOn = false;
     camImageCapture = null;
     camCapturing = false;
+    camReplaceSlotOnMax = false;
     clearTimeout(camFocusTimer);
     document.getElementById('camFocusRing')?.classList.remove('show');
     const zoomBtn = document.getElementById('camZoomBtn');
@@ -2101,7 +2103,12 @@ Return ONLY valid JSON:
     const entries = getStagedSlotEntries();
     const n = entries.length;
     thumbsEl.classList.remove('hidden');
-    if (!stagedSlots.front) { badge.textContent = 'Shot 1: Front + Side A'; badge.className = 'badge badge-blue'; }
+    if (camReplaceSlotOnMax && n >= 4) {
+      badge.textContent = stagedSlots.extras.length > 0
+        ? 'Shot: Media Close-Up (replaces last Extra)'
+        : 'Shot: Media Close-Up (replaces Back)';
+      badge.className = 'badge badge-yellow';
+    } else if (!stagedSlots.front) { badge.textContent = 'Shot 1: Front + Side A'; badge.className = 'badge badge-blue'; }
     else if (!stagedSlots.back) { badge.textContent = 'Shot 2: Back + Side B'; badge.className = 'badge badge-purple'; }
     else if (!stagedSlots.spine) { badge.textContent = 'Shot 3: Spine (Optional — Auto-Crops)'; badge.className = 'badge badge-green'; }
     else if (n < 4) { badge.textContent = 'Shot 4: Extra Detail (Optional)'; badge.className = 'badge badge-green'; }
@@ -2229,8 +2236,9 @@ Return ONLY valid JSON:
     } catch (_) {}
   }
 
-  window.openCameraViewfinder = async (mode = 'single') => {
+  window.openCameraViewfinder = async (mode = 'single', opts = {}) => {
     camMode = mode === 'pile' ? 'pile' : 'single';
+    camReplaceSlotOnMax = Boolean(camMode === 'single' && opts?.replaceSlotOnMax);
     if (!navigator.mediaDevices?.getUserMedia) {
       document.getElementById(camMode === 'pile' ? 'pileCamInput' : 'nativeCamInput').click();
       return;
@@ -2304,9 +2312,11 @@ Return ONLY valid JSON:
     } catch (_) {}
   };
 
+  window.openMediaCloseUpCamera = () => openCameraViewfinder('single', { replaceSlotOnMax: true });
+
   window.captureViewfinderShot = async () => {
     if (camCapturing) return;
-    if (camMode === 'single' && stagedPhotos.length >= 4) { toast('Max 4 photos reached — tap Finish & Search'); return; }
+    if (camMode === 'single' && stagedPhotos.length >= 4 && !camReplaceSlotOnMax) { toast('Max 4 photos reached — tap Finish & Search'); return; }
     if (camMode === 'pile' && pilePhotos.length >= 4) { toast('Max 4 pile photos reached — tap Finish & Analyze'); return; }
     const video = document.getElementById('camVideo');
     if (!video.videoWidth && !camImageCapture) return;
@@ -2363,7 +2373,20 @@ Return ONLY valid JSON:
           pair.spineCropped = false;
           pair.cropBox = null;
           pair.rotationDeg = 0;
-          const placed = assignPhotoToFirstEmptySlot(pair);
+          let placed;
+          if (stagedPhotos.length >= 4 && camReplaceSlotOnMax) {
+            if (Array.isArray(stagedSlots.extras) && stagedSlots.extras.length > 0) {
+              const lastIdx = stagedSlots.extras.length - 1;
+              stagedSlots.extras[lastIdx] = pair;
+              placed = { slotKey: 'extra', extraIdx: lastIdx, replaced: true };
+            } else {
+              stagedSlots.back = pair;
+              placed = { slotKey: 'back', extraIdx: -1, replaced: true };
+            }
+            syncStagedPhotosCompat();
+          } else {
+            placed = assignPhotoToFirstEmptySlot(pair);
+          }
           if (placed.slotKey === 'spine') {
             stagedSpineSourceUrl = pair.origDataUrl || pair.saveWebp;
             stagedSpineThumbUrl = pair.saveWebp;
@@ -2371,7 +2394,8 @@ Return ONLY valid JSON:
           }
           updateStageUI();
           updateCameraOverlayUI();
-          if (placed.slotKey === 'front') toast('Front + Side A captured! Flip for Back + Side B');
+          if (placed.replaced) toast('Media close-up captured! Tap 🔍 Finish & Search');
+          else if (placed.slotKey === 'front') toast('Front + Side A captured! Flip for Back + Side B');
           else if (placed.slotKey === 'back') toast('Back + Side B captured! Snap Spine (optional) or Finish & Search');
           else if (placed.slotKey === 'spine') toast('Spine captured! Review orientation or tap 🔍 Finish & Search');
           else toast('Extra shot captured! Tap 🔍 Finish & Search');
@@ -3754,7 +3778,7 @@ Return ONLY valid JSON:
           </div>
         </div>
         <div class="inline-actions" style="gap:6px;">
-          <button type="button" class="btn btn-green btn-sm" onclick="openCameraViewfinder('single')">📷 Take Media Close-Up</button>
+          <button type="button" class="btn btn-green btn-sm" onclick="openMediaCloseUpCamera()">📷 Take Media Close-Up</button>
           <button type="button" class="btn ${f.mode === 'packaging' ? 'btn-green' : 'btn-secondary'} btn-sm" onclick="switchFrankenVerifyMode('packaging')">📦 Search by Packaging Anyway</button>
         </div>
       `;
@@ -3786,7 +3810,7 @@ Return ONLY valid JSON:
         </div>
       </div>
       <div class="inline-actions" style="gap:6px;">
-        ${f.mediaUnverified ? `<button type="button" class="btn btn-green btn-sm" onclick="openCameraViewfinder('single')">📷 Take Media Close-Up</button>` : ''}
+        ${f.mediaUnverified ? `<button type="button" class="btn btn-green btn-sm" onclick="openMediaCloseUpCamera()">📷 Take Media Close-Up</button>` : ''}
         <button type="button" class="btn ${f.mode === 'media' && !f.mediaUnverified ? 'btn-green' : 'btn-secondary'} btn-sm" onclick="switchFrankenVerifyMode('media')">📼 Verify Media (Default)</button>
         <button type="button" class="btn ${f.mode === 'packaging' ? 'btn-green' : 'btn-secondary'} btn-sm" onclick="switchFrankenVerifyMode('packaging')">📦 Verify Packaging Instead</button>
         ${isDiffAlbumOrFmt ? `<button type="button" class="btn btn-secondary btn-sm" onclick="saveOrphanPackagingLocally()">💾 Also Save Orphan Packaging Locally</button>` : ''}
@@ -4170,7 +4194,7 @@ Return ONLY valid JSON:
 
       const medId = ext.media_identity && typeof ext.media_identity === 'object' ? ext.media_identity : {};
       const pkgId = ext.packaging_identity && typeof ext.packaging_identity === 'object' ? ext.packaging_identity : {};
-      const mediaReadable = isIdentityReadable(medId);
+      const mediaReadable = ext.media_visible !== false && isIdentityReadable(medId);
       const pkgReadable = isIdentityReadable(pkgId);
       const frankenMediaUnverified = Boolean(pkgReadable && !mediaReadable);
 
@@ -6220,6 +6244,46 @@ Return ONLY valid JSON:
 Include up to 6 genuinely recognizable songs in notable_songs (or empty array if none).`;
   }
 
+  function parseValidTasteResult(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const sRaw = raw.score;
+    if (sRaw === null || sRaw === undefined || typeof sRaw === 'boolean') return null;
+    if (typeof sRaw === 'string' && !/^\s*\d+(?:\.\d+)?\s*$/.test(sRaw)) return null;
+    const num = Number(sRaw);
+    if (!Number.isFinite(num) || num < 1 || num > 10) return null;
+    const score = Math.round(num);
+    if (score < 1 || score > 10) return null;
+    const verdict = ['KEEP', 'LISTEN', 'SELL / SKIP'].includes(raw.verdict)
+      ? raw.verdict
+      : (score >= 7 ? 'KEEP' : score >= 5 ? 'LISTEN' : 'SELL / SKIP');
+    return {
+      score,
+      verdict,
+      summary: typeof raw.summary === 'string' ? raw.summary.trim() : '',
+      context_note: (raw.context_note !== undefined && raw.context_note !== null) ? String(raw.context_note).trim() : undefined,
+      notable_songs: Array.isArray(raw.notable_songs) ? raw.notable_songs : undefined,
+      litmus_track: typeof raw.litmus_track === 'string' ? raw.litmus_track.trim() : '',
+      litmus_artist: (raw.litmus_artist !== undefined && raw.litmus_artist !== null) ? String(raw.litmus_artist).trim() : undefined
+    };
+  }
+
+  function getPressingFingerprint(rec) {
+    return {
+      discogs_id: Number(rec?.discogs_id || 0),
+      artist: norm(rec?.artist || ''),
+      title: norm(rec?.title || ''),
+      format: norm(rec?.format || '')
+    };
+  }
+
+  function pressingFingerprintsMatch(a, b) {
+    return Boolean(a && b &&
+      a.discogs_id === b.discogs_id &&
+      a.artist === b.artist &&
+      a.title === b.title &&
+      a.format === b.format);
+  }
+
   async function runTasteAnalysis(item, myRunId, myInspectSeq = inspectSeq) {
     if (!CC.isAiReady()) {
       document.getElementById('tasteScore').textContent = '—';
@@ -6227,7 +6291,7 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
       return;
     }
 
-    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v232`;
+    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v233`;
     if (tasteCache.has(cacheKey)) {
       if (myRunId !== scanRunId || myInspectSeq !== inspectSeq || currentInspected !== item) return;
       applyTasteUI(item, tasteCache.get(cacheKey), myRunId);
@@ -6237,11 +6301,17 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
     const prompt = buildTasteEvaluationPrompt(item, { localMatch: item.spotify_matches });
 
     try {
-      const res = await CC.callAI([{ text: prompt }], null, { retryLabel: 'Taste Check' });
+      const res = await CC.callAI([{ text: prompt }], null, {
+        retryLabel: 'Taste Check',
+        validate: (r) => Boolean(parseValidTasteResult(r))
+      });
+      const valid = parseValidTasteResult(res);
+      if (!valid) throw new Error('Invalid AI taste score returned');
+      const normalizedRes = { ...res, score: valid.score, verdict: valid.verdict };
       setStatus('', false);
-      tasteCache.set(cacheKey, res);
+      tasteCache.set(cacheKey, normalizedRes);
       if (myRunId !== scanRunId || myInspectSeq !== inspectSeq || currentInspected !== item) return;
-      applyTasteUI(item, res, myRunId);
+      applyTasteUI(item, normalizedRes, myRunId);
     } catch (err) {
       setStatus('', false);
       if (myRunId !== scanRunId || myInspectSeq !== inspectSeq || currentInspected !== item) return;
@@ -7493,66 +7563,50 @@ Return ONLY valid JSON:
     if (!oldInfo || !oldInfo.releaseId || !cfg.discogsUser) return { ok: true, warning: '' };
 
     const expectedAccount = String(cfg.discogsUser || '').trim().toLowerCase();
-    if (!String(oldInfo.account || '').trim() && !oldInfo.instanceId) {
+    const oldAccount = String(oldInfo.account || '').trim();
+    const oldInstNum = Number(oldInfo.instanceId);
+    const hasValidInst = Number.isInteger(oldInstNum) && oldInstNum > 0;
+
+    if (!oldAccount || !hasValidInst) {
       const amb = { ...oldInfo, ambiguous: true };
       record.pending_delete_old = amb;
       await CC.mutateStashItemIfAlive(record.id, record.sync_id, (live) => ({ ...live, pending_delete_old: amb }), ['pending_delete_old']);
       return {
         ok: false,
-        warning: 'Legacy pending removal lacks both Discogs account and instance ID — kept untouched on Discogs so the wrong copy isn\'t removed.'
+        warning: `Pending removal for old pressing #${oldInfo.releaseId} lacks a verified Discogs account or exact instance ID — kept untouched on Discogs so the wrong copy isn't removed.`
       };
     }
-    if (!isOwnedByActiveDiscogsAccount(oldInfo)) {
+    if (oldAccount.toLowerCase() !== expectedAccount) {
       return {
         ok: false,
-        warning: `Old pressing #${oldInfo.releaseId} belongs to Discogs @${oldInfo.account}, not @${cfg.discogsUser} — switch Discogs accounts before removing it.`
+        warning: `Old pressing #${oldInfo.releaseId} belongs to Discogs @${oldAccount}, not @${cfg.discogsUser} — switch Discogs accounts before removing it.`
       };
     }
 
     try {
-      let oldInst = oldInfo.instanceId ? Number(oldInfo.instanceId) : null;
       let oldFolder = String(oldInfo.folderId || '1');
 
       // Always verify live copies on Discogs (throwOnError: true so network outages never wipe pending_delete_old)
       const insts = await CC.findDiscogsInstances(oldInfo.releaseId, { throwOnError: true });
-      if (oldInst) {
-        const exact = insts.find(r => Number(r.instance_id) === oldInst);
-        if (!exact) {
-          // That exact instance is already gone — NEVER guess another copy
-          record.pending_delete_old = null;
-          await CC.mutateStashItemIfAlive(record.id, record.sync_id, (live) => ({ ...live, pending_delete_old: null }), ['pending_delete_old']);
-          return { ok: true, warning: '' };
-        }
-        oldFolder = String(exact.folder_id || oldFolder);
-      } else {
-        if (insts.length === 0) {
-          record.pending_delete_old = null;
-          await CC.mutateStashItemIfAlive(record.id, record.sync_id, (live) => ({ ...live, pending_delete_old: null }), ['pending_delete_old']);
-          return { ok: true, warning: '' };
-        }
-        if (insts.length > 1) {
-          const amb = { ...oldInfo, ambiguous: true, copyCount: insts.length };
-          record.pending_delete_old = amb;
-          await CC.mutateStashItemIfAlive(record.id, record.sync_id, (live) => ({ ...live, pending_delete_old: amb }), ['pending_delete_old']);
-          return {
-            ok: false,
-            warning: `You own ${insts.length} copies of old pressing #${oldInfo.releaseId} on Discogs — kept untouched so the wrong copy isn't deleted. Please remove the duplicate manually on Discogs.`
-          };
-        }
-        oldInst = Number(insts[0].instance_id);
-        oldFolder = String(insts[0].folder_id || oldFolder);
+      const exact = insts.find(r => Number(r.instance_id) === oldInstNum);
+      if (!exact) {
+        // That exact instance is already gone — NEVER guess another copy
+        record.pending_delete_old = null;
+        await CC.mutateStashItemIfAlive(record.id, record.sync_id, (live) => ({ ...live, pending_delete_old: null }), ['pending_delete_old']);
+        return { ok: true, warning: '' };
       }
+      oldFolder = String(exact.folder_id || oldFolder);
 
       // Fresh Discogs account ownership re-check IMMEDIATELY before calling DELETE!
       const liveAccountNow = String(cfg.discogsUser || '').trim().toLowerCase();
-      if (!isOwnedByActiveDiscogsAccount(oldInfo) || !liveAccountNow || liveAccountNow !== expectedAccount) {
+      if (!liveAccountNow || liveAccountNow !== expectedAccount || oldAccount.toLowerCase() !== liveAccountNow) {
         return {
           ok: false,
           warning: `Discogs account changed while verifying old copy #${oldInfo.releaseId} — aborted remote delete safely.`
         };
       }
 
-      await CC.deleteDiscogsInstance(oldFolder, oldInfo.releaseId, oldInst);
+      await CC.deleteDiscogsInstance(oldFolder, oldInfo.releaseId, oldInstNum);
       record.pending_delete_old = null;
       await CC.mutateStashItemIfAlive(record.id, record.sync_id, (live) => ({ ...live, pending_delete_old: null }), ['pending_delete_old']);
       return { ok: true, warning: '' };
@@ -7915,12 +7969,12 @@ Return ONLY valid JSON:
     toast('📥 Saved to Offline Queue (⏳ To Verify) — ready for next scan!', 3400);
   };
 
-  async function hydratePhotoPairFromSavedDataUrl(dataUrl, isSpine = false) {
+  async function hydratePhotoPairFromSavedDataUrl(dataUrl, isSpine = false, markAutoCropped = true) {
     const s = String(dataUrl || '').trim();
     if (!s || isUnresolvedDriveRef(s) || !s.startsWith('data:image/')) return null;
     const apiB64 = await renderDataUrlToCompactJpegB64(s, 2048, 0.90);
     if (!apiB64) return null;
-    return { apiB64, saveWebp: s, origDataUrl: s, autoCropped: true, spineCropped: Boolean(isSpine), cropBox: null, rotationDeg: 0 };
+    return { apiB64, saveWebp: s, origDataUrl: s, autoCropped: Boolean(markAutoCropped), spineCropped: Boolean(isSpine), cropBox: null, rotationDeg: 0 };
   }
 
   window.startEditStashItem = async (id, opts = {}) => {
@@ -7954,10 +8008,10 @@ Return ONLY valid JSON:
     if (preloadPhotos || isQueued) {
       setStatus('Loading saved photos into scanner...', true);
       const slots = getStashPhotoSlots(it);
-      if (slots.front) stagedSlots.front = await hydratePhotoPairFromSavedDataUrl(slots.front);
-      if (slots.back) stagedSlots.back = await hydratePhotoPairFromSavedDataUrl(slots.back);
+      if (slots.front) stagedSlots.front = await hydratePhotoPairFromSavedDataUrl(slots.front, false, !isQueued);
+      if (slots.back) stagedSlots.back = await hydratePhotoPairFromSavedDataUrl(slots.back, false, !isQueued);
       if (it.spine_thumb_url) {
-        stagedSlots.spine = await hydratePhotoPairFromSavedDataUrl(it.spine_thumb_url, !isQueued);
+        stagedSlots.spine = await hydratePhotoPairFromSavedDataUrl(it.spine_thumb_url, !isQueued, !isQueued);
         if (stagedSlots.spine) {
           stagedSpineThumbUrl = it.spine_thumb_url;
           stagedSpineSourceUrl = it.spine_source_url || it.spine_thumb_url;
@@ -7965,7 +8019,7 @@ Return ONLY valid JSON:
         }
       }
       for (const ex of (slots.extras || []).slice(0, 2)) {
-        const pair = await hydratePhotoPairFromSavedDataUrl(ex);
+        const pair = await hydratePhotoPairFromSavedDataUrl(ex, false, !isQueued);
         if (pair) stagedSlots.extras.push(pair);
       }
       syncStagedPhotosCompat();
@@ -8522,6 +8576,8 @@ Return ONLY valid JSON:
     const origArtist = it.artist || '';
     const origTitle = it.title || '';
     const fallbackTrack = it.tracklist?.[0]?.title || it.litmus_track || '';
+    const capturedFp = getPressingFingerprint(it);
+    const startProfileTs = getLatestTasteProfileTime();
     const rescoreBtn = document.getElementById('sdBtnRescore');
     if (rescoreBtn) {
       rescoreBtn.disabled = true;
@@ -8534,33 +8590,48 @@ Return ONLY valid JSON:
 
     setStatus(`🔄 Re-scoring "${origArtist} — ${origTitle}"...`, true, { cancellable: true });
     try {
-      const res = await CC.callAI([{ text: prompt }], null, { retryLabel: 'Stash Re-Score' });
+      const res = await CC.callAI([{ text: prompt }], null, {
+        retryLabel: 'Stash Re-Score',
+        validate: (r) => Boolean(parseValidTasteResult(r))
+      });
+      const parsed = parseValidTasteResult(res);
+      if (!parsed) throw new Error('Invalid AI taste score returned');
+
       const tastePatch = {
-        taste_score: res.score,
-        taste_verdict: res.verdict,
-        taste_summary: res.summary || '',
-        context_note: res.context_note || '',
-        notable_songs: normalizeNotableList(res.notable_songs, origArtist),
-        litmus_track: res.litmus_track || fallbackTrack,
-        litmus_artist: res.litmus_artist || '',
+        taste_score: parsed.score,
+        taste_verdict: parsed.verdict,
+        taste_summary: parsed.summary || '',
+        context_note: parsed.context_note !== undefined ? parsed.context_note : '',
+        notable_songs: normalizeNotableList(parsed.notable_songs, origArtist),
+        litmus_track: parsed.litmus_track || fallbackTrack,
+        litmus_artist: parsed.litmus_artist !== undefined ? parsed.litmus_artist : '',
         taste_scored_at: Date.now()
       };
 
       const mutRes = await CC.mutateStashItemIfAlive(
         id,
         targetSyncId,
-        (live) => ({ ...live, ...tastePatch }),
+        (live) => {
+          if (getLatestTasteProfileTime() !== startProfileTs) return null;
+          if (!pressingFingerprintsMatch(getPressingFingerprint(live), capturedFp)) return null;
+          return { ...live, ...tastePatch };
+        },
         TASTE_FIELDS
       );
 
-      tasteCache.delete(`${norm(origArtist)}|${norm(origTitle)}|v232`);
+      tasteCache.delete(`${norm(origArtist)}|${norm(origTitle)}|v233`);
       await loadStashCache();
       renderStash();
       setStatus('', false);
       rescoringStashItemId = null;
 
       if (mutRes.aborted) {
-        toast('Item was deleted while re-scoring — taste update discarded', 3800);
+        toast(
+          mutRes.reason === 'noop'
+            ? 'Pressing or Taste Profile changed while re-scoring — stale score discarded'
+            : 'Item was deleted while re-scoring — taste update discarded',
+          4000
+        );
         return;
       }
 
@@ -8603,6 +8674,7 @@ Return ONLY valid JSON:
     if (!targets.length) return { updated: 0, failed: 0, skipped: true };
 
     const BATCH_SIZE = 5;
+    const startProfileTs = getLatestTasteProfileTime();
     recalibratingStash = true;
     recalibrateProgressText = `⏳ Recalibrating 1–${Math.min(BATCH_SIZE, targets.length)} of ${targets.length}...`;
     updateRecalibrateStashBtn();
@@ -8611,31 +8683,31 @@ Return ONLY valid JSON:
     let failedTotal = 0;
     let skippedDeletedTotal = 0;
 
-    const buildTastePatchForLive = (liveRow, sc, nowTs) => {
-      const score = Math.max(1, Math.min(10, Math.round(Number(sc.score) || 5)));
-      const verdict = ['KEEP', 'LISTEN', 'SELL / SKIP'].includes(sc.verdict)
-        ? sc.verdict
-        : (score >= 7 ? 'KEEP' : score >= 5 ? 'LISTEN' : 'SELL / SKIP');
+    const buildTastePatchForLive = (liveRow, parsed, nowTs) => {
       const next = {
         ...liveRow,
-        taste_score: score,
-        taste_verdict: verdict,
+        taste_score: parsed.score,
+        taste_verdict: parsed.verdict,
         taste_scored_at: nowTs
       };
-      if (sc.summary) next.taste_summary = String(sc.summary).trim();
-      if (sc.context_note !== undefined) next.context_note = String(sc.context_note || '').trim();
-      if (Array.isArray(sc.notable_songs)) {
-        next.notable_songs = normalizeNotableList(sc.notable_songs, liveRow.artist).slice(0, 4);
+      if (parsed.summary) next.taste_summary = parsed.summary;
+      if (parsed.context_note !== undefined) next.context_note = parsed.context_note;
+      if (Array.isArray(parsed.notable_songs)) {
+        next.notable_songs = normalizeNotableList(parsed.notable_songs, liveRow.artist).slice(0, 4);
       }
-      if (sc.litmus_track) next.litmus_track = String(sc.litmus_track).trim();
+      if (parsed.litmus_track) next.litmus_track = parsed.litmus_track;
       else if (!liveRow.litmus_track && liveRow.tracklist?.[0]?.title) next.litmus_track = liveRow.tracklist[0].title;
-      if (sc.litmus_artist !== undefined) next.litmus_artist = String(sc.litmus_artist || '').trim();
+      if (parsed.litmus_artist !== undefined) next.litmus_artist = parsed.litmus_artist;
       return next;
     };
 
     try {
       for (let start = 0; start < targets.length; start += BATCH_SIZE) {
         if (!recalibratingStash) break;
+        if (getLatestTasteProfileTime() !== startProfileTs) {
+          toast('Taste Profile changed mid-recalibration — stopping to avoid writing stale scores', 4600);
+          break;
+        }
         const chunk = targets.slice(start, start + BATCH_SIZE);
         const endNum = start + chunk.length;
         recalibrateProgressText = `⏳ Recalibrating ${start + 1}–${endNum} of ${targets.length}...`;
@@ -8644,7 +8716,7 @@ Return ONLY valid JSON:
 
         const chunkWithMatches = chunk.map(it => {
           const lm = checkLocalSpotify(it);
-          return { it, lm };
+          return { it, lm, fp: getPressingFingerprint(it) };
         });
 
         const chunkUpdates = [];
@@ -8654,20 +8726,27 @@ Return ONLY valid JSON:
           const batchRes = await CC.callAI([{ text: prompt }], null, {
             retryLabel: `Recalibrate ${start + 1}-${endNum}`,
             maxOutputTokens: 8192,
-            validate: (r) => Array.isArray(r?.scores)
+            validate: (r) => Array.isArray(r?.scores) && r.scores.length > 0 &&
+              r.scores.every(s => s && typeof s === 'object' && Number.isInteger(Number(s.idx)) && Boolean(parseValidTasteResult(s)))
           });
           if (!recalibratingStash) break;
 
-          const scoreMap = new Map((batchRes?.scores || []).map(s => [s.idx, s]));
+          const validEntries = (batchRes?.scores || []).filter(s => s && typeof s === 'object' && Number.isInteger(Number(s.idx)));
+          const scoreMap = new Map(validEntries.map(s => [Number(s.idx), s]));
           const now = Date.now();
-          for (let i = 0; i < chunk.length; i++) {
+          for (let i = 0; i < chunkWithMatches.length; i++) {
             const sc = scoreMap.get(i);
-            if (!sc) { failedTotal++; continue; }
-            const targetItem = chunk[i];
+            const parsed = parseValidTasteResult(sc);
+            if (!parsed) { failedTotal++; continue; }
+            const { it: targetItem, fp: capturedFp } = chunkWithMatches[i];
             chunkUpdates.push({
               id: targetItem.id,
               sync_id: targetItem.sync_id || null,
-              patchFn: (liveRow) => buildTastePatchForLive(liveRow, sc, now)
+              patchFn: (liveRow) => {
+                if (getLatestTasteProfileTime() !== startProfileTs) return null;
+                if (!pressingFingerprintsMatch(getPressingFingerprint(liveRow), capturedFp)) return null;
+                return buildTastePatchForLive(liveRow, parsed, now);
+              }
             });
           }
         } catch (chunkErr) {
@@ -8680,20 +8759,31 @@ Return ONLY valid JSON:
         if (batchParseFailed) {
           for (let i = 0; i < chunkWithMatches.length; i++) {
             if (!recalibratingStash) break;
-            const { it, lm } = chunkWithMatches[i];
+            if (getLatestTasteProfileTime() !== startProfileTs) break;
+            const { it, lm, fp: capturedFp } = chunkWithMatches[i];
             const itemNum = start + i + 1;
             recalibrateProgressText = `⏳ Fallback ${itemNum}/${targets.length}...`;
             updateRecalibrateStashBtn();
             setStatus(`🔄 Recalibrating item ${itemNum}/${targets.length} (1-by-1 fallback)...`, true, { cancellable: true });
             try {
               const singlePrompt = buildTasteEvaluationPrompt(it, { localMatch: lm });
-              const singleRes = await CC.callAI([{ text: singlePrompt }], null, { retryLabel: `Recalibrate ${itemNum}/${targets.length}`, maxOutputTokens: 2048 });
+              const singleRes = await CC.callAI([{ text: singlePrompt }], null, {
+                retryLabel: `Recalibrate ${itemNum}/${targets.length}`,
+                maxOutputTokens: 2048,
+                validate: (r) => Boolean(parseValidTasteResult(r))
+              });
               if (!recalibratingStash) break;
+              const parsedSingle = parseValidTasteResult(singleRes);
+              if (!parsedSingle) { failedTotal++; continue; }
               const nowSingle = Date.now();
               chunkUpdates.push({
                 id: it.id,
                 sync_id: it.sync_id || null,
-                patchFn: (liveRow) => buildTastePatchForLive(liveRow, singleRes, nowSingle)
+                patchFn: (liveRow) => {
+                  if (getLatestTasteProfileTime() !== startProfileTs) return null;
+                  if (!pressingFingerprintsMatch(getPressingFingerprint(liveRow), capturedFp)) return null;
+                  return buildTastePatchForLive(liveRow, parsedSingle, nowSingle);
+                }
               });
             } catch (singleErr) {
               if (singleErr?.name === 'AbortError' || !recalibratingStash) throw singleErr;
@@ -10108,6 +10198,7 @@ Return ONLY valid JSON:
       const aliasesRec = await CC.idbGet('meta', 'sync_id_aliases_v1');
       const payload = {
         version: 11,
+        deviceId: CC.getDeviceId(),
         exportedAt: new Date().toISOString(),
         unresolvedDrivePhotos: unresolvedCount,
         stash: stashCache,
@@ -10872,6 +10963,7 @@ Return ONLY valid JSON:
     const hasDrivePre = steps.some(s => s.key === 'drive_pre');
     const hasSpotify = steps.some(s => s.key === 'spotify');
     const hasDraftTaste = steps.some(s => s.key === 'draft_taste');
+    let drivePreCompleted = false;
     const notes = [];
 
     const summarizeCounts = () => {
@@ -10885,17 +10977,20 @@ Return ONLY valid JSON:
       return { completed, skipped, failed, text: parts.join(' · ') };
     };
 
+    const abortIfCancelled = () => {
+      if (!rebuildWorkflowCancelled) return false;
+      stoppedEarly = true;
+      const cnt = summarizeCounts();
+      setProg(`Cancelled (${cnt.text})`, (cnt.completed / steps.length) * 100, 'warn', `${cnt.completed}/${steps.length}`);
+      toast('Maintenance workflow cancelled');
+      return true;
+    };
+
     let stoppedEarly = false;
 
     try {
       for (let i = 0; i < steps.length; i++) {
-        if (rebuildWorkflowCancelled) {
-          stoppedEarly = true;
-          const cnt = summarizeCounts();
-          setProg(`Cancelled (${cnt.text})`, (cnt.completed / steps.length) * 100, 'warn', `${cnt.completed}/${steps.length}`);
-          toast('Maintenance workflow cancelled');
-          return;
-        }
+        if (abortIfCancelled()) return;
         const st = steps[i];
         setProg(`Step ${i + 1}/${steps.length}: ${st.label}`, (i / steps.length) * 100, 'running');
 
@@ -10908,9 +11003,15 @@ Return ONLY valid JSON:
             stepNote = 'Google Drive not connected';
           } else {
             const dRes = await runGoogleSyncFlow({ interactive: false, quiet: false, publishInitialLocal: false });
-            if (!dRes || !dRes.ok || dRes.status === 'account_mismatch' || dRes.status === 'partial') {
+            if (abortIfCancelled()) return;
+            if (dRes?.awaitingExplicitPublish) {
+              status = 'skipped';
+              stepNote = 'Google Drive empty — publish local profile first';
+            } else if (!dRes || !dRes.ok || dRes.status === 'account_mismatch' || dRes.status === 'partial') {
               status = 'failed';
-              stepNote = 'Google Drive pre-sync failed';
+              stepNote = dRes?.status === 'account_mismatch' ? 'Google Drive account mismatch' : 'Google Drive pre-sync failed';
+            } else {
+              drivePreCompleted = true;
             }
           }
         } else if (st.key === 'spotify') {
@@ -10925,10 +11026,13 @@ Return ONLY valid JSON:
               ensureSpotifyCooldownTicker();
               toast(`⏸️ ${stepNote}`, 4800);
             } else {
-              const canRunDirect = Boolean(
-                (cfg.spotifyRefreshToken && await CC.refreshSpotifyToken()) ||
-                (cfg.spotifyAccessToken && Date.now() < Number(cfg.spotifyExpiresAt || 0))
-              );
+              let canRunDirect = Boolean(cfg.spotifyAccessToken && Date.now() < Number(cfg.spotifyExpiresAt || 0));
+              if (cfg.spotifyRefreshToken) {
+                const refreshed = await CC.refreshSpotifyToken();
+                if (abortIfCancelled()) return;
+                if (refreshed) canRunDirect = true;
+              }
+              if (abortIfCancelled()) return;
               if (!canRunDirect) {
                 status = 'failed';
                 stepNote = 'Spotify login expired — reconnect in Settings';
@@ -10937,6 +11041,7 @@ Return ONLY valid JSON:
                 const prevDna = spotifyProfile?.tasteDna || document.getElementById('cfgTasteDna')?.value.trim() || '';
                 const prevSoft = spotifyProfile?.softSpots || document.getElementById('cfgSoftSpots')?.value.trim() || '';
                 const useResume = Boolean(hasActiveSpotifyCheckpoint() && spotifyCheckpoint.mode === spMode);
+                if (abortIfCancelled()) return;
                 const spRes = await CC.syncSpotifyResumable({
                   mode: useResume ? 'resume' : spMode,
                   resume: useResume,
@@ -10944,6 +11049,7 @@ Return ONLY valid JSON:
                   existingSoftSpots: prevSoft,
                   autoCommitProfile: true
                 });
+                if (abortIfCancelled()) return;
                 if (spRes?.completed && spRes.profile) {
                   spotifyProfile = spRes.profile;
                   spotifyCheckpoint = null;
@@ -10953,13 +11059,11 @@ Return ONLY valid JSON:
                 } else if (spRes?.paused) {
                   if (spRes.reason === 'cancelled' || rebuildWorkflowCancelled) {
                     rebuildWorkflowCancelled = true;
-                    stoppedEarly = true;
-                    const cnt = summarizeCounts();
-                    setProg(`Cancelled (${cnt.text})`, (cnt.completed / steps.length) * 100, 'warn', `${cnt.completed}/${steps.length}`);
-                    toast('Maintenance workflow cancelled');
+                    abortIfCancelled();
                     return;
                   }
                   spotifyCheckpoint = spRes.checkpoint ? CC.normalizeSpotifyCheckpoint(spRes.checkpoint) : await CC.getSpotifyCheckpoint();
+                  if (abortIfCancelled()) return;
                   updateSpotifyUI();
                   status = 'failed';
                   if (spRes.reason === 'auth_expired') {
@@ -10990,20 +11094,32 @@ Return ONLY valid JSON:
             stepNote = 'Skipped Taste Profile draft: Gemini or Spotify library missing';
           } else {
             const draftedOk = await analyzeFullSpotifyDNA({ suppressAutoSync: true });
+            if (abortIfCancelled()) return;
             status = draftedOk ? 'completed' : 'failed';
             if (!draftedOk) stepNote = 'Taste Profile draft failed';
           }
         } else if (st.key === 'discogs') {
-          if (hasDrivePre && (stepOutcomes.drive_pre === 'skipped' || stepOutcomes.drive_pre === 'failed')) {
+          if (hasDrivePre && !drivePreCompleted) {
             status = 'skipped';
             stepNote = 'Skipped Discogs: Drive sync required first';
           } else if (!cfg.discogsToken || !cfg.discogsUser) {
             status = 'skipped';
             stepNote = 'Skipped Discogs: account not verified';
           } else {
-            const dRec = await syncWithDiscogsUI(true, false, { skipDriveGate: true, suppressAutoSync: true });
-            status = dRec ? 'completed' : 'failed';
-            if (!dRec) stepNote = 'Discogs sync failed';
+            const dRec = await syncWithDiscogsUI(true, false, { skipDriveGate: drivePreCompleted, suppressAutoSync: true });
+            if (abortIfCancelled()) return;
+            if (dRec) {
+              status = 'completed';
+            } else {
+              const driveConfigured = Boolean(cfg.googleBoundEmail || cfg.googleEmail || cfg.googleLastSyncAt || cfg.googleLastLoadAt);
+              if (!drivePreCompleted && driveConfigured && (!CC.isGoogleSignedIn() || cloudAccountMismatch)) {
+                status = 'skipped';
+                stepNote = 'Skipped Discogs: Drive sync required first';
+              } else {
+                status = 'failed';
+                stepNote = 'Discogs sync failed';
+              }
+            }
           }
         } else if (st.key === 'recalibrate') {
           if (hasSpotify && stepOutcomes.spotify !== 'completed') {
@@ -11016,10 +11132,12 @@ Return ONLY valid JSON:
             status = 'skipped';
           } else {
             const rRes = await recalibrateStashBatch({ skipConfirm: true, silentConfirm: true, scope: recalScope, suppressAutoSync: true });
-            if (rRes?.cancelled) {
+            if (rRes?.cancelled || rebuildWorkflowCancelled) {
               rebuildWorkflowCancelled = true;
-              status = 'failed';
-            } else if (rRes?.skipped) {
+              abortIfCancelled();
+              return;
+            }
+            if (rRes?.skipped) {
               status = 'skipped';
             } else if (rRes?.error || Number(rRes?.failed || 0) > 0) {
               status = 'failed';
@@ -11028,14 +11146,15 @@ Return ONLY valid JSON:
             }
           }
         } else if (st.key === 'drive_post') {
-          if (hasDrivePre && (stepOutcomes.drive_pre === 'skipped' || stepOutcomes.drive_pre === 'failed')) {
+          if (hasDrivePre && !drivePreCompleted) {
             status = 'skipped';
-            stepNote = 'Skipped Drive push: Google Drive not connected';
+            stepNote = 'Skipped Drive push: Google Drive pre-sync did not complete';
           } else if (!CC.isGoogleSignedIn() || cloudAccountMismatch) {
             status = 'skipped';
             stepNote = 'Skipped Drive push: Google Drive not connected';
           } else {
             const pRes = await runGoogleSyncFlow({ interactive: false, quiet: false, publishInitialLocal: true });
+            if (abortIfCancelled()) return;
             status = (pRes && pRes.ok && pRes.status !== 'partial' && pRes.status !== 'account_mismatch') ? 'completed' : 'failed';
             if (status === 'failed') stepNote = 'Final Google Drive push failed';
           }
@@ -11045,13 +11164,7 @@ Return ONLY valid JSON:
         stepResults.push({ key: st.key, status, note: stepNote });
         if (stepNote) notes.push(stepNote);
 
-        if (rebuildWorkflowCancelled) {
-          stoppedEarly = true;
-          const cnt = summarizeCounts();
-          setProg(`Cancelled (${cnt.text})`, (cnt.completed / steps.length) * 100, 'warn', `${cnt.completed}/${steps.length}`);
-          toast('Maintenance workflow cancelled');
-          return;
-        }
+        if (abortIfCancelled()) return;
         const progressDetail = stepNote ? `Step ${i + 1}/${steps.length}: ${stepNote}` : `Step ${i + 1}/${steps.length} ${status}`;
         setProg(progressDetail, ((i + 1) / steps.length) * 100, status === 'failed' ? 'err' : (status === 'skipped' ? 'warn' : 'running'));
       }

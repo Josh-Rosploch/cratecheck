@@ -6,7 +6,7 @@ A zero-backend, sharp monochrome industrial Progressive Web App (PWA) for scanni
 
 ---
 
-## Core Features (v2.3.2)
+## Core Features (v2.3.3)
 
 | Area | Highlights |
 | --- | --- |
@@ -36,7 +36,7 @@ A zero-backend, sharp monochrome industrial Progressive Web App (PWA) for scanni
 
 ## Upgrading & Domain Migration Notes
 
-- **Update Both Phone & PC to v2.3.2:** v2.3.2 adds atomic live-row batch/single taste recalibration, Discogs 429 cooldown account rechecks and strict legacy deletion guards, Rebuild Workflow prerequisite gating with accurate Spotify auth-expiry reporting, unconditional `⚠️ Media unverified (packaging only)` detection, string-aware Gemini JSON repair with root-shape validation, scope-isolated offline service worker caching (`sw.js`), 3-way concurrent extra-photo union merges, and immutable legacy backup fingerprinting. Update **both** your phone and PC to v2.3.2 for the safest two-device sync.
+- **Update Both Phone & PC to v2.3.3:** v2.3.3 hardens Discogs remote deletes to require both a verified account and exact instance ID, adds strict Taste score validation with stale pressing/profile guards, upgrades extra-photo sync to per-photo CRDT tombstones with pre-merge Drive photo hydration, anchors legacy JSON backup identity on original row IDs, makes the offline Service Worker (`sw.js`) collision-free and atomic across version upgrades, tightens Rebuild Workflow Drive-gate and cancellation checks, enables 4-photo close-up replacement and offline-queue auto-cropping, and enforces strict JSON root-type recovery. Update **both** your phone and PC to v2.3.3 for the safest two-device sync.
 - **Migrating a Local-Only Stash from an Old Domain:** Browser IndexedDB storage is scoped per origin (`https://old-domain` vs `https://softspot.k1s.co`). If you have an unsynced local-only Stash on an older domain:
   1. Open the old domain → **Settings → 5. Data, Backup & Workflow Guide** → tap **⬇️ Export JSON**.
   2. Open Soft Spot on the new domain → **Settings → 5. Data, Backup & Workflow Guide** → tap **⬆️ Restore JSON**.
@@ -56,7 +56,7 @@ A zero-backend, sharp monochrome industrial Progressive Web App (PWA) for scanni
 
 Soft Spot requires **zero build step** and runs on any static host (such as GitHub Pages):
 
-1. Fork or clone this repository and point GitHub Pages (or any static web server) at the active version directory (e.g., `v2.3.2/` or copied to root).
+1. Fork or clone this repository and point GitHub Pages (or any static web server) at the active version directory (e.g., `v2.3.3/` or copied to root).
 2. *(Optional)* Add a `CNAME` file for your custom subdomain (e.g., `softspot.yourdomain.com`) with HTTPS enabled (required for in-app Camera, Spotify PKCE, and Google Sign-In).
 3. *(Optional)* To use your own Google Cloud OAuth Client ID for Drive Sync:
    - Enable the **Google Drive API** in [Google Cloud Console](https://console.cloud.google.com/apis/library/drive.googleapis.com).

@@ -1,14 +1,30 @@
+const SHELL_VERSION = '2.3.3';
 const SCOPE_PATH = new URL(self.registration.scope).pathname;
-const SCOPE_ID = SCOPE_PATH.replace(/[^a-z0-9]+/gi, '_').replace(/^_|_$/g, '') || 'root';
+
+function hashScopePath(str) {
+  const s = String(str || '/');
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h1 ^= c;
+    h1 = Math.imul(h1, 0x01000193) >>> 0;
+    h2 ^= (c + i);
+    h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
+  }
+  return h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0');
+}
+
+const SCOPE_ID = 's_' + hashScopePath(SCOPE_PATH);
 const CACHE_PREFIX = 'softspot-shell-' + SCOPE_ID + '-';
-const CACHE_NAME = CACHE_PREFIX + 'v2.3.2';
+const CACHE_NAME = CACHE_PREFIX + 'v' + SHELL_VERSION;
 
 const SHELL_ASSETS = [
   './',
   './index.html',
-  './style.css?v=2.3.2',
-  './apis.js?v=2.3.2',
-  './app.js?v=2.3.2'
+  './style.css?v=' + SHELL_VERSION,
+  './apis.js?v=' + SHELL_VERSION,
+  './app.js?v=' + SHELL_VERSION
 ];
 
 self.addEventListener('install', (event) => {
@@ -42,6 +58,14 @@ function isShellRequest(request, url) {
     p.endsWith('/app.js');
 }
 
+function isMatchingVersionedAsset(url) {
+  const p = url.pathname || '';
+  if (p.endsWith('/style.css') || p.endsWith('/apis.js') || p.endsWith('/app.js')) {
+    return url.searchParams.get('v') === SHELL_VERSION;
+  }
+  return false;
+}
+
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
@@ -57,8 +81,9 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return;
   if (!isShellRequest(req, url)) return;
 
-  // Network-first with explicit scope-isolated cache reads/writes, 5xx outage fallback,
-  // and strict version-locked asset matching (never mix newer HTML with older JS/CSS!)
+  // Network-first with collision-free scope-isolated cache, 5xx outage fallback,
+  // and atomic version-locked caching (never overwrite cached HTML with a newer version's HTML
+  // or cache mismatched .js/.css assets before the new Service Worker installs!).
   event.respondWith((async () => {
     const cache = await caches.open(CACHE_NAME);
     const serveFallback = async () => {
@@ -81,11 +106,20 @@ self.addEventListener('fetch', (event) => {
         return await serveFallback();
       }
       if (networkRes.ok && (networkRes.type === 'basic' || networkRes.type === 'default')) {
-        const copy = networkRes.clone();
         if (req.mode === 'navigate') {
-          cache.put('./index.html', copy).catch(() => {});
-        } else {
-          cache.put(req, copy).catch(() => {});
+          const textCopy = networkRes.clone();
+          const cacheCopy = networkRes.clone();
+          textCopy.text().then((htmlText) => {
+            if (
+              htmlText.includes('app.js?v=' + SHELL_VERSION) &&
+              htmlText.includes('apis.js?v=' + SHELL_VERSION) &&
+              htmlText.includes('style.css?v=' + SHELL_VERSION)
+            ) {
+              cache.put('./index.html', cacheCopy).catch(() => {});
+            }
+          }).catch(() => {});
+        } else if (isMatchingVersionedAsset(url)) {
+          cache.put(req, networkRes.clone()).catch(() => {});
         }
       }
       return networkRes;
