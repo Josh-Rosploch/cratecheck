@@ -7,13 +7,13 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>Soft Spot — Physical Media Scanner</title>
-  <link rel="stylesheet" href="style.css?v=2.2.0" />
+  <link rel="stylesheet" href="style.css?v=2.3.0" />
   <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
 <header>
-  <div class="brand">📼 Soft Spot <span class="ver-tag">v2.2.0</span></div>
+  <div class="brand">📼 Soft Spot <span class="ver-tag">v2.3.0</span></div>
   <div class="status-pills">
     <span id="cloudPill" class="pill" title="Google Drive Cloud Sync" onclick="handleCloudPillClick()">Cloud: Off</span>
     <span id="aiPill" class="pill" title="Gemini Cloud AI status" onclick="switchView('settings')">Gemini: Off</span>
@@ -109,12 +109,17 @@
           <div id="stagedPhotoHint" style="font-size:0.72rem; color:var(--muted); margin-top:6px;">Tap any photo to inspect fullscreen · Tap ✂️ to adjust crop</div>
         </div>
 
-        <div id="singleActionRow" class="search-action-row hidden">
-          <button id="btnRunSearch" class="btn btn-green" onclick="runFullScan()" disabled>
-            🔍 Search &amp; Verify
-          </button>
-          <button id="btnClearStage" class="btn btn-secondary hidden" style="width:auto; min-width:74px;" onclick="resetScanner()">
-            Clear
+        <div id="singleActionRow" class="single-action-stack hidden">
+          <div class="search-action-row" style="margin-top:0;">
+            <button id="btnRunSearch" class="btn btn-green" onclick="runFullScan()" disabled>
+              🔍 Search &amp; Verify
+            </button>
+            <button id="btnClearStage" class="btn btn-secondary hidden" style="width:auto; min-width:74px;" onclick="resetScanner()">
+              Clear
+            </button>
+          </div>
+          <button id="btnSaveOffline" type="button" class="btn btn-secondary btn-sm" style="width:100%;" onclick="saveUnverifiedOffline()" disabled>
+            📥 Save Now, Verify Later (Offline Queue)
           </button>
         </div>
       </div>
@@ -188,6 +193,9 @@
         <div id="pileResultsList"></div>
       </div>
     </div>
+
+    <!-- Franken-Copy Detector Warning Banner -->
+    <div id="frankenBanner" class="franken-banner hidden"></div>
 
     <!-- Zero-Guessing Verification Card -->
     <div id="detectiveCard" class="detective-card hidden">
@@ -264,13 +272,18 @@
           <span id="aiGradeHint" class="badge badge-purple" style="margin:0;">AI Estimate</span>
         </div>
 
-        <button id="btnAiGradeNow" type="button" class="btn btn-green hidden" style="width:100%; min-height:44px; font-size:0.88rem; margin-bottom:8px;" onclick="gradeCurrentPhotosOnDemand()">
+        <button id="btnAiGradeNow" type="button" class="btn btn-green hidden" style="width:100%; min-height:42px; font-size:0.86rem; margin-bottom:8px;" onclick="gradeCurrentPhotosOnDemand()">
           ✨ AI Grade Photos
         </button>
 
-        <button id="btnVoiceRegradeScan" type="button" class="btn btn-purple dictate-btn" style="width:100%; min-height:44px; font-size:0.88rem; margin-bottom:8px;" onclick="voiceRegrade('scan', 'btnVoiceRegradeScan')">
-          🎤 Don't Agree? AI Voice Re-Grade
-        </button>
+        <div class="voice-row">
+          <button id="btnVoiceRegradeScan" type="button" class="btn btn-purple btn-sm dictate-btn" style="flex:1;" onclick="voiceRegrade('scan', 'btnVoiceRegradeScan')">
+            🎤 AI Voice Re-Grade
+          </button>
+          <button id="btnVoiceCancelScan" type="button" class="btn btn-secondary btn-sm hidden" onclick="cancelVoiceRegrade()">
+            ✕ Cancel
+          </button>
+        </div>
         <div id="voiceLiveScan" class="voice-live hidden"></div>
 
         <div class="field-grid" style="margin-bottom:8px;">
@@ -347,9 +360,22 @@
           <span id="stashStats" class="pill">0 items</span>
         </div>
       </div>
-      <input id="stashSearch" type="text" placeholder="Search artist, title, cat#, songs, notes..." oninput="renderStash()" style="margin-bottom:10px;" />
+      <div class="stash-search-row">
+        <input id="stashSearch" type="text" placeholder="Search artist, title, cat#, songs, notes..." oninput="renderStash()" />
+        <select id="stashSort" class="stash-sort-select" aria-label="Sort Stash" onchange="onStashSortChange(this.value)">
+          <option value="newest">Newest Added</option>
+          <option value="artist_az">Artist A–Z</option>
+          <option value="title_az">Title A–Z</option>
+          <option value="value_desc">Highest Value</option>
+          <option value="value_asc">Lowest Value</option>
+          <option value="taste_desc">Highest Taste</option>
+          <option value="year_desc">Year (Newest)</option>
+          <option value="year_asc">Year (Oldest)</option>
+        </select>
+      </div>
       <div class="chip-row" id="stashFilters">
         <button class="chip active" data-filter="all">All</button>
+        <button id="chipToVerify" class="chip hidden" data-filter="toverify">⏳ To Verify</button>
         <button class="chip" data-filter="Cassette">Cassette</button>
         <button class="chip" data-filter="CD">CD</button>
         <button class="chip" data-filter="Vinyl">Vinyl</button>
@@ -380,17 +406,10 @@
         </select>
       </div>
       <div id="stashFolderRow" class="chip-row hidden" aria-label="Discogs Folders"></div>
-      <div id="stashDiscogsSyncLine" style="font-size:0.74rem; color:var(--muted); margin-bottom:8px;"></div>
-      <div class="btn-row" style="margin-top:0; margin-bottom:8px;">
-        <button id="btnStashSyncCloud" type="button" class="btn btn-green btn-sm" style="width:100%;" onclick="syncStashWithCloudUI()">☁️ Sync with Cloud</button>
-        <button id="btnRecalibrateStash" type="button" class="btn btn-purple btn-sm" style="width:100%;" onclick="recalibrateStashBatch()">🔄 Recalibrate Taste</button>
-      </div>
-      <div class="btn-row" style="margin-top:0;">
-        <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="exportCSV()">⬇️ Export CSV</button>
-        <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="exportJSON()">💾 Backup JSON</button>
-      </div>
+      <div id="stashDiscogsSyncLine" style="font-size:0.74rem; color:var(--muted);"></div>
     </div>
     <div id="stashList"></div>
+    <div id="stashAlphaRail" class="stash-alpha-rail hidden" aria-label="Alphabetical quick jump"></div>
   </section>
 
   <!-- ==================== SETTINGS VIEW (5 COLLAPSIBLE ACCORDIONS) ==================== -->
@@ -410,15 +429,16 @@
         <div id="googleAccountMismatchBox" class="alert-box alert-dup hidden" style="margin-bottom:10px;"></div>
         <div id="googleConflictsBox" class="alert-box alert-other-pressing hidden" style="margin-bottom:10px;"></div>
 
-        <div class="inline-actions" style="margin-bottom:10px;">
-          <button id="btnGoogleSignIn" type="button" class="btn btn-green btn-sm" onclick="googleConnectAndLoad()">☁️ Connect Google Drive</button>
-          <button id="btnGoogleLoad" type="button" class="btn btn-secondary btn-sm hidden" onclick="loadFromGoogleDriveUI()">⬇️ Load from Google Drive</button>
-          <button id="btnGoogleSyncNow" type="button" class="btn btn-green btn-sm hidden" onclick="syncGoogleDriveNow()">🔄 Sync Now</button>
-          <button id="btnGoogleSignOut" type="button" class="btn btn-danger btn-sm hidden" onclick="googleSignOut()">Sign Out</button>
+        <div style="margin-bottom:10px;">
+          <button id="btnGoogleSignIn" type="button" class="btn btn-green btn-sm" style="width:100%;" onclick="googleConnectAndLoad()">☁️ Connect Google Drive</button>
+          <div id="googleSignedInRow" class="btn-row hidden" style="margin-top:0;">
+            <button id="btnGoogleSyncNow" type="button" class="btn btn-green btn-sm" onclick="syncGoogleDriveNow()">🔄 Sync Now</button>
+            <button id="btnGoogleSignOut" type="button" class="btn btn-danger btn-sm" onclick="googleSignOut()">Sign Out</button>
+          </div>
         </div>
 
         <div style="font-size:0.74rem; color:var(--muted); margin-bottom:10px;">
-          <strong>Connect:</strong> signs in and immediately loads your cloud data. <strong>Load:</strong> pulls cloud updates locally with zero Drive writes. <strong>Sync Now:</strong> pulls, merges, and uploads your pending changes &amp; photos.
+          <strong>Connect:</strong> signs in and loads your cloud data. <strong>Sync Now:</strong> pulls, merges, and uploads your pending changes &amp; photos (enabled when local changes are queued; tap the header ☁️ pill anytime to check for remote updates).
         </div>
 
         <div class="toggle-row">
@@ -476,13 +496,13 @@
         <div style="margin-bottom:10px;">
           <label class="field-label">Gemini API Key</label>
           <div class="secret-field">
-            <input id="cfgGeminiKey" class="secret-input" type="text" placeholder="AIza..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true" />
+            <input id="cfgGeminiKey" class="secret-input" type="text" placeholder="AIza..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true" oninput="updateSettingsDirtyButtons()" />
             <button type="button" class="btn btn-secondary btn-sm secret-toggle-btn" onclick="toggleSecretField('cfgGeminiKey', this)">Show</button>
           </div>
         </div>
         <div style="margin-bottom:10px;">
           <label class="field-label">Gemini Model</label>
-          <select id="cfgGeminiModel">
+          <select id="cfgGeminiModel" onchange="updateSettingsDirtyButtons()">
             <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Free Tier ~500/day)</option>
             <option value="gemini-3.8-flash">gemini-3.8-flash (Sharpest OCR &amp; Grading)</option>
             <option value="gemini-3.6-flash">gemini-3.6-flash (Balanced)</option>
@@ -495,14 +515,14 @@
             <div style="font-size:0.9rem; font-weight:600;">🔊 Auto-Play 30s Test Song</div>
             <div style="font-size:0.76rem; color:var(--muted);">Plays a 30s clip in the floating bar without interrupting Spotify</div>
           </div>
-          <input id="cfgAutoPlay" type="checkbox" style="width:22px; height:22px;" />
+          <input id="cfgAutoPlay" type="checkbox" style="width:22px; height:22px;" onchange="updateSettingsDirtyButtons()" />
         </div>
         <div class="toggle-row">
           <div>
             <div style="font-size:0.9rem; font-weight:600;">🕵️ Auto Zero-Guessing Verification</div>
             <div style="font-size:0.76rem; color:var(--muted);">Fast Top-15 sweep + [r=ID] siblings, Hard Format Gate, optional Deep Search for remaining pressings</div>
           </div>
-          <input id="cfgAutoDetective" type="checkbox" style="width:22px; height:22px;" />
+          <input id="cfgAutoDetective" type="checkbox" style="width:22px; height:22px;" onchange="updateSettingsDirtyButtons()" />
         </div>
         <div class="toggle-row">
           <div>
@@ -528,11 +548,11 @@
             <option value="raw">Raw (Original — untouched full size)</option>
           </select>
         </div>
-        <div class="inline-actions" style="margin-top:8px;">
-          <button class="btn btn-sm" onclick="saveSettings()">Save Settings</button>
-          <button class="btn btn-secondary btn-sm" onclick="testAiConnection()">🧪 Test Gemini</button>
-          <span id="aiStatusBadge" style="font-size:0.82rem; font-weight:700;"></span>
+        <div class="btn-row" style="margin-top:10px;">
+          <button id="btnSaveGemini" type="button" class="btn btn-sm" onclick="saveSettings()" disabled>Save Settings</button>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="testAiConnection()">🧪 Test Gemini</button>
         </div>
+        <div id="aiStatusBadge" style="font-size:0.82rem; font-weight:700; margin-top:6px;"></div>
       </div>
     </details>
 
@@ -546,17 +566,13 @@
         <div class="inline-guide">
           <strong>Setup:</strong> Open <a href="https://www.discogs.com/settings/developers" target="_blank" rel="noopener">discogs.com/settings/developers ↗</a> → <strong>Generate new token</strong> → paste below &amp; tap <strong>Verify</strong>.
         </div>
-        <div style="margin-bottom:10px;">
+        <div style="margin-bottom:8px;">
           <label class="field-label">Discogs Personal Access Token</label>
           <div class="secret-field">
-            <input id="cfgDiscogsToken" class="secret-input" type="text" placeholder="Paste personal access token" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true" />
+            <input id="cfgDiscogsToken" class="secret-input" type="text" placeholder="Paste personal access token" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true" oninput="updateSettingsDirtyButtons()" />
             <button type="button" class="btn btn-secondary btn-sm secret-toggle-btn" onclick="toggleSecretField('cfgDiscogsToken', this)">Show</button>
           </div>
-        </div>
-        <div class="inline-actions" style="margin-bottom:10px;">
-          <button class="btn btn-secondary btn-sm" onclick="verifyDiscogsAccount()">🔗 Verify &amp; Load Folders</button>
-          <a class="btn btn-secondary btn-sm" href="https://www.discogs.com/manage_folders" target="_blank" rel="noopener">📁 Manage Folders ↗</a>
-          <span id="discogsUserBadge" style="font-size:0.82rem; color:var(--green); font-weight:700;"></span>
+          <div id="discogsUserBadge" style="font-size:0.8rem; color:var(--green); font-weight:700; margin-top:5px;"></div>
         </div>
 
         <div class="sub-panel" style="margin-bottom:10px;">
@@ -570,15 +586,19 @@
         </div>
 
         <div style="margin-bottom:10px;">
-          <label class="field-label">Target Discogs Folder</label>
-          <select id="cfgDiscogsFolder">
-            <option value="1">Uncategorized (Default)</option>
-          </select>
+          <label class="field-label" for="cfgDiscogsFolder">Target Discogs Folder</label>
+          <div class="btn-row" style="margin-top:0; align-items:stretch;">
+            <select id="cfgDiscogsFolder" onchange="updateSettingsDirtyButtons()">
+              <option value="auto">✨ Auto-Match by Format</option>
+              <option value="1">Uncategorized (Default)</option>
+            </select>
+            <a class="btn btn-secondary btn-sm" href="https://www.discogs.com/manage_folders" target="_blank" rel="noopener">📁 Manage Folders ↗</a>
+          </div>
         </div>
         <div class="field-grid" style="margin-bottom:10px;">
           <div>
             <label class="field-label">Home Country Bias</label>
-            <select id="cfgHomeCountry">
+            <select id="cfgHomeCountry" onchange="updateSettingsDirtyButtons()">
               <option value="US">US (United States)</option>
               <option value="Canada">Canada</option>
               <option value="UK">UK</option>
@@ -589,7 +609,7 @@
           </div>
           <div>
             <label class="field-label">High-Value Alert (USD $)</label>
-            <input id="cfgThreshold" type="number" min="1" step="1" value="20" />
+            <input id="cfgThreshold" type="number" min="1" step="1" value="20" oninput="updateSettingsDirtyButtons()" />
           </div>
         </div>
         <div class="toggle-row">
@@ -597,13 +617,16 @@
             <div style="font-size:0.9rem; font-weight:600;">Fetch VG+ Seller Price Suggestions</div>
             <div style="font-size:0.76rem; color:var(--muted);">Requires Discogs Seller Settings enabled on your account</div>
           </div>
-          <input id="cfgFetchVg" type="checkbox" style="width:22px; height:22px;" />
+          <input id="cfgFetchVg" type="checkbox" style="width:22px; height:22px;" onchange="updateSettingsDirtyButtons()" />
         </div>
         <div class="toggle-row">
           <span style="font-size:0.9rem; font-weight:600;">Voice Readback (Speech)</span>
-          <input id="cfgVoice" type="checkbox" style="width:22px; height:22px;" />
+          <input id="cfgVoice" type="checkbox" style="width:22px; height:22px;" onchange="updateSettingsDirtyButtons()" />
         </div>
-        <button class="btn btn-sm" style="margin-top:8px;" onclick="saveSettings()">Save Settings</button>
+        <div class="btn-row" style="margin-top:10px;">
+          <button type="button" class="btn btn-secondary btn-sm" onclick="verifyDiscogsAccount()">🔗 Verify &amp; Load Folders</button>
+          <button id="btnSaveDiscogs" type="button" class="btn btn-sm" onclick="saveSettings()" disabled>Save Settings</button>
+        </div>
       </div>
     </details>
 
@@ -621,16 +644,16 @@
 
         <div style="margin-bottom:10px;">
           <label class="field-label">Your Taste Profile (editable — sent on every scan)</label>
-          <textarea id="cfgTasteDna" class="tall-textarea" rows="5" placeholder="Describe your favorite genres, bands, eras, and production styles — or optionally auto-draft from Spotify below..."></textarea>
+          <textarea id="cfgTasteDna" class="tall-textarea" rows="5" placeholder="Describe your favorite genres, bands, eras, and production styles — or optionally auto-draft from Spotify below..." oninput="updateSettingsDirtyButtons()"></textarea>
         </div>
 
         <div style="margin-bottom:10px;">
           <label class="field-label">Soft Spots &amp; Niche Pockets (equal first-class weight on every scan)</label>
-          <textarea id="cfgSoftSpots" rows="3" placeholder="Italo Disco, 80s Euro-dance, synthwave, game/movie soundtracks..."></textarea>
+          <textarea id="cfgSoftSpots" rows="3" placeholder="Italo Disco, 80s Euro-dance, synthwave, game/movie soundtracks..." oninput="updateSettingsDirtyButtons()"></textarea>
         </div>
 
         <div class="btn-row" style="margin-top:0; margin-bottom:8px;">
-          <button type="button" class="btn btn-sm" style="width:100%;" onclick="saveTasteDnaManual()">💾 Save Taste Profile</button>
+          <button id="btnSaveTaste" type="button" class="btn btn-sm" style="width:100%;" onclick="saveTasteDnaManual()" disabled>💾 Save Taste Profile</button>
           <button id="btnAnalyzeDna" type="button" class="btn btn-secondary btn-sm" style="width:100%;" onclick="analyzeFullSpotifyDNA()">🧠 Auto-Draft Profile</button>
         </div>
         <div id="dnaSummary" style="font-size:0.78rem; color:var(--muted); margin-bottom:14px;"></div>
@@ -704,7 +727,53 @@
         <span id="pillData" class="pill">0 items</span>
       </summary>
       <div class="acc-body">
-        <p style="font-size:0.84rem; margin-bottom:10px;">Export a JSON backup after big scanning sessions (includes 1200px photos, grades, stash, Spotify library, Taste Profile &amp; Soft Spots).</p>
+        <!-- Catalog Maintenance & Rebuild Workflow -->
+        <div class="rebuild-card">
+          <div style="font-weight:800; font-size:0.88rem; margin-bottom:4px;">🔧 Rebuild &amp; Sync Workflow</div>
+          <div style="font-size:0.75rem; color:var(--muted); margin-bottom:8px;">Runs selected maintenance steps in safe order. Never runs AI photo grading and never re-encodes or crops photos.</div>
+
+          <div class="rebuild-step-row">
+            <label><input id="rbStepDrivePre" type="checkbox" checked onchange="updateRebuildWorkflowBtn()" /><span>1. Sync with Google Drive first</span></label>
+          </div>
+          <div class="rebuild-step-row">
+            <label><input id="rbStepSpotify" type="checkbox" onchange="updateRebuildWorkflowBtn()" /><span>2. Sync Spotify Library</span></label>
+            <select id="rbSpotifyMode" class="rebuild-inline-sel" aria-label="Spotify sync mode">
+              <option value="liked">Liked Songs Only</option>
+              <option value="full">Full Library</option>
+            </select>
+          </div>
+          <div class="rebuild-step-row">
+            <label><input id="rbStepDraftTaste" type="checkbox" onchange="updateRebuildWorkflowBtn()" /><span>3. Auto-Draft Taste Profile from Spotify</span></label>
+          </div>
+          <div class="rebuild-step-row">
+            <label><input id="rbStepDiscogs" type="checkbox" onchange="updateRebuildWorkflowBtn()" /><span>4. Sync with Discogs (collection, folders &amp; details)</span></label>
+          </div>
+          <div class="rebuild-step-row">
+            <label><input id="rbStepRecalibrate" type="checkbox" onchange="updateRebuildWorkflowBtn()" /><span>5. Recalibrate Taste across Stash</span></label>
+            <select id="rbRecalMode" class="rebuild-inline-sel" aria-label="Stash recalibration scope">
+              <option value="stale">Stale Items Only</option>
+              <option value="all">All Items</option>
+            </select>
+          </div>
+          <div class="rebuild-step-row">
+            <label><input id="rbStepDrivePost" type="checkbox" checked onchange="updateRebuildWorkflowBtn()" /><span>6. Push final updates to Google Drive</span></label>
+          </div>
+
+          <div id="rebuildProgressWrap" class="rebuild-progress-wrap hidden">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:0.78rem; font-weight:700;">
+              <span id="rebuildStepLabel">Preparing...</span>
+              <span id="rebuildPctLabel" style="font-variant-numeric:tabular-nums; color:var(--muted);">0%</span>
+            </div>
+            <div class="rebuild-progress-track"><div id="rebuildProgressFill" class="rebuild-progress-fill"></div></div>
+          </div>
+
+          <div class="btn-row" style="margin-top:8px;">
+            <button id="btnRunRebuild" type="button" class="btn btn-green btn-sm" onclick="runMaintenanceWorkflow()">▶ Run Selected Steps</button>
+            <button id="btnCancelRebuild" type="button" class="btn btn-danger btn-sm hidden" onclick="cancelMaintenanceWorkflow()">✕ Cancel</button>
+          </div>
+        </div>
+
+        <p style="font-size:0.84rem; margin-bottom:10px;">Export a self-contained JSON backup after big scanning sessions (includes saved photos at your configured resolution, grades, stash, tombstones, Spotify library, Taste Profile &amp; Soft Spots).</p>
         <div class="btn-row" style="margin-top:0; margin-bottom:8px;">
           <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="exportJSON()">⬇️ Export JSON</button>
           <button class="btn btn-secondary btn-sm" style="width:100%;" onclick="document.getElementById('jsonRestoreInput').click()">⬆️ Restore JSON</button>
@@ -936,7 +1005,7 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="apis.js?v=2.2.0"></script>
-<script src="app.js?v=2.2.0"></script>
+<script src="apis.js?v=2.3.0"></script>
+<script src="app.js?v=2.3.0"></script>
 </body>
 </html>

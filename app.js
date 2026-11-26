@@ -14,10 +14,11 @@
   })();
 
   const SILENT_WAV = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
-  const VOICE_BTN_IDLE = "🎤 Don't Agree? AI Voice Re-Grade";
+  const VOICE_BTN_IDLE = '🎤 AI Voice Re-Grade';
   const VERIFY_INITIAL_LIMIT = 15;
   const VERIFY_DEEP_BATCH = 25;
   const PENDING_DISCOGS_KEY = 'cratecheck_pending_discogs_v1';
+  const STASH_SORT_KEY = 'cratecheck_stash_sort_v1';
   const RAW_EXT_RX = /\.(arw|dng|cr2|cr3|nef|nrw|orf|raf|rw2|pef|srw|raw)$/i;
   const RAW_MIME_RX = /(raw|x-sony-arw|x-canon-cr2|x-nikon-nef|x-adobe-dng)/i;
 
@@ -35,6 +36,13 @@
   let activeStashOtherFormat = '';
   let activeDiscogsFolderFilter = null;
   let activeStashView = 'list';
+  let activeStashSort = (() => {
+    try { return localStorage.getItem(STASH_SORT_KEY) || 'newest'; } catch (_) { return 'newest'; }
+  })();
+  let frankenState = null;
+  let rebuildWorkflowActive = false;
+  let rebuildWorkflowCancelled = false;
+  let lastQuietFocusPullAt = 0;
   const hydratingStashIds = new Set();
   const autoHydrateAttemptedIds = new Set();
   let googleSyncInFlight = false;
@@ -484,6 +492,12 @@
     if (viewChanged) {
       if (name === 'stash') {
         renderStash();
+      } else {
+        renderStashAlphaRail(null, false);
+      }
+      if (name === 'settings') {
+        updateSettingsDirtyButtons();
+        updateRebuildWorkflowBtn();
       }
       window.scrollTo({ top: 0, behavior: 'instant' });
     }
@@ -1062,37 +1076,110 @@
     });
   }
 
-  // Shared fast Gemini Vision auto-crop helper (1 image <= 1280px JPEG -> box_2d + upright spine_rotation)
-  async function autoCropImageWithGemini(dataUrl, slot = 'cover') {
-    if (!dataUrl || !CC.isAiReady()) return { box_2d: null, spine_rotation: 0 };
-    const b64 = await renderDataUrlToCompactJpegB64(dataUrl, 1280, 0.82);
-    if (!b64) return { box_2d: null, spine_rotation: 0 };
+  function shouldApplyCropBox(box2d) {
+    if (!Array.isArray(box2d) || box2d.length !== 4) return false;
+    const nums = box2d.map(Number);
+    if (!nums.every(Number.isFinite)) return false;
+    const isUnit = Math.max(...nums) > 0 && Math.max(...nums) <= 1.01;
+    let [y1, x1, y2, x2] = nums.map(v => Math.max(0, Math.min(1000, isUnit ? v * 1000 : v)));
+    if (y1 > y2) [y1, y2] = [y2, y1];
+    if (x1 > x2) [x1, x2] = [x2, x1];
+    const w = x2 - x1;
+    const h = y2 - y1;
+    // Skip canvas cropping ONLY if returned box already covers >= 96% of BOTH width and height!
+    if (w >= 960 && h >= 960) return false;
+    return true;
+  }
 
-    const isSpine = slot === 'spine';
-    const prompt = isSpine
-      ? `Locate the physical music media SPINE (cassette, CD, vinyl, VHS, 8-track, etc.) in this photo and detect its exact upright rotation.
+  function applyDetectedRolesToStagedSlots(entriesWithRoles) {
+    if (!Array.isArray(entriesWithRoles) || !entriesWithRoles.length) return false;
+    const validRoles = new Set(['front', 'back', 'spine', 'extra']);
+    const hasAnyValid = entriesWithRoles.some(x => x?.photo && validRoles.has(String(x.role || '').toLowerCase()));
+    if (!hasAnyValid) return false;
+
+    const next = { front: null, back: null, spine: null, extras: [] };
+    const overflow = [];
+
+    for (const item of entriesWithRoles) {
+      if (!item?.photo) continue;
+      const role = String(item.role || '').toLowerCase();
+      if (role === 'front' && !next.front) next.front = item.photo;
+      else if (role === 'back' && !next.back) next.back = item.photo;
+      else if (role === 'spine' && !next.spine) next.spine = item.photo;
+      else overflow.push(item.photo);
+    }
+    overflow.forEach(p => { next.extras.push(p); });
+
+    const changed = next.front !== stagedSlots.front ||
+      next.back !== stagedSlots.back ||
+      next.spine !== stagedSlots.spine ||
+      JSON.stringify(next.extras.map(p => p.saveWebp)) !== JSON.stringify((stagedSlots.extras || []).map(p => p?.saveWebp));
+
+    if (changed) {
+      stagedSlots = next;
+      syncStagedPhotosCompat();
+      if (stagedSlots.spine) {
+        stagedSpineSourceUrl = stagedSlots.spine.origDataUrl || stagedSlots.spine.saveWebp;
+        stagedSpineThumbUrl = stagedSlots.spine.saveWebp;
+        stagedSpineFlipped = Number(stagedSlots.spine.rotationDeg || 0) === 180;
+      } else {
+        stagedSpineSourceUrl = '';
+        stagedSpineThumbUrl = '';
+        stagedSpineFlipped = false;
+      }
+    }
+    return changed;
+  }
+
+  // Shared Gemini Vision auto-crop + role detection helper (MEDIUM thinking, always requires tight box_2d & letter-top spine orientation)
+  async function autoCropImageWithGemini(dataUrl, slot = 'auto') {
+    if (!dataUrl || !CC.isAiReady()) return { box_2d: null, spine_rotation: 0, role: null, error: '' };
+    const b64 = await renderDataUrlToCompactJpegB64(dataUrl, 1280, 0.84);
+    if (!b64) return { box_2d: null, spine_rotation: 0, role: null, error: '' };
+
+    const isForcedSpine = slot === 'spine';
+    const isAutoRole = slot === 'auto';
+    const prompt = isForcedSpine
+      ? `Inspect this photo of a physical music media SPINE (cassette, CD, vinyl, VHS, 8-track, etc.).
+ALWAYS return a tight [ymin, xmin, ymax, xmax] bounding box on a 0-1000 scale tightly framing the physical spine (even if it already fills most of the frame — NEVER return null).
+ORIENTATION RULE (CRITICAL): Look closely at which direction the TOPS of the printed letters on the spine face:
+- Letter tops face TOP of image -> "spine_rotation": 0
+- Letter tops face BOTTOM of image (upside-down!) -> "spine_rotation": 180
+- Letter tops face LEFT of image -> "spine_rotation": 90
+- Letter tops face RIGHT of image -> "spine_rotation": 270
 Return ONLY valid JSON:
 {
-  "box_2d": [ymin, xmin, ymax, xmax] on 0-1000 scale tightly hugging the spine (remove background/table/hand), or null if no clear spine is visible,
+  "role": "spine",
+  "box_2d": [ymin, xmin, ymax, xmax],
   "spine_rotation": 0 | 90 | 180 | 270
-}
-CRITICAL: "spine_rotation" is the exact CLOCKWISE rotation in degrees needed so the spine's printed text reads cleanly HORIZONTALLY left-to-right, right-side-up. Explicitly check if the text is upside-down and return 180 when inverted!`
-      : `Locate the physical music media item (cassette case/shell, CD jewel case/digipak, vinyl jacket/record, VHS, etc.) in this photo so we can crop out dead table, background, and hand whitespace.
+}`
+      : `Inspect this photo of physical music media (cassette, CD, vinyl, VHS, 8-track, etc.).
+1. Identify the photo's "role" from what is visually shown (do NOT assume any order):
+   - "front": front cover artwork, front of case/jacket, or Side A with front cover
+   - "back": back cover tracklist/barcode, back of case/jacket, or Side B
+   - "spine": close-up focused on the narrow side edge/spine
+   - "extra": inner sleeve, disc/label close-up, insert, lyric sheet, or other detail
+2. ALWAYS return "box_2d": [ymin, xmin, ymax, xmax] on a 0-1000 scale tightly framing the physical media/case/sleeve/spine to remove dead table, background, and hand whitespace (even if already tightly framed — NEVER return null!).
+3. If "role" is "spine", determine "spine_rotation" by checking which direction the TOPS of the printed letters face: top -> 0, bottom (upside-down) -> 180, left -> 90, right -> 270. Otherwise return 0.
 Return ONLY valid JSON:
 {
-  "box_2d": [ymin, xmin, ymax, xmax] on 0-1000 scale tightly framing the physical media/case/sleeve, or null if already tightly framed,
-  "spine_rotation": 0
+  "role": "front" | "back" | "spine" | "extra",
+  "box_2d": [ymin, xmin, ymax, xmax],
+  "spine_rotation": 0 | 90 | 180 | 270
 }`;
 
     try {
       const res = await CC.callAI(
         [{ text: prompt }, { inline_data: { mime_type: 'image/jpeg', data: b64 } }],
-        'LOW',
+        'MEDIUM',
         { retryLabel: 'Auto-Crop' }
       );
+      const rawRole = String(res?.role || '').trim().toLowerCase();
+      const detectedRole = ['front', 'back', 'spine', 'extra'].includes(rawRole) ? rawRole : (isForcedSpine ? 'spine' : (isAutoRole ? null : slot));
+      const treatAsSpine = isForcedSpine || detectedRole === 'spine';
       const rawBox = Array.isArray(res?.box_2d) && res.box_2d.length === 4 ? res.box_2d.map(Number) : null;
       const validBox = (rawBox && rawBox.every(Number.isFinite)) ? rawBox : null;
-      const minSpan = isSpine ? 25 : 150;
+      const minSpan = treatAsSpine ? 25 : 120;
       let cleanBox = null;
       if (validBox) {
         const isUnit = Math.max(...validBox) > 0 && Math.max(...validBox) <= 1.01;
@@ -1105,10 +1192,10 @@ Return ONLY valid JSON:
       }
       const rotRaw = Number(res?.spine_rotation);
       const spineRotation = [0, 90, 180, 270].includes(rotRaw) ? rotRaw : 0;
-      return { box_2d: cleanBox, spine_rotation: isSpine ? spineRotation : 0 };
+      return { box_2d: cleanBox, spine_rotation: treatAsSpine ? spineRotation : 0, role: detectedRole, error: '' };
     } catch (err) {
       if (err?.name === 'AbortError') throw err;
-      return { box_2d: null, spine_rotation: 0 };
+      return { box_2d: null, spine_rotation: 0, role: null, error: err?.message || 'Auto-crop unavailable' };
     }
   }
 
@@ -2305,23 +2392,37 @@ Return ONLY valid JSON:
     if (!targets.length) return 0;
 
     let croppedCount = 0;
+    let errorCount = 0;
+    let anyRoleDetected = false;
+
     try {
       for (let t = 0; t < targets.length; t++) {
         if (batchAutoCropCancelled || myStageSeq !== stageSeq) break;
         const entry = targets[t];
         const p = entry.photo;
         if (!p || p.autoCropped) continue;
-        const isSpine = entry.slotKey === 'spine';
-        setStatus(`✂️ Auto-cropping ${entry.label} (${t + 1}/${targets.length})...`, true, { cancellable: true });
+        setStatus(`✂️ Auto-identifying & framing photo ${t + 1}/${targets.length}...`, true, { cancellable: true });
         const srcUrl = p.origDataUrl || (p.apiB64 ? `data:image/jpeg;base64,${p.apiB64}` : p.saveWebp);
-        const res = await autoCropImageWithGemini(srcUrl, isSpine ? 'spine' : 'cover');
+        const res = await autoCropImageWithGemini(srcUrl, 'auto');
         if (batchAutoCropCancelled || myStageSeq !== stageSeq) break;
-        if (getStagedSlotPhoto(entry.slotKey, entry.extraIdx) !== p) continue;
+        if (!stagedPhotos.includes(p)) continue;
+
+        if (res.error) {
+          errorCount++;
+          continue;
+        }
+
+        if (res.role) {
+          p.detectedRole = res.role;
+          anyRoleDetected = true;
+        }
+        const isSpine = (res.role || entry.slotKey) === 'spine';
+        const needsCrop = Boolean(res.box_2d && shouldApplyCropBox(res.box_2d));
 
         if (isSpine) {
           const rot = [0, 90, 180, 270].includes(Number(res.spine_rotation)) ? Number(res.spine_rotation) : 0;
           let thumbUrl = '';
-          if (res.box_2d) {
+          if (res.box_2d && (needsCrop || rot !== 0)) {
             thumbUrl = await cropImageByBox(srcUrl, res.box_2d, {
               minBoxSpan: 25,
               padFrac: 0.025,
@@ -2348,9 +2449,9 @@ Return ONLY valid JSON:
           }
           p.autoCropped = true;
         } else {
-          if (res.box_2d) {
+          if (needsCrop) {
             const cropped = await cropImageByBox(srcUrl, res.box_2d, {
-              minBoxSpan: 150,
+              minBoxSpan: 120,
               padFrac: 0.025,
               maxLongEdge: spec.raw ? null : spec.maxEdge,
               maxWidthOnly: false,
@@ -2369,8 +2470,25 @@ Return ONLY valid JSON:
         }
         updateStageUI();
       }
+
+      // Automatically assign/re-slot staged photos using Gemini's detected roles (Front/Back/Spine/Extra)!
+      if (anyRoleDetected && !batchAutoCropCancelled && myStageSeq === stageSeq) {
+        const curEntries = getStagedSlotEntries();
+        const rolePlan = curEntries.map(e => ({
+          photo: e.photo,
+          role: e.photo.detectedRole || (e.slotKey === 'extra' ? 'extra' : e.slotKey)
+        }));
+        if (applyDetectedRolesToStagedSlots(rolePlan)) {
+          updateStageUI();
+        }
+      }
+      if (errorCount > 0 && !batchAutoCropCancelled) {
+        toast(`Auto-crop skipped ${errorCount} photo(s) — tap ✂️ to frame manually if needed`, 2800);
+      }
     } catch (err) {
-      if (err?.name !== 'AbortError') throw err;
+      if (err?.name !== 'AbortError') {
+        toast('Auto-crop skipped — photos still staged cleanly', 2600);
+      }
     } finally {
       setStatus('', false);
     }
@@ -2545,6 +2663,8 @@ Return ONLY valid JSON:
 
     document.getElementById('singleActionRow').classList.toggle('hidden', !hasAnything && !currentInspected);
     document.getElementById('btnRunSearch').disabled = !hasAnything;
+    const btnOff = document.getElementById('btnSaveOffline');
+    if (btnOff) btnOff.disabled = !hasAnything;
     document.getElementById('btnClearStage').classList.toggle('hidden', !hasAnything && !currentInspected);
 
     const box = document.getElementById('stagedSummary');
@@ -2758,6 +2878,32 @@ Return ONLY valid JSON:
     }
     return parts;
   }
+  function setVoiceCancelVisible(source, visible) {
+    const cancelId = source === 'stash' ? 'btnVoiceCancelStash' : 'btnVoiceCancelScan';
+    const el = document.getElementById(cancelId);
+    if (el) el.classList.toggle('hidden', !visible);
+  }
+
+  window.cancelVoiceRegrade = () => {
+    voiceWantListening = false;
+    try { activeRecognition?.abort?.(); } catch (_) { try { activeRecognition?.stop?.(); } catch (_2) {} }
+    activeRecognition = null;
+    voiceTranscriptFinal = '';
+    voiceTranscriptInterim = '';
+    const ctx = voiceContext;
+    voiceContext = null;
+    if (ctx) {
+      const btn = document.getElementById(ctx.btnId);
+      const liveEl = document.getElementById(ctx.liveId);
+      if (btn) { btn.classList.remove('listening'); btn.disabled = false; btn.textContent = VOICE_BTN_IDLE; }
+      if (liveEl) { liveEl.classList.add('hidden'); liveEl.textContent = ''; }
+      setVoiceCancelVisible(ctx.source, false);
+    }
+    setVoiceCancelVisible('scan', false);
+    setVoiceCancelVisible('stash', false);
+    toast('Voice memo cancelled — no AI call made', 1800);
+  };
+
   window.voiceRegrade = (source, btnId) => {
     if (!CC.isAiReady()) { toast('Add your Gemini API Key in Settings first'); return; }
     const btn = document.getElementById(btnId);
@@ -2768,6 +2914,7 @@ Return ONLY valid JSON:
       voiceWantListening = false;
       try { activeRecognition?.stop(); } catch (_) {}
       activeRecognition = null;
+      setVoiceCancelVisible(source, false);
       const fullMemo = `${voiceTranscriptFinal} ${voiceTranscriptInterim}`.trim();
       if (liveEl) { liveEl.classList.add('hidden'); liveEl.textContent = ''; }
       if (fullMemo) regradeWithAI(source, fullMemo, btnId);
@@ -2794,8 +2941,9 @@ Return ONLY valid JSON:
     voiceContext = { source, btnId, liveId };
 
     if (!audioEl.paused) audioEl.pause();
-    if (btn) { btn.classList.add('listening'); btn.textContent = '⏹️ Listening — Tap to Stop & Re-Grade'; }
-    if (liveEl) { liveEl.classList.remove('hidden'); liveEl.textContent = '🎤 Speak all flaws at your own pace (won’t cut you off)...'; }
+    if (btn) { btn.classList.add('listening'); btn.textContent = '⏹️ Done & Re-Grade'; }
+    setVoiceCancelVisible(source, true);
+    if (liveEl) { liveEl.classList.remove('hidden'); liveEl.textContent = '🎤 Listening — speak flaws clearly, or tap ✕ Cancel...'; }
 
     const startRec = () => {
       if (!voiceWantListening) return;
@@ -2806,6 +2954,7 @@ Return ONLY valid JSON:
       activeRecognition = rec;
 
       rec.onresult = (e) => {
+        if (!voiceWantListening) return;
         let interim = '';
         for (let i = e.resultIndex; i < e.results.length; i++) {
           const txt = e.results[i][0].transcript;
@@ -2820,6 +2969,7 @@ Return ONLY valid JSON:
       rec.onerror = (e) => {
         if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
           voiceWantListening = false;
+          setVoiceCancelVisible(source, false);
           if (btn) { btn.classList.remove('listening'); btn.textContent = VOICE_BTN_IDLE; }
           if (liveEl) liveEl.classList.add('hidden');
           toast('Mic permission denied');
@@ -2934,6 +3084,14 @@ Return ONLY valid JSON:
       if (btn) { btn.disabled = false; btn.textContent = VOICE_BTN_IDLE; }
     } catch (err) {
       setStatus('', false);
+      // Apply exact same staleness check in catch so a failed/aborted Voice Re-Grade from Pressing A
+      // NEVER overwrites Pressing B's button state or pendingVoiceRetry!
+      if (!isStash && (targetRunId !== scanRunId || targetInspectSeq !== inspectSeq || currentInspected !== targetItemRef)) {
+        return;
+      }
+      if (isStash && (!activeStashItem || activeStashItem.id !== targetStashId || document.getElementById('stashDetailModal')?.classList.contains('hidden'))) {
+        return;
+      }
       pendingVoiceRetry = { source, spoken: spokenDescription, btnId };
       if (btn) {
         btn.disabled = false;
@@ -3515,9 +3673,135 @@ Return ONLY valid JSON:
     };
   }
 
+  function applyIdentityToSearchFields(ident, fallbackExtracted = null) {
+    if (!ident) return;
+    const artStr = Array.isArray(ident.artist) ? ident.artist.join(', ') : (ident.artist || '');
+    document.getElementById('fTitle').value = ident.title || fallbackExtracted?.album_title || '';
+    document.getElementById('fArtist').value = artStr || (Array.isArray(fallbackExtracted?.artists) ? fallbackExtracted.artists.join(', ') : (fallbackExtracted?.artists || ''));
+    document.getElementById('fCatno').value = ident.catno || '';
+    document.getElementById('fLabel').value = ident.label || '';
+    document.getElementById('fYear').value = ident.year || '';
+    if (ident.format && !/^unknown$/i.test(String(ident.format))) {
+      setSelectFormatValue('fFormat', CC.normalizeDiscogsFormat(ident.format));
+    }
+  }
+
+  function renderFrankenBanner() {
+    const el = document.getElementById('frankenBanner');
+    if (!el) return;
+    if (!frankenState || !frankenState.active) {
+      el.classList.add('hidden');
+      el.innerHTML = '';
+      return;
+    }
+    const f = frankenState;
+    const isDiffAlbumOrFmt = f.mismatchType === 'different_album' || f.mismatchType === 'different_format';
+    const mediaLabel = [f.media?.artist, f.media?.title].filter(Boolean).join(' — ') || 'Unknown media';
+    const packLabel = [f.packaging?.artist, f.packaging?.title].filter(Boolean).join(' — ') || 'Unknown packaging';
+    const mediaMeta = [f.media?.format, f.media?.catno, f.media?.label, f.media?.year].filter(Boolean).join(' · ');
+    const packMeta = [f.packaging?.format, f.packaging?.catno, f.packaging?.label, f.packaging?.year].filter(Boolean).join(' · ');
+
+    el.classList.remove('hidden');
+    el.innerHTML = `
+      <div class="franken-banner-title">🧟 FRANKEN-COPY DETECTED (${esc(f.mismatchType.replace(/_/g, ' '))})</div>
+      <div class="franken-banner-reason">${esc(f.reason || 'Physical media and packaging do not match.')}</div>
+      <div class="franken-banner-compare">
+        <div class="franken-id-box">
+          <strong>📼 Physical Media ${f.mode === 'media' ? '(Active)' : ''}</strong>
+          <div>${esc(mediaLabel)}</div>
+          ${mediaMeta ? `<div style="margin-top:2px;">${esc(mediaMeta)}</div>` : ''}
+        </div>
+        <div class="franken-id-box">
+          <strong>📦 Packaging / Case ${f.mode === 'packaging' ? '(Active)' : ''}</strong>
+          <div>${esc(packLabel)}</div>
+          ${packMeta ? `<div style="margin-top:2px;">${esc(packMeta)}</div>` : ''}
+        </div>
+      </div>
+      <div class="inline-actions" style="gap:6px;">
+        <button type="button" class="btn ${f.mode === 'media' ? 'btn-green' : 'btn-secondary'} btn-sm" onclick="switchFrankenVerifyMode('media')">📼 Verify Media (Default)</button>
+        <button type="button" class="btn ${f.mode === 'packaging' ? 'btn-green' : 'btn-secondary'} btn-sm" onclick="switchFrankenVerifyMode('packaging')">📦 Verify Packaging Instead</button>
+        ${isDiffAlbumOrFmt ? `<button type="button" class="btn btn-secondary btn-sm" onclick="saveOrphanPackagingLocally()">💾 Also Save Orphan Packaging Locally</button>` : ''}
+      </div>
+    `;
+  }
+
+  window.switchFrankenVerifyMode = async (mode) => {
+    if (!frankenState || !frankenState.active) return;
+    frankenState.mode = mode === 'packaging' ? 'packaging' : 'media';
+    const ident = frankenState.mode === 'packaging' ? frankenState.packaging : frankenState.media;
+    applyIdentityToSearchFields(ident, currentExtracted);
+    if (currentExtracted) {
+      currentExtracted.album_title = ident?.title || currentExtracted.album_title;
+      currentExtracted.artists = ident?.artist ? [ident.artist] : currentExtracted.artists;
+      currentExtracted.raw_catalog_number = ident?.catno || '';
+      currentExtracted.label = ident?.label || '';
+      currentExtracted.year = ident?.year || '';
+      if (ident?.format && !/^unknown$/i.test(String(ident.format))) {
+        currentExtracted.detected_format = CC.normalizeDiscogsFormat(ident.format);
+      }
+      if (frankenState.mode === 'packaging') {
+        document.getElementById('fBarcode').value = stagedUpc || (currentExtracted.barcode || '').replace(/\D/g, '');
+      } else if (frankenState.mismatchType === 'different_album' || frankenState.mismatchType === 'different_format') {
+        // Packaging barcode belongs to the wrong album — don't search Discogs with the mismatched case's UPC!
+        document.getElementById('fBarcode').value = '';
+      }
+    }
+    renderFrankenBanner();
+    await runDiscogsSearch(scanRunId);
+  };
+
+  window.saveOrphanPackagingLocally = async () => {
+    if (!frankenState || !frankenState.packaging) return;
+    const p = frankenState.packaging;
+    const now = Date.now();
+    const photoSlots = {
+      front: stagedSlots.front?.saveWebp || '',
+      back: stagedSlots.back?.saveWebp || '',
+      extras: (stagedSlots.extras || []).filter(Boolean).map(x => x.saveWebp)
+    };
+    const derived = CC.deriveThumbsFromSlots(photoSlots, '');
+    const note = `Orphan packaging / case only (no matching media inside). ${frankenState.reason || ''}`.trim();
+    const rec = CC.stampStashRevision({
+      sync_id: CC.generateSyncId(),
+      artist: p.artist || 'Unknown Artist',
+      title: p.title || 'Orphan Packaging',
+      format: (p.format && !/^unknown$/i.test(p.format)) ? CC.normalizeDiscogsFormat(p.format) : (currentExtracted?.detected_format || 'Cassette'),
+      catno: p.catno || '',
+      label: p.label || '',
+      year: p.year || '',
+      country: '',
+      genres: [],
+      media_condition: 'Not Graded',
+      sleeve_condition: 'Not Graded',
+      condition_note: note,
+      is_franken_copy: true,
+      franken_type: frankenState.mismatchType || 'different_album',
+      franken_note: frankenState.reason || '',
+      needs_verification: true,
+      synced_to_discogs: false,
+      discogs_id: null,
+      photo_slots: photoSlots,
+      thumbs: derived.thumbs,
+      thumb_data_url: derived.thumb_data_url,
+      spine_thumb_url: stagedSpineThumbUrl || stagedSlots.spine?.saveWebp || '',
+      spine_source_url: stagedSpineSourceUrl || stagedSlots.spine?.origDataUrl || '',
+      spine_flipped: Boolean(stagedSpineFlipped),
+      created_at: now,
+      updated_at: now
+    }, null);
+    await CC.commitLocalMutation({ upsertStash: rec, queueOutbox: true });
+    await loadStashCache();
+    renderStash();
+    updateCloudUI();
+    scheduleGoogleAutoSync();
+    toast(`💾 Saved orphan packaging "${rec.artist} — ${rec.title}" locally!`, 3800);
+  };
+
   async function runVisionOCR(myRunId) {
     const keepOldGrades = Boolean(editingStashItem && !document.getElementById('chkRegradeEdit').checked);
     const shouldGradeNow = Boolean(cfg.autoGradeOnScan) && !keepOldGrades;
+    frankenState = null;
+    renderFrankenBanner();
     setStatus(
       shouldGradeNow
         ? `Inspecting & grading ${stagedPhotos.length} photo(s) on ${aiEngineLabel()}...`
@@ -3527,124 +3811,114 @@ Return ONLY valid JSON:
     );
 
     const upcHint = stagedUpc ? `User also scanned UPC barcode: ${stagedUpc}.` : '';
-    const spineHint = stagedPhotos.length >= 3
-      ? 'Photo index 2 (3rd photo) is typically a close-up of the SPINE — inspect it closely for catalog #, country text, cut-out markings (hole punches, saw cuts, notched corners, promo stamps), AND return a tight "spine_crop" box.'
-      : 'If any attached photo clearly shows the spine, inspect it for catalog #, country text, cut-out markings (hole punches, saw cuts, notched corners, promo stamps), and optionally return "spine_crop".';
-
-    const prompt = shouldGradeNow
-      ? `You are a meticulous physical music media OCR, Discogs pressing-ID, and strict Goldmine visual grading expert. Inspect ALL attached photos carefully. ${upcHint}
-
+    const sharedOcrInstructions = `
 TRUE VISUAL FORMAT RULE (CRITICAL):
 - Detect "detected_format" STRICTLY from what you physically see in the photos. NEVER guess or override based on any filter!
 - Allowed values: "Cassette" | "CD" | "Vinyl" | "8-Track Cartridge" | "Reel-To-Reel" | "MiniDisc" | "DAT" | "DVD" | "VHS" | "LaserDisc" | "Blu-ray" | "Betamax" | "UMD" | "Shellac" | "SACD" | "File" | "Box Set" | "Unknown".
 - Classify ALL vinyl record sizes/types (LP, 12", 7", 10", Flexi-disc, Lathe Cut) as "Vinyl".
 
-PHOTO-SCOPE, SPINE & LOOSE-MEDIA AWARENESS:
-- Photos are 0-indexed (0 = Front + Side A, 1 = Back + Side B, 2 = Spine close-up if provided, 3 = extra detail if provided).
-- ${spineHint}
-- Look carefully at whether a case, J-card, jacket, or cover insert actually appears in the photos.
-- If ONLY the bare cassette shell or bare disc is shown (no case, no J-card, no cover insert), treat it as LOOSE MEDIA: set "has_case_or_insert": false, set "sleeve_condition": "No Cover", and explicitly note in "physical_details" that this is loose media with no case/insert.
+PHOTO ROLE IDENTIFICATION (DO NOT ASSUME SLOT ORDER):
+- Photos are submitted as [Photo 0], [Photo 1], ... in arbitrary order. NEVER assume Photo 0 is Front or Photo 2 is Spine!
+- Return "photo_roles": an array of exact length ${stagedPhotos.length}, identifying each photo's true visual role as "front" | "back" | "spine" | "extra".
+- If any photo shows a spine, inspect it closely for catalog #, country text, cut-out markings (hole punches, saw cuts, notched corners, promo stamps), AND return "spine_crop" with its exact 0-based "photo_index".
+- If ONLY the bare cassette shell or bare disc is shown (no case, no J-card, no cover insert), set "has_case_or_insert": false and note loose media in "physical_details".
+
+FRANKEN-COPY DETECTOR (PACKAGING VS. PHYSICAL MEDIA MISMATCH — CRITICAL):
+- Independently read BOTH:
+  1) PACKAGING (J-card / outer jacket / jewel case insert / box) -> return "packaging_identity": { "artist", "title", "catno", "format", "label", "year" }
+  2) PHYSICAL MEDIA (cassette shell / CD disc face / vinyl center label) -> return "media_identity": { "artist", "title", "catno", "format", "label", "year" }
+- Compare Packaging vs. Physical Media carefully!
+  * If they match (or only one is visible), set "mismatch_type": "none" and "mismatch_reason": "".
+  * If the tape/disc is a DIFFERENT ALBUM or ARTIST than the case/J-card/jacket, set "mismatch_type": "different_album".
+  * If they are the same album but clearly a DIFFERENT PRESSING/REISSUE/LABEL/CAT# (e.g. 1st-press jacket with later reissue vinyl label, or club J-card with retail shell), set "mismatch_type": "different_pressing".
+  * If the format/packaging doesn't match the media inside, set "mismatch_type": "different_format".
+  * Whenever "mismatch_type" !== "none", write a crisp factual 1-sentence "mismatch_reason" (e.g., "J-card is Barry Manilow (Arista ATC 8601), but the cassette shell is The Doors — The Doors.").
 
 OCR RULES:
 - Ignore non-catalog manufacturing/tax/standard codes (Dolby, HX Pro, TSE, TS-2240, KTB, JASRAC, GEMA, BIEM) for "raw_catalog_number".
 - Read EVERY visible song title verbatim in "visible_tracks" so we can verify Discogs listings against the actual media.
-- Read exact physical shell/window/spine/pressing clues: shell color, timing window markings (e.g. "100-50-0" vs "0-50-0" vs blank vs dots), plant codes (e.g. "SR", "AR", "CR"), screws vs welded, paper label vs direct print, club stamps ("CRC", "BMG"), country/address text, copyright years, and any cut-out markings (saw cuts, drill holes, notched corners, promo stamps) on the spine/case.
-- ANTI-HALLUCINATION CLUB RULE: NEVER guess "CRC" or "BMG" for "club_edition" unless you can quote the EXACT legible club text visibly printed in the photo inside "club_evidence" (e.g., "CRC", "BMG Direct Marketing", "Columbia House", "Manufactured by Columbia House"). If no club text is clearly printed, set "club_evidence": "" and "club_edition": "None" or "Unknown".
+- Read exact physical shell/window/spine/pressing clues: shell color, timing window markings ("100-50-0" vs "0-50-0" vs blank vs dots), plant codes ("SR", "AR", "CR"), screws vs welded, paper label vs direct print, club stamps ("CRC", "BMG"), country/address text, copyright years, and cut-out markings.
+- ANTI-HALLUCINATION CLUB RULE: NEVER guess "CRC" or "BMG" unless you quote the EXACT legible club text visibly printed in the photo inside "club_evidence". Otherwise set "club_evidence": "" and "club_edition": "None" or "Unknown".
+
+AUTO-CROP & SPINE ORIENTATION RULES:
+- Return "photo_crops": an array of exact length ${stagedPhotos.length}, where EVERY entry is a tight [ymin, xmin, ymax, xmax] box (0-1000 normalized) tightly framing the physical media/case/sleeve/spine (NEVER return null even if tightly framed!).
+- Return "spine_rotation": integer 0 | 90 | 180 | 270 — inspect which direction the TOPS of the printed letters on the spine face: top -> 0, bottom (upside-down!) -> 180, left -> 90, right -> 270.`;
+
+    const prompt = shouldGradeNow
+      ? `You are a meticulous physical music media OCR, Franken-Copy detector, Discogs pressing-ID, and strict Goldmine visual grading expert. Inspect ALL attached photos carefully. ${upcHint}
+${sharedOcrInstructions}
 
 STRICT DISCOGS SELLER GRADING RULES (Be brutally honest and conservative — never over-grade!):
 1. List every flaw first in "media_defects" and "sleeve_defects" (including cut-out saw cuts, hole punches, notched spines/corners, promo stamps).
 2. Media Condition MUST be one of: ${JSON.stringify(MEDIA_GRADES.filter(g => g !== 'Not Graded'))}
-   * "Mint (M)" ONLY if factory sealed. "Near Mint (NM or M-)" = spotless, zero visible wear.
-   * "Very Good Plus (VG+)" = very clean, only tiny handling scuffs, crisp flat label.
-   * "Very Good (VG)" = visible scuffs/scratches, light label wear or fading.
-   * "Good Plus (G+)" = heavy scratches/scuffing, peeling/warped/bubbling/stained label, writing/yellowing.
-   * "Good (G)" / "Fair (F)" / "Poor (P)" = cracked shell, missing felt pad, torn label, deep gouges.
-3. Sleeve Condition MUST be one of: ${JSON.stringify(SLEEVE_GRADES)}
-   * No case/cover shown = "No Cover". Plain blank = "Generic".
-   * "Very Good Plus (VG+)" = clean insert, minimal edge wear, no case cracks.
-   * "Very Good (VG)" = creases, sticker residue, cut-out notch/saw cut, moderate case scuffs or small crack.
-   * "Good Plus (G+)" = paint/ink/water stains, heavy creases, ripped flap, heavily scratched/cracked case.
-   * "Good (G)" / "Fair (F)" / "Poor (P)" = severe stains obscuring art, torn/missing pieces, heavy water damage.
-4. When between two grades, ALWAYS pick the LOWER grade. NEVER say "mint" in "condition_note" unless sealed.
-5. SPINE & VERBATIM MARKINGS: Inspect EVERY photo including the Spine for promo punch holes, drill holes, saw cuts / cut-out notches, cracked hinges, spine fading/creases, and shell defects. TRANSCRIBE VERBATIM any notable ink stamps, radio/library/club property stamps (e.g. "Property of ... Milwaukee"), promo stamps, stickers, or handwritten markings in "condition_note" instead of summarizing them generically.
-
-AUTO-CROP & SPINE ORIENTATION RULES:
-- Return "photo_crops": an array of length ${stagedPhotos.length} matching the submitted photos in exact order, where each entry is [ymin, xmin, ymax, xmax] (0-1000 normalized) tightly framing the physical media/case/sleeve to remove dead table/hand/background whitespace (or null if already tightly framed).
-- Return "spine_rotation": integer 0 | 90 | 180 | 270 — exact clockwise rotation needed so spine text reads cleanly HORIZONTALLY left-to-right, right-side-up (explicitly check if the letters are upside-down and return 180 when inverted!).
+3. Sleeve Condition MUST be one of: ${JSON.stringify(SLEEVE_GRADES)} (No case/cover or wrong-album case = "No Cover"; blank replacement = "Generic").
+4. When between two grades, ALWAYS pick the LOWER grade. NEVER say "mint" unless factory sealed.
+5. TRANSCRIBE VERBATIM any notable ink stamps, radio/library/club property stamps, promo stamps, stickers, or handwritten markings in "condition_note".
 
 Return ONLY valid JSON:
 {
   "detected_format": "Cassette" | "CD" | "Vinyl" | "8-Track Cartridge" | "Reel-To-Reel" | "MiniDisc" | "DAT" | "DVD" | "VHS" | "LaserDisc" | "Blu-ray" | "Betamax" | "UMD" | "Shellac" | "SACD" | "File" | "Box Set" | "Unknown",
   "has_case_or_insert": true | false,
+  "mismatch_type": "none" | "different_album" | "different_pressing" | "different_format",
+  "mismatch_reason": "concise 1-sentence factual mismatch explanation, or empty string if none",
+  "media_identity": { "artist": "", "title": "", "catno": "", "format": "", "label": "", "year": "" },
+  "packaging_identity": { "artist": "", "title": "", "catno": "", "format": "", "label": "", "year": "" },
   "raw_catalog_number": "exact record-label catalog code or empty string",
   "cleaned_catalog_variants": ["catalog variations stripping hyphens/spaces/price prefixes"],
   "barcode": "digits only UPC/EAN if visible, else empty string",
-  "album_title": "album or release title",
+  "album_title": "album or release title (from physical media if Franken-Copy)",
   "artists": ["main artist name(s), or 'Various' if a compilation"],
   "label": "record label name or empty string",
   "year": "4-digit copyright/release year printed, else empty string",
-  "country_clues": "country printed (e.g. 'Printed in U.S.A.', 'Turkey') or 'Not visible'",
+  "country_clues": "country printed or 'Not visible'",
   "club_edition": "None" | "CRC" | "BMG" | "Unknown",
-  "club_evidence": "exact quoted club text visible in photo (e.g. 'CRC', 'BMG Direct', 'Columbia House'), or empty string",
-  "physical_details": "detailed plain-English list of EVERY visible physical pressing identifier (mention loose media if no case/insert; shell color, window markings, plant codes, paper label vs direct print, barcode presence, spine cut-out saw cuts/hole punches/notches, verbatim promo/radio stamps)",
-  "photo_crops": [[ymin, xmin, ymax, xmax] or null for each submitted photo in order],
+  "club_evidence": "exact quoted club text visible in photo, or empty string",
+  "physical_details": "detailed plain-English list of EVERY visible physical pressing identifier",
+  "photo_roles": ["front" | "back" | "spine" | "extra" for each submitted photo in order],
+  "photo_crops": [[ymin, xmin, ymax, xmax] for each submitted photo in order],
   "spine_rotation": 0 | 90 | 180 | 270,
-  "spine_crop": null or { "photo_index": 0-based photo index containing the clearest spine, "box_2d": [ymin, xmin, ymax, xmax] on 0-1000 scale tightly hugging the spine, "rotation_hint": "0" | "90cw" | "90ccw" | "180" },
+  "spine_crop": null or { "photo_index": 0-based photo index containing the clearest spine, "box_2d": [ymin, xmin, ymax, xmax], "rotation_hint": "0" | "90cw" | "90ccw" | "180" },
   "media_defects": ["list every flaw on cassette/disc, or empty array if spotless"],
-  "sleeve_defects": ["list every flaw on case/insert/spine including cut-out holes/saw cuts and verbatim stamps/stickers, or empty array if spotless or no cover"],
+  "sleeve_defects": ["list every flaw on case/insert/spine including cut-out holes/saw cuts and verbatim stamps/stickers"],
   "media_condition": "exact Discogs media grade",
   "sleeve_condition": "exact Discogs sleeve grade",
-  "condition_note": "blunt factual seller note listing visible flaws and transcribing notable stamps/stickers/handwriting verbatim (NEVER say 'mint' unless sealed)",
+  "condition_note": "blunt factual seller note listing visible flaws + verbatim stamps/stickers/handwriting",
   "visible_tracks": ["every song title clearly visible on shell/insert"]
 }`
-      : `You are a fast, meticulous physical music media OCR and Discogs pressing-ID expert. Inspect ALL attached photos carefully. ${upcHint}
-
-TRUE VISUAL FORMAT RULE (CRITICAL):
-- Detect "detected_format" STRICTLY from what you physically see in the photos. NEVER guess or override based on any filter!
-- Allowed values: "Cassette" | "CD" | "Vinyl" | "8-Track Cartridge" | "Reel-To-Reel" | "MiniDisc" | "DAT" | "DVD" | "VHS" | "LaserDisc" | "Blu-ray" | "Betamax" | "UMD" | "Shellac" | "SACD" | "File" | "Box Set" | "Unknown".
-- Classify ALL vinyl record sizes/types (LP, 12", 7", 10", Flexi-disc, Lathe Cut) as "Vinyl".
-
-PHOTO-SCOPE, SPINE & LOOSE-MEDIA AWARENESS:
-- Photos are 0-indexed (0 = Front + Side A, 1 = Back + Side B, 2 = Spine close-up if provided, 3 = extra detail if provided).
-- ${spineHint}
-- If ONLY the bare cassette shell or bare disc is shown (no case, no J-card, no cover insert), set "has_case_or_insert": false and note in "physical_details" that this is loose media with no case/insert.
-
-OCR RULES:
-- Ignore non-catalog manufacturing/tax/standard codes (Dolby, HX Pro, TSE, TS-2240, KTB, JASRAC, GEMA, BIEM) for "raw_catalog_number".
-- Read EVERY visible song title verbatim in "visible_tracks" so we can verify Discogs listings against the actual media.
-- Read exact physical shell/window/spine/pressing clues: shell color, timing window markings (e.g. "100-50-0" vs "0-50-0" vs blank vs dots), plant codes (e.g. "SR", "AR", "CR"), screws vs welded, paper label vs direct print, club stamps ("CRC", "BMG"), country/address text, copyright years, and any spine cut-out markings (hole punches, saw cuts, notched corners, promo stamps).
-- ANTI-HALLUCINATION CLUB RULE: NEVER guess "CRC" or "BMG" for "club_edition" unless you can quote the EXACT legible club text visibly printed in the photo inside "club_evidence". Otherwise set "club_evidence": "" and "club_edition": "None" or "Unknown".
-
-AUTO-CROP & SPINE ORIENTATION RULES:
-- Return "photo_crops": an array of length ${stagedPhotos.length} matching the submitted photos in exact order, where each entry is [ymin, xmin, ymax, xmax] (0-1000 normalized) tightly framing the physical media/case/sleeve to remove dead table/hand/background whitespace (or null if already tightly framed).
-- Return "spine_rotation": integer 0 | 90 | 180 | 270 — exact clockwise rotation needed so spine text reads cleanly HORIZONTALLY left-to-right, right-side-up (explicitly check if the letters are upside-down and return 180 when inverted!).
+      : `You are a fast, meticulous physical music media OCR, Franken-Copy detector, and Discogs pressing-ID expert. Inspect ALL attached photos carefully. ${upcHint}
+${sharedOcrInstructions}
 
 Return ONLY valid JSON:
 {
   "detected_format": "Cassette" | "CD" | "Vinyl" | "8-Track Cartridge" | "Reel-To-Reel" | "MiniDisc" | "DAT" | "DVD" | "VHS" | "LaserDisc" | "Blu-ray" | "Betamax" | "UMD" | "Shellac" | "SACD" | "File" | "Box Set" | "Unknown",
   "has_case_or_insert": true | false,
+  "mismatch_type": "none" | "different_album" | "different_pressing" | "different_format",
+  "mismatch_reason": "concise 1-sentence factual mismatch explanation, or empty string if none",
+  "media_identity": { "artist": "", "title": "", "catno": "", "format": "", "label": "", "year": "" },
+  "packaging_identity": { "artist": "", "title": "", "catno": "", "format": "", "label": "", "year": "" },
   "raw_catalog_number": "exact record-label catalog code or empty string",
   "cleaned_catalog_variants": ["catalog variations stripping hyphens/spaces/price prefixes"],
   "barcode": "digits only UPC/EAN if visible, else empty string",
-  "album_title": "album or release title",
+  "album_title": "album or release title (from physical media if Franken-Copy)",
   "artists": ["main artist name(s), or 'Various' if a compilation"],
   "label": "record label name or empty string",
   "year": "4-digit copyright/release year printed, else empty string",
-  "country_clues": "country printed (e.g. 'Printed in U.S.A.', 'Turkey') or 'Not visible'",
+  "country_clues": "country printed or 'Not visible'",
   "club_edition": "None" | "CRC" | "BMG" | "Unknown",
-  "club_evidence": "exact quoted club text visible in photo (e.g. 'CRC', 'BMG Direct', 'Columbia House'), or empty string",
-  "physical_details": "detailed plain-English list of EVERY visible physical pressing identifier (mention loose media if no case/insert; shell color, window markings, plant codes, paper label vs direct print, barcode presence, spine cut-out saw cuts/hole punches/notches, promo stamps)",
-  "photo_crops": [[ymin, xmin, ymax, xmax] or null for each submitted photo in order],
+  "club_evidence": "exact quoted club text visible in photo, or empty string",
+  "physical_details": "detailed plain-English list of EVERY visible physical pressing identifier",
+  "photo_roles": ["front" | "back" | "spine" | "extra" for each submitted photo in order],
+  "photo_crops": [[ymin, xmin, ymax, xmax] for each submitted photo in order],
   "spine_rotation": 0 | 90 | 180 | 270,
-  "spine_crop": null or { "photo_index": 0-based photo index containing the clearest spine, "box_2d": [ymin, xmin, ymax, xmax] on 0-1000 scale tightly hugging the spine, "rotation_hint": "0" | "90cw" | "90ccw" | "180" },
+  "spine_crop": null or { "photo_index": 0-based photo index containing the clearest spine, "box_2d": [ymin, xmin, ymax, xmax], "rotation_hint": "0" | "90cw" | "90ccw" | "180" },
   "visible_tracks": ["every song title clearly visible on shell/insert"]
 }`;
 
     const slotEntries = getStagedSlotEntries();
     const parts = [{ text: prompt }];
-    slotEntries.forEach((entry) => {
+    slotEntries.forEach((entry, idx) => {
       if (!entry.photo?.apiB64) return;
-      parts.push({ text: entry.tag });
+      parts.push({ text: `[Photo ${idx}]` });
       parts.push({ inline_data: { mime_type: 'image/jpeg', data: entry.photo.apiB64 } });
     });
 
@@ -3661,37 +3935,34 @@ Return ONLY valid JSON:
         ext.club_edition = 'Unknown';
       }
 
-      if (keepOldGrades && editingStashItem) {
-        ext.media_condition = editingStashItem.media_condition || 'Not Graded';
-        ext.sleeve_condition = editingStashItem.sleeve_condition || 'Not Graded';
-        ext.condition_note = editingStashItem.condition_note || '';
-        ext.graded_by_ai = false;
-      } else if (!shouldGradeNow) {
-        ext.media_condition = 'Not Graded';
-        ext.sleeve_condition = ext.has_case_or_insert === false ? 'No Cover' : 'Not Graded';
-        ext.condition_note = '';
-        ext.graded_by_ai = false;
-      } else {
-        ext.graded_by_ai = true;
+      // Smart role auto-assignment from Gemini's detected photo_roles
+      const rawRoles = Array.isArray(ext.photo_roles) ? ext.photo_roles : [];
+      let anyPhotoChanged = false;
+      if (rawRoles.length === slotEntries.length) {
+        const rolePlan = slotEntries.map((entry, idx) => ({
+          photo: entry.photo,
+          role: String(rawRoles[idx] || entry.slotKey || 'extra').toLowerCase()
+        }));
+        if (applyDetectedRolesToStagedSlots(rolePlan)) anyPhotoChanged = true;
       }
 
-      // Auto-crop any not-yet-cropped scan photos when autoCropPhotos is enabled (respects cfg.photoQuality & stable slots!)
+      // Auto-crop ONLY photos not already auto-cropped (avoids redundant double Gemini/crop work!)
       const spec = getPhotoQualitySpec();
       const rawPhotoCrops = Array.isArray(ext.photo_crops) ? ext.photo_crops : [];
       const exactSpineRot = [0, 90, 180, 270].includes(Number(ext.spine_rotation)) ? Number(ext.spine_rotation) : null;
-      let anyPhotoCropped = false;
 
       if (cfg.autoCropPhotos) {
         for (let i = 0; i < slotEntries.length; i++) {
-          const entry = slotEntries[i];
-          if (entry.slotKey === 'spine') continue;
-          const p = entry.photo;
-          if (!p || p.autoCropped) continue;
+          const p = slotEntries[i].photo;
+          if (!p || p.autoCropped || p === stagedSlots.spine) continue;
           const box = rawPhotoCrops[i];
-          if (!Array.isArray(box) || box.length !== 4) continue;
+          if (!Array.isArray(box) || box.length !== 4 || !shouldApplyCropBox(box)) {
+            p.autoCropped = true;
+            continue;
+          }
           const origUrl = p.origDataUrl || (p.apiB64 ? `data:image/jpeg;base64,${p.apiB64}` : p.saveWebp);
           const cropped = await cropImageByBox(origUrl, box, {
-            minBoxSpan: 150,
+            minBoxSpan: 120,
             padFrac: 0.025,
             maxLongEdge: spec.raw ? null : spec.maxEdge,
             maxWidthOnly: false,
@@ -3702,7 +3973,7 @@ Return ONLY valid JSON:
             p.saveWebp = cropped;
             p.cropBox = box;
             p.autoCropped = true;
-            anyPhotoCropped = true;
+            anyPhotoChanged = true;
           }
         }
       }
@@ -3711,30 +3982,43 @@ Return ONLY valid JSON:
       ext.spine_source_url = stagedSpineSourceUrl || '';
       ext.spine_flipped = Boolean(stagedSpineFlipped);
 
-      const spineSlotIdx = slotEntries.findIndex(e => e.slotKey === 'spine');
+      const spineOrigIdx = slotEntries.findIndex(e => e.photo === stagedSlots.spine);
       const spineAlreadyCropped = Boolean(stagedSlots.spine?.autoCropped && stagedSpineThumbUrl);
       if (cfg.autoCropPhotos && !spineAlreadyCropped) {
         const effectiveSpineCrop = (ext.spine_crop && Array.isArray(ext.spine_crop.box_2d))
           ? ext.spine_crop
-          : (spineSlotIdx >= 0 && Array.isArray(rawPhotoCrops[spineSlotIdx]) ? { photo_index: spineSlotIdx, box_2d: rawPhotoCrops[spineSlotIdx] } : null);
+          : (spineOrigIdx >= 0 && Array.isArray(rawPhotoCrops[spineOrigIdx]) ? { photo_index: spineOrigIdx, box_2d: rawPhotoCrops[spineOrigIdx] } : null);
 
         if (effectiveSpineCrop) {
-          const cropRes = await cropSpineFromStagedPhoto(effectiveSpineCrop, exactSpineRot);
-          if (cropRes.thumbUrl) {
-            ext.spine_thumb_url = cropRes.thumbUrl;
-            ext.spine_source_url = cropRes.sourceUrl;
-            ext.spine_flipped = Boolean(cropRes.flipped);
-            stagedSpineThumbUrl = cropRes.thumbUrl;
-            stagedSpineSourceUrl = cropRes.sourceUrl;
-            stagedSpineFlipped = Boolean(cropRes.flipped);
-            if (stagedSlots.spine) {
-              stagedSlots.spine.saveWebp = cropRes.thumbUrl;
-              stagedSlots.spine.cropBox = effectiveSpineCrop.box_2d;
-              stagedSlots.spine.rotationDeg = cropRes.angle || 0;
-              stagedSlots.spine.spineRotation = cropRes.angle || 0;
-              stagedSlots.spine.autoCropped = true;
+          // Ensure photo_index maps to the original submitted slotEntries photo!
+          const srcPhoto = slotEntries[Number(effectiveSpineCrop.photo_index)]?.photo || stagedSlots.spine;
+          if (srcPhoto) {
+            const origUrl = srcPhoto.origDataUrl || (srcPhoto.apiB64 ? `data:image/jpeg;base64,${srcPhoto.apiB64}` : srcPhoto.saveWebp);
+            const angle = exactSpineRot !== null ? exactSpineRot : 0;
+            const thumbUrl = await cropImageByBox(origUrl, effectiveSpineCrop.box_2d, {
+              minBoxSpan: 25,
+              padFrac: 0.025,
+              maxLongEdge: spec.raw ? null : spec.spineMaxW,
+              maxWidthOnly: !spec.raw,
+              rotationDeg: angle,
+              quality: spec.quality
+            });
+            if (thumbUrl) {
+              ext.spine_thumb_url = thumbUrl;
+              ext.spine_source_url = origUrl;
+              ext.spine_flipped = angle === 180;
+              stagedSpineThumbUrl = thumbUrl;
+              stagedSpineSourceUrl = origUrl;
+              stagedSpineFlipped = angle === 180;
+              if (stagedSlots.spine) {
+                stagedSlots.spine.saveWebp = thumbUrl;
+                stagedSlots.spine.cropBox = effectiveSpineCrop.box_2d;
+                stagedSlots.spine.rotationDeg = angle;
+                stagedSlots.spine.spineRotation = angle;
+                stagedSlots.spine.autoCropped = true;
+              }
+              anyPhotoChanged = true;
             }
-            anyPhotoCropped = true;
           }
         } else if (stagedSlots.spine && exactSpineRot !== null) {
           const spOrig = stagedSlots.spine.origDataUrl || stagedSlots.spine.saveWebp;
@@ -3750,18 +4034,81 @@ Return ONLY valid JSON:
             stagedSlots.spine.rotationDeg = exactSpineRot;
             stagedSlots.spine.spineRotation = exactSpineRot;
             stagedSlots.spine.autoCropped = true;
-            anyPhotoCropped = true;
+            anyPhotoChanged = true;
           }
         }
       }
-      if (anyPhotoCropped) updateStageUI();
+      if (anyPhotoChanged) updateStageUI();
+
+      // Franken-Copy detection & handling
+      const mismatchType = ['different_album', 'different_pressing', 'different_format'].includes(String(ext.mismatch_type || '').toLowerCase())
+        ? String(ext.mismatch_type).toLowerCase()
+        : 'none';
+      const mismatchReason = String(ext.mismatch_reason || '').trim();
+
+      if (keepOldGrades && editingStashItem) {
+        ext.media_condition = editingStashItem.media_condition || 'Not Graded';
+        ext.sleeve_condition = editingStashItem.sleeve_condition || 'Not Graded';
+        ext.condition_note = editingStashItem.condition_note || '';
+        ext.graded_by_ai = false;
+      } else if (!shouldGradeNow) {
+        ext.media_condition = 'Not Graded';
+        ext.sleeve_condition = (ext.has_case_or_insert === false || mismatchType === 'different_album' || mismatchType === 'different_format')
+          ? 'No Cover'
+          : 'Not Graded';
+        ext.condition_note = mismatchType !== 'none' && mismatchReason ? `Franken-copy: ${mismatchReason}` : '';
+        ext.graded_by_ai = false;
+      } else {
+        ext.graded_by_ai = true;
+        if (mismatchType === 'different_album' || mismatchType === 'different_format') {
+          ext.sleeve_condition = 'No Cover';
+        }
+        if (mismatchType !== 'none' && mismatchReason && !String(ext.condition_note || '').includes(mismatchReason)) {
+          ext.condition_note = ext.condition_note ? `${ext.condition_note} Franken-copy: ${mismatchReason}` : `Franken-copy: ${mismatchReason}`;
+        }
+      }
+
+      if (mismatchType !== 'none') {
+        ext.is_franken_copy = true;
+        ext.franken_type = mismatchType;
+        ext.franken_note = mismatchReason;
+        const medId = ext.media_identity && typeof ext.media_identity === 'object' ? ext.media_identity : {};
+        const pkgId = ext.packaging_identity && typeof ext.packaging_identity === 'object' ? ext.packaging_identity : {};
+        frankenState = {
+          active: true,
+          mode: 'media',
+          mismatchType,
+          reason: mismatchReason,
+          media: medId,
+          packaging: pkgId
+        };
+        // Default Discogs search & verification to physical media_identity!
+        if (medId.title || medId.artist || medId.catno) {
+          ext.album_title = medId.title || ext.album_title;
+          if (medId.artist) ext.artists = [medId.artist];
+          ext.raw_catalog_number = medId.catno || ext.raw_catalog_number || '';
+          if (medId.label) ext.label = medId.label;
+          if (medId.year) ext.year = medId.year;
+          if (medId.format && !/^unknown$/i.test(medId.format)) ext.detected_format = CC.normalizeDiscogsFormat(medId.format);
+        }
+        renderFrankenBanner();
+        toast(`🧟 Franken-Copy detected (${mismatchType.replace(/_/g, ' ')}) — defaulting to physical media!`, 4600);
+      } else {
+        ext.is_franken_copy = false;
+        ext.franken_type = '';
+        ext.franken_note = '';
+      }
 
       currentExtracted = ext;
 
       document.getElementById('fTitle').value = ext.album_title || '';
       document.getElementById('fArtist').value = Array.isArray(ext.artists) ? ext.artists.join(', ') : (ext.artists || '');
       document.getElementById('fCatno').value = ext.raw_catalog_number || '';
-      document.getElementById('fBarcode').value = stagedUpc || (ext.barcode || '').replace(/\D/g, '');
+      // For different-album/different-format Franken-Copies, don't let the wrong case's UPC hijack the media search!
+      const useBarcode = (mismatchType === 'different_album' || mismatchType === 'different_format')
+        ? ''
+        : (stagedUpc || (ext.barcode || '').replace(/\D/g, ''));
+      document.getElementById('fBarcode').value = useBarcode;
       if (ext.detected_format && ext.detected_format !== 'Unknown') {
         setSelectFormatValue('fFormat', ext.detected_format);
       }
@@ -3774,6 +4121,7 @@ Return ONLY valid JSON:
       }
 
       const clues = [
+        ext.is_franken_copy ? `🧟 Franken-Copy: ${ext.franken_note || ext.franken_type}` : '',
         ext.has_case_or_insert === false ? 'Loose media (no case/insert)' : '',
         ext.country_clues && ext.country_clues !== 'Not visible' ? `Country: ${ext.country_clues}` : '',
         ext.club_edition && ext.club_edition !== 'Unknown' ? `Club: ${ext.club_edition}${ext.club_evidence ? ` ("${ext.club_evidence}")` : ''}` : '',
@@ -4129,6 +4477,10 @@ RULE #0 — HARD FORMAT GATE (ABSOLUTE, NON-NEGOTIABLE):
 - Visually detected physical format in the user's photos: "${visualFormat || 'Unknown'}" (User format filter: "${requestedFormat}").
 - Cassette ≠ CD ≠ Vinyl. If the photos show a Cassette, EVERY CD or Vinyl listing is STRICTLY DISQUALIFIED (put its ID in "eliminated_ids"). Same for CD vs Cassette/Vinyl and Vinyl vs Cassette/CD.
 - If ZERO candidates in the list below match the actual physical format shown in the photos, you MUST return "outcome": "not_found" with a blunt explanation (e.g., "Photos show a Cassette, not Vinyl — switch format filter to Auto or Cassette"). NEVER call a wrong-format listing an exact_match or likely_match!
+
+RULE #0.5 — FRANKEN-COPY / PACKAGING-VS-MEDIA GUARD (CRITICAL):
+- Always inspect BOTH the physical media (cassette shell / CD disc / vinyl label) AND any visible packaging (J-card / jacket / insert).
+- If the physical media contradicts the packaging (different album/artist/pressing), NEVER silently return "likely_match" or "exact_match" for the packaging while ignoring a different tape/disc! Verify strictly against the active target identity (${frankenState?.active ? (frankenState.mode === 'packaging' ? 'PACKAGING (user explicitly chose packaging)' : 'PHYSICAL MEDIA (default for Franken-Copy)') : 'PHYSICAL MEDIA & matching packaging'}).
 
 STRICT PHOTO-SCOPE / LOOSE-TAPE AWARENESS (CRITICAL):
 - The user ALWAYS photographs Front of Case + Side A together and Back of Case + Side B together.
@@ -4693,22 +5045,28 @@ Return ONLY valid JSON:
     await runTasteAnalysis(currentInspected, myRunId, myInspectSeq);
   };
 
-  function buildTracklistHtml(tracks, matched = [], source = 'scan', defaultArtist = '') {
-    const mSet = new Set(matched.map(norm));
+  function buildTracklistHtml(tracks, matched = [], source = 'scan', defaultArtist = '', altMatched = []) {
+    const exactSet = new Set((matched || []).flatMap(m => [CC.normTrackEdition(m), norm(m)]).filter(Boolean));
+    const altSet = new Set((altMatched || []).flatMap(m => [CC.normTrackLoose(m), norm(m)]).filter(Boolean));
     if (!tracks.length) return `<div style="padding:12px; color:var(--muted); font-size:0.84rem;">No tracklist available.</div>`;
     const fallbackArtist = defaultArtist || (source === 'stash' ? activeStashItem?.artist : currentInspected?.artist) || '';
     return tracks.map((t, i) => {
-      const hit = mSet.has(norm(t.title)) || (t.artist && mSet.has(norm(`${t.artist} - ${t.title}`)));
+      const fullLbl = t.artist ? `${t.artist} - ${t.title}` : t.title;
+      const exactHit = exactSet.has(CC.normTrackEdition(t.title)) || exactSet.has(norm(t.title)) || (t.artist && (exactSet.has(CC.normTrackEdition(fullLbl)) || exactSet.has(norm(fullLbl))));
+      const altHit = !exactHit && (altSet.has(CC.normTrackLoose(t.title)) || altSet.has(norm(t.title)) || (t.artist && (altSet.has(CC.normTrackLoose(fullLbl)) || altSet.has(norm(fullLbl)))));
       const fn = source === 'stash' ? `previewStashTrack(${i})` : `previewTrackByIndex(${i})`;
       const trackArtist = t.artist || fallbackArtist;
       const trackTitle = t.title || '';
       const playKey = normFull(`${trackArtist}|${trackTitle}`);
-      return `<div class="track-row ${hit ? 'track-hit' : ''}">
+      const badgeHtml = exactHit
+        ? '<span class="badge badge-green" style="margin:0;">Spotify</span>'
+        : (altHit ? '<span class="badge badge-blue" style="margin:0;" title="You like a different version (live/acoustic/remix/edit)">Alt Version</span>' : '');
+      return `<div class="track-row ${exactHit ? 'track-hit' : ''}">
         <div class="track-info">
           <div class="track-name">${esc(t.pos ? t.pos + ' · ' : '')}${esc(t.title)}</div>
           ${t.artist ? `<div class="track-sub">${esc(t.artist)}</div>` : ''}
         </div>
-        ${hit ? '<span class="badge badge-green" style="margin:0;">Spotify</span>' : ''}
+        ${badgeHtml}
         <button type="button" class="play-pill-btn" data-play-key="${esc(playKey)}" onclick="${fn}" title="Play 30s preview">▶</button>
       </div>`;
     }).join('');
@@ -4861,6 +5219,7 @@ Return ONLY valid JSON:
 
     const vBtn = document.getElementById('btnVoiceRegradeScan');
     if (vBtn) { vBtn.disabled = false; vBtn.classList.remove('listening'); vBtn.textContent = VOICE_BTN_IDLE; }
+    setVoiceCancelVisible('scan', false);
 
     const btnWrong = document.getElementById('btnWrongPressing');
     if (currentCandidates.length > 1) {
@@ -4895,7 +5254,7 @@ Return ONLY valid JSON:
     const localMatch = checkLocalSpotify(item);
     item.spotify_matches = localMatch;
     document.getElementById('trackCount').textContent = item.tracklist.length;
-    document.getElementById('inspTracklist').innerHTML = buildTracklistHtml(item.tracklist, localMatch.matchedTracks, 'scan', item.artist);
+    document.getElementById('inspTracklist').innerHTML = buildTracklistHtml(item.tracklist, localMatch.matchedTracks, 'scan', item.artist, localMatch.altMatchedTracks);
     syncTrackPlayButtons();
 
     document.getElementById('tasteLocalBadges').innerHTML = buildSpotifyHowYouKnowHtml(item, localMatch, true);
@@ -4950,13 +5309,16 @@ Return ONLY valid JSON:
     const q = (s) => `&ldquo;${esc(s)}&rdquo;`;
     const isCompilation = Boolean(lm.isVarious || (artistMatches.length > 1 && /^various/i.test(String(item?.artist || '').trim())));
 
-    // Helper: Priority #1 "On this release" lead sentence highlighting Liked Songs first, then Top / Saved-Album / Playlist tracks
+    // Helper: Priority #1 "On this release" lead sentence separating exact/remaster hits from loose alt-version hits!
     const buildOnReleaseSentence = (includeArtistPrefix) => {
       if (!albumHits.length) return '';
       const fmtHit = (h) => (includeArtistPrefix && h.artist) ? `${esc(h.artist)} &mdash; ${q(h.title)}` : q(h.title);
-      const likedOnRel = albumHits.filter(h => h.liked);
-      const topOrAlbOnRel = albumHits.filter(h => !h.liked && (h.top || h.album));
-      const plOnlyOnRel = albumHits.filter(h => !h.liked && !h.top && !h.album);
+      const exactHits = albumHits.filter(h => h.matchQuality !== 'alt_version');
+      const altHits = albumHits.filter(h => h.matchQuality === 'alt_version');
+
+      const likedOnRel = exactHits.filter(h => h.liked);
+      const topOrAlbOnRel = exactHits.filter(h => !h.liked && (h.top || h.album));
+      const plOnlyOnRel = exactHits.filter(h => !h.liked && !h.top && !h.album);
 
       const clauses = [];
       if (likedOnRel.length) {
@@ -4973,6 +5335,17 @@ Return ONLY valid JSON:
         const list = joinHumanList(plOnlyOnRel.slice(0, 3).map(fmtHit));
         const more = plOnlyOnRel.length > 3 ? ` (+${plOnlyOnRel.length - 3} more)` : '';
         clauses.push(`${clauses.length ? 'and ' : 'you have '}${plOnlyOnRel.length} playlist track${plOnlyOnRel.length === 1 ? '' : 's'} (${list}${more})`);
+      }
+      if (altHits.length) {
+        const altList = joinHumanList(altHits.slice(0, 3).map(h => {
+          const base = fmtHit(h);
+          const hint = h.matchedSpotifyTitle && norm(h.matchedSpotifyTitle) !== norm(h.title)
+            ? ` (you like &ldquo;${esc(h.matchedSpotifyTitle)}&rdquo;)`
+            : ' (you like a live/alt version)';
+          return `${base}${hint}`;
+        }));
+        const more = altHits.length > 3 ? ` (+${altHits.length - 3} more)` : '';
+        clauses.push(`${clauses.length ? 'plus another version you like: ' : 'Another version you like: '}${altList}${more}`);
       }
       if (!clauses.length) {
         const list = joinHumanList(albumHits.slice(0, 4).map(fmtHit));
@@ -5032,7 +5405,7 @@ Return ONLY valid JSON:
       const plMap = primary.playlistTrackMap || {};
       const followParts = [];
       if (primary.isFollowed) followParts.push('you follow them');
-      if (primary.isTopArtist) followParts.push('one of your Top Artists');
+      if (primary.isTopArtist) followParts.push("they're one of your Top Artists");
 
       const extraSources = [];
       if (topTrs.length) {
@@ -5126,23 +5499,30 @@ Return ONLY valid JSON:
     if (spLookupCache.has(profile)) return spLookupCache.get(profile);
 
     const artistByKey = new Map();
-    const pairSet = new Set();
-    const trackSourceByPair = new Map();
+    const editionPairSet = new Set();
+    const editionSourceByPair = new Map();
+    const loosePairSet = new Set();
+    const looseSourceByPair = new Map();
+    const looseTitleByPair = new Map();
     const hasProvenance = Boolean(profile.provenanceVersion >= 2 || profile.trackSources);
 
     const indexTrackPair = (na, rawTitle, src = null) => {
       if (!na || !rawTitle) return;
-      const keys = new Set();
-      const nt = norm(rawTitle);
-      const nb = CC.normTrackBase(rawTitle);
-      if (nt) keys.add(`${na}|${nt}`);
-      if (nb) keys.add(`${na}|${nb}`);
-      keys.forEach(k => {
-        pairSet.add(k);
-        if (src) {
-          trackSourceByPair.set(k, mergeTrackSourceProv(trackSourceByPair.get(k), src));
-        }
-      });
+      const cleanTitle = String(rawTitle || '').trim();
+      const edKey = CC.normTrackEdition(cleanTitle);
+      const looseKey = CC.normTrackLoose(cleanTitle);
+
+      if (edKey) {
+        const pk = `${na}|${edKey}`;
+        editionPairSet.add(pk);
+        if (src) editionSourceByPair.set(pk, mergeTrackSourceProv(editionSourceByPair.get(pk), src));
+      }
+      if (looseKey) {
+        const lk = `${na}|${looseKey}`;
+        loosePairSet.add(lk);
+        if (cleanTitle && !looseTitleByPair.has(lk)) looseTitleByPair.set(lk, cleanTitle);
+        if (src) looseSourceByPair.set(lk, mergeTrackSourceProv(looseSourceByPair.get(lk), src));
+      }
     };
 
     Object.entries(profile.allArtists || {}).forEach(([rawKey, rec]) => {
@@ -5174,7 +5554,17 @@ Return ONLY valid JSON:
       });
     }
 
-    const lookup = { artistByKey, pairSet, trackSourceByPair, hasProvenance };
+    const lookup = {
+      artistByKey,
+      editionPairSet,
+      editionSourceByPair,
+      loosePairSet,
+      looseSourceByPair,
+      looseTitleByPair,
+      pairSet: editionPairSet,
+      trackSourceByPair: editionSourceByPair,
+      hasProvenance
+    };
     spLookupCache.set(profile, lookup);
     return lookup;
   }
@@ -5187,6 +5577,7 @@ Return ONLY valid JSON:
       artistHit: false,
       matchedArtists: [],
       matchedTracks: [],
+      altMatchedTracks: [],
       likedTrackMatches: [],
       playlistOnlyTrackMatches: [],
       likedArtistDetails: [],
@@ -5198,7 +5589,7 @@ Return ONLY valid JSON:
     const lookup = getSpotifyLookup(spotifyProfile);
     if (!lookup) return empty;
 
-    const { artistByKey, pairSet, trackSourceByPair, hasProvenance } = lookup;
+    const { artistByKey, editionPairSet, editionSourceByPair, loosePairSet, looseSourceByPair, looseTitleByPair, hasProvenance } = lookup;
     const matchedArtists = [];
     const likedArtistDetails = [];
     const playlistOnlyArtistDetails = [];
@@ -5271,8 +5662,11 @@ Return ONLY valid JSON:
       }
     });
 
-    // Strict artist-bound track matching: BOTH artist (leading "the " stripped) AND title MUST match
+    // Strict artist-bound track matching:
+    // Pass 1: exact / normTrackEdition (matchQuality: 'exact')
+    // Pass 2: normTrackLoose fallback (matchQuality: 'alt_version', recording matched Spotify track title)
     const matchedTracks = [];
+    const altMatchedTracks = [];
     const likedTrackMatches = [];
     const playlistOnlyTrackMatches = [];
     const albumTrackHits = [];
@@ -5286,7 +5680,6 @@ Return ONLY valid JSON:
       const primaryArtStr = t.artist || (isItemVarious ? '' : item.artist) || '';
       if (primaryArtStr) candidates.push({ artStr: primaryArtStr, titleStr: rawTitle });
 
-      // Support compilation track titles formatted as "Artist - Title"
       const dashParts = rawTitle.split(/\s+[-–—]\s+/);
       if (dashParts.length >= 2) {
         candidates.push({ artStr: dashParts[0].trim(), titleStr: dashParts.slice(1).join(' - ').trim() });
@@ -5294,36 +5687,60 @@ Return ONLY valid JSON:
 
       let matchedPairKeys = [];
       let matchedCand = null;
+      let matchQuality = 'exact';
+      let matchedSpotifyTitle = '';
+
+      // Pass 1: Exact / Edition-only remaster match
       for (const c of candidates) {
-        const titleVariants = Array.from(new Set([norm(c.titleStr), CC.normTrackBase(c.titleStr)].filter(Boolean)));
-        if (!titleVariants.length) continue;
-        const artParts = String(c.artStr)
-          .split(/,|&|\band\b|feat\.?/i)
-          .map(normArtistKey)
-          .filter(Boolean);
+        const edKey = CC.normTrackEdition(c.titleStr);
+        if (!edKey) continue;
+        const artParts = String(c.artStr).split(/,|&|\band\b|feat\.?/i).map(normArtistKey).filter(Boolean);
         const hits = [];
         for (const na of artParts) {
-          for (const tv of titleVariants) {
-            const pk = `${na}|${tv}`;
-            if (pairSet.has(pk) && !hits.includes(pk)) hits.push(pk);
-          }
+          const pk = `${na}|${edKey}`;
+          if (editionPairSet.has(pk) && !hits.includes(pk)) hits.push(pk);
         }
         if (hits.length) {
           matchedPairKeys = hits;
           matchedCand = c;
+          matchQuality = 'exact';
           break;
+        }
+      }
+
+      // Pass 2: Loose alt-version fallback (Live / Acoustic / Remix / Radio Edit / Single Version / Demo)
+      if (!matchedPairKeys.length) {
+        for (const c of candidates) {
+          const looseKey = CC.normTrackLoose(c.titleStr);
+          if (!looseKey) continue;
+          const artParts = String(c.artStr).split(/,|&|\band\b|feat\.?/i).map(normArtistKey).filter(Boolean);
+          const hits = [];
+          for (const na of artParts) {
+            const lk = `${na}|${looseKey}`;
+            if (loosePairSet.has(lk) && !hits.includes(lk)) hits.push(lk);
+          }
+          if (hits.length) {
+            matchedPairKeys = hits;
+            matchedCand = c;
+            matchQuality = 'alt_version';
+            matchedSpotifyTitle = looseTitleByPair.get(hits[0]) || '';
+            break;
+          }
         }
       }
 
       if (matchedPairKeys.length) {
         const label = t.artist ? `${t.artist} - ${t.title}` : t.title;
-        const dedup = CC.normTrackBase(label) || norm(label);
+        const dedup = CC.normTrackLoose(label) || norm(label);
         if (!seenTrackKey.has(dedup)) {
           seenTrackKey.add(dedup);
-          matchedTracks.push(label);
+          if (matchQuality === 'exact') matchedTracks.push(label);
+          else altMatchedTracks.push(label);
+
           let mergedSrc = null;
+          const srcMap = matchQuality === 'exact' ? editionSourceByPair : looseSourceByPair;
           for (const pk of matchedPairKeys) {
-            const s = trackSourceByPair.get(pk);
+            const s = srcMap.get(pk);
             if (s) mergedSrc = mergeTrackSourceProv(mergedSrc, s);
           }
           const src = mergedSrc;
@@ -5333,16 +5750,19 @@ Return ONLY valid JSON:
             liked: Boolean(src?.liked),
             top: Boolean(src?.top),
             album: Boolean(src?.album),
-            playlists: Array.isArray(src?.playlists) ? src.playlists : []
+            playlists: Array.isArray(src?.playlists) ? src.playlists : [],
+            matchQuality,
+            matchedSpotifyTitle
           });
 
           if (hasProvenance) {
+            const altSuffix = matchQuality === 'alt_version' ? ' · alt version' : '';
             if (src && (src.liked || src.top || src.album)) {
               const tag = src.liked ? 'Liked' : (src.top ? 'Top Track' : 'Saved Album');
-              likedTrackMatches.push(`${label} (${tag})`);
+              likedTrackMatches.push(`${label} (${tag}${altSuffix})`);
             } else {
               const pls = Array.isArray(src?.playlists) && src.playlists.length ? src.playlists.slice(0, 2).join(', ') : 'Playlist';
-              playlistOnlyTrackMatches.push(`${label} [${pls}]`);
+              playlistOnlyTrackMatches.push(`${label} [${pls}${altSuffix}]`);
             }
           }
         }
@@ -5355,6 +5775,7 @@ Return ONLY valid JSON:
       artistHit: matchedArtists.length > 0,
       matchedArtists,
       matchedTracks,
+      altMatchedTracks,
       likedTrackMatches,
       playlistOnlyTrackMatches,
       likedArtistDetails,
@@ -5538,27 +5959,77 @@ Return ONLY valid JSON:
     runTasteAnalysis(currentInspected, scanRunId, inspectSeq);
   };
 
-  async function runTasteAnalysis(item, myRunId, myInspectSeq = inspectSeq) {
-    if (!CC.isAiReady()) {
-      document.getElementById('tasteScore').textContent = '—';
-      document.getElementById('tasteBody').textContent = 'Add your Gemini API Key in Settings to enable Taste & Context.';
-      return;
+  // Shared DRY Taste prompt builder used by runTasteAnalysis, recalibrateSingleStashItem, and recalibrateStashBatch
+  function buildTasteEvaluationPrompt(itemsOrSingle, opts = {}) {
+    const isBatch = Array.isArray(itemsOrSingle);
+    const dna = spotifyProfile?.tasteDna || 'No written Taste Profile yet.';
+    const softSpots = spotifyProfile?.softSpots || 'None specified yet.';
+    const hardRules = `HARD RULES:
+0. PRIORITY #1 — ON-RELEASE LIKED SONGS: If 1 or more of the user's exact/remaster Liked Songs (or Top Tracks) is literally on this physical release's tracklist, treat that as the #1 highest-priority KEEP signal (strong 9–10 KEEP when it aligns with their taste/favorite artists, or solid 7–8+ KEEP even on compilations) and explicitly name the matched on-release Liked Song(s) in "summary"! (Note: alt-version matches like live/acoustic/remix are a helpful positive signal, slightly softer than exact studio matches.)
+1. PROVENANCE WEIGHTING (LIKED SONGS > SAVED ALBUMS > PLAYLIST-ONLY):
+   - Liked Songs, Top Tracks, Top Artists, and Saved Albums are STRONG personal favorites — boost the score and NEVER dismiss them as outside the user's taste!
+   - Playlist-Only matches (0 Liked Songs / 0 Top / 0 Saved Albums) indicate CASUAL familiarity, NOT a core obsession. State this honestly in "summary" and judge the album fairly against the Taste Profile instead of inflating it to an automatic 9–10.
+2. SOFT SPOTS EQUAL WEIGHT: If this release fits ANY genre, style, era, or mood listed in "Soft Spots & Niche Pockets", score it enthusiastically as a genuine match on par with Core Obsessions.
+Verdict rules: "KEEP" if score >= 7, "LISTEN" if 5-6, "SELL / SKIP" if <= 4.`;
+
+    if (isBatch) {
+      const payload = itemsOrSingle.map(({ it, lm }, idx) => ({
+        idx,
+        artist: it.artist,
+        title: it.title,
+        year: it.year || '',
+        format: it.format || '',
+        genres: (it.genres || []).slice(0, 6),
+        sample_tracks: (it.tracklist || []).slice(0, 24).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title),
+        liked_songs_literally_on_this_release: (lm.albumTrackHits || []).filter(h => (h.liked || h.top) && h.matchQuality !== 'alt_version').map(h => h.artist ? `${h.artist} - ${h.title}` : h.title),
+        alt_version_liked_songs_on_release: (lm.albumTrackHits || []).filter(h => (h.liked || h.top) && h.matchQuality === 'alt_version').map(h => h.artist ? `${h.artist} - ${h.title}` : h.title),
+        liked_artists_in_spotify: lm.hasProvenance ? lm.likedArtistDetails : (lm.details !== 'None' ? [lm.details] : []),
+        liked_tracks_in_spotify: lm.hasProvenance ? lm.likedTrackMatches : lm.matchedTracks,
+        playlist_only_artists: lm.hasProvenance ? lm.playlistOnlyArtistDetails : [],
+        playlist_only_tracks: lm.hasProvenance ? lm.playlistOnlyTrackMatches : []
+      }));
+      return `Batch-recalibrate personal taste scores for these ${payload.length} saved music releases based on the user's Taste Profile, explicit Soft Spots, and exact local Spotify matches. Speak directly to "you".
+
+User's Taste Profile:
+${dna}
+
+User's Explicit Soft Spots & Niche Pockets (FIRST-CLASS WEIGHT — treat these with EQUAL importance to Core Obsessions):
+${softSpots}
+
+${hardRules}
+3. Evaluate BOTH the specific album/release (era, genre, studio album vs compilation) AND the artist.
+4. For each release, provide brief musical/pop-culture context ("context_note", 1 short sentence or ""), the best preview track ("litmus_track" & "litmus_artist"), and up to 4 standout/recognizable songs in "notable_songs" (or [] if none).
+
+Releases:
+${JSON.stringify(payload)}
+
+Return ONLY valid JSON:
+{
+  "scores": [
+    {
+      "idx": number,
+      "score": 1 to 10 integer,
+      "verdict": "KEEP" | "LISTEN" | "SELL / SKIP",
+      "summary": "1-2 punchy sentences speaking to 'you'",
+      "context_note": "1 short neutral sentence of album/pop-culture context, or empty string",
+      "litmus_track": "exact song title from sample_tracks (WITHOUT artist prefix) of the best preview track, or empty string",
+      "litmus_artist": "performing artist of litmus_track",
+      "notable_songs": [
+        { "artist": "performing artist", "title": "exact song title", "reason": "short 5-10 word reason it stands out" }
+      ]
+    }
+  ]
+}`;
     }
 
-    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v220`;
-    if (tasteCache.has(cacheKey)) {
-      if (myRunId !== scanRunId || myInspectSeq !== inspectSeq || currentInspected !== item) return;
-      applyTasteUI(item, tasteCache.get(cacheKey), myRunId);
-      return;
-    }
-
+    const item = itemsOrSingle;
+    const sm = opts.localMatch || item.spotify_matches || {};
     const tracksStr = (item.tracklist || []).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title).join('; ');
-    const dna = spotifyProfile?.tasteDna || '';
-    const softSpots = spotifyProfile?.softSpots || '';
-    const sm = item.spotify_matches || {};
-    const onReleaseLiked = (sm.albumTrackHits || []).filter(h => h.liked || h.top).map(h => h.artist ? `${h.artist} - ${h.title}` : h.title);
+    const onReleaseLiked = (sm.albumTrackHits || []).filter(h => (h.liked || h.top) && h.matchQuality !== 'alt_version').map(h => h.artist ? `${h.artist} - ${h.title}` : h.title);
+    const onReleaseAlt = (sm.albumTrackHits || []).filter(h => (h.liked || h.top) && h.matchQuality === 'alt_version').map(h => h.artist ? `${h.artist} - ${h.title}` : h.title);
     const spEvidenceBlock = sm.hasProvenance
-      ? `- PRIORITY #1 LIKED / TOP SONGS LITERALLY ON THIS RELEASE: ${onReleaseLiked.join(', ') || 'None'}
+      ? `- PRIORITY #1 EXACT/REMASTER LIKED / TOP SONGS ON THIS RELEASE: ${onReleaseLiked.join(', ') || 'None'}
+- ALT-VERSION LIKED / TOP SONGS ON THIS RELEASE: ${onReleaseAlt.join(', ') || 'None'}
 - HIGH-WEIGHT Liked / Top / Saved-Album Artists: ${(sm.likedArtistDetails || []).join('; ') || 'None'}
 - HIGH-WEIGHT Liked / Top / Saved-Album Songs: ${(sm.likedTrackMatches || []).join(', ') || 'None'}
 - CASUAL Playlist-Only Artists (0 Liked Songs): ${(sm.playlistOnlyArtistDetails || []).join('; ') || 'None'}
@@ -5566,7 +6037,7 @@ Return ONLY valid JSON:
       : `- Matching Artists in Library: ${sm.details || 'None'}
 - Exact / Matching Songs Already in Library: ${(sm.matchedTracks || []).join(', ') || 'None'}`;
 
-    const prompt = `Evaluate this physical music release strictly against the user's musical taste profile and provide brief musical/pop-culture context. Speak directly to "you".
+    return `Evaluate this physical music release strictly against the user's musical taste profile and provide brief musical/pop-culture context. Speak directly to "you".
 
 Release: "${item.artist} - ${item.title}" (${item.year || '?'}, ${item.format}, Genres: ${(item.genres || []).join(', ') || 'unknown'}).
 Full Tracklist: ${tracksStr || 'Unknown'}.
@@ -5574,29 +6045,19 @@ Exact Local Matches Across ALL ${spotifyProfile?.totalTracks || 0} Spotify Track
 ${spEvidenceBlock}
 
 User's Taste Profile:
-${dna || 'No written Taste Profile yet.'}
+${dna}
 
 User's Explicit Soft Spots & Niche Pockets (FIRST-CLASS WEIGHT — treat these with EQUAL importance to Core Obsessions so smaller 5–15 song favorite pockets are NEVER averaged out of a large library):
-${softSpots || 'None specified yet.'}
+${softSpots}
 
-HARD RULES:
-0. PRIORITY #1 — ON-RELEASE LIKED SONGS: If 1 or more of the user's Liked Songs (or Top Tracks) is literally on this physical release's tracklist, treat that as the #1 highest-priority KEEP signal (strong 9–10 KEEP when it aligns with their taste/favorite artists, or solid 7–8+ KEEP even on compilations) and explicitly name the matched on-release Liked Song(s) in "summary"!
-1. PROVENANCE WEIGHTING (LIKED SONGS > SAVED ALBUMS > PLAYLIST-ONLY):
-   - Liked Songs, Top Tracks, Top Artists, and Saved Albums are STRONG personal favorites — boost the score and NEVER dismiss them as outside the user's taste!
-   - Playlist-Only matches (0 Liked Songs / 0 Top / 0 Saved Albums) indicate CASUAL familiarity, NOT a core obsession. State this honestly in "summary" (e.g., "You haven't Liked any Joe Walsh songs, though you have a track in your 'Classic Rock' playlist...") and judge the album fairly against the Taste Profile instead of inflating it to an automatic 9–10.
-2. SOFT SPOTS EQUAL WEIGHT: If this release fits ANY genre, style, era, or mood listed in "Soft Spots & Niche Pockets", score it enthusiastically as a genuine match on par with Core Obsessions.
-
-Verdict rules:
-- "KEEP" if score >= 7.
-- "LISTEN" if score is 5-6.
-- "SELL / SKIP" if score <= 4.
+${hardRules}
 
 Return ONLY valid JSON:
 {
-  "score": 1 to 10 integer (honest personal taste match based on Taste Profile, Soft Spots & exact library hits),
+  "score": 1 to 10 integer,
   "verdict": "KEEP" | "LISTEN" | "SELL / SKIP",
   "summary": "1-2 punchy sentences speaking directly to 'you' explaining why you will or won't enjoy this, referencing specific on-release Liked Songs, library hits, Soft Spots, or Taste Profile traits.",
-  "context_note": "1-2 neutral sentences of useful context: notable album history, why a song on it is widely recognizable in pop culture, or collector context (plain description, no hype). Empty string if obscure/unremarkable.",
+  "context_note": "1-2 neutral sentences of useful context (plain description, no hype). Empty string if obscure/unremarkable.",
   "litmus_track": "exact song title from Full Tracklist (WITHOUT artist prefix) of the single best/most representative track to preview",
   "litmus_artist": "performing artist of litmus_track",
   "notable_songs": [
@@ -5604,6 +6065,23 @@ Return ONLY valid JSON:
   ]
 }
 Include up to 6 genuinely recognizable songs in notable_songs (or empty array if none).`;
+  }
+
+  async function runTasteAnalysis(item, myRunId, myInspectSeq = inspectSeq) {
+    if (!CC.isAiReady()) {
+      document.getElementById('tasteScore').textContent = '—';
+      document.getElementById('tasteBody').textContent = 'Add your Gemini API Key in Settings to enable Taste & Context.';
+      return;
+    }
+
+    const cacheKey = `${norm(item.artist)}|${norm(item.title)}|v230`;
+    if (tasteCache.has(cacheKey)) {
+      if (myRunId !== scanRunId || myInspectSeq !== inspectSeq || currentInspected !== item) return;
+      applyTasteUI(item, tasteCache.get(cacheKey), myRunId);
+      return;
+    }
+
+    const prompt = buildTasteEvaluationPrompt(item, { localMatch: item.spotify_matches });
 
     try {
       const res = await CC.callAI([{ text: prompt }], null, { retryLabel: 'Taste Check' });
@@ -5725,6 +6203,7 @@ Write a dense, super-specific ~450-word Taste Profile dossier with these exact s
     tasteCache.clear();
     updateSpotifyUI();
     updateCloudUI();
+    updateSettingsDirtyButtons();
     scheduleGoogleAutoSync();
     if (!silent) toast('Taste Profile & Soft Spots saved!');
   };
@@ -6661,8 +7140,10 @@ Return ONLY valid JSON:
       }
 
       // PROGRESSIVE RENDERING: Show all pins, owned badges & Pull List IMMEDIATELY after OCR!
+      const spLookup = getSpotifyLookup(spotifyProfile);
       pileResults = deduped.map(it => {
-        const localArtistHit = Boolean(spotifyProfile && it.artist && spotifyProfile.allArtists?.[norm(it.artist)]);
+        const artParts = String(it.artist || '').split(/,|&|\band\b|feat\.?/i).map(normArtistKey).filter(Boolean);
+        const localArtistHit = Boolean(spLookup && artParts.some(k => spLookup.artistByKey.has(k)));
         const ownedMatch = checkPileOwnedMatch(it.artist, it.title);
         return {
           ...it,
@@ -6851,6 +7332,7 @@ Return ONLY valid JSON:
     const oldInfo = record?.pending_delete_old;
     if (!oldInfo || !oldInfo.releaseId || !cfg.discogsUser) return { ok: true, warning: '' };
 
+    const expectedAccount = String(cfg.discogsUser || '').trim().toLowerCase();
     if (!isOwnedByActiveDiscogsAccount(oldInfo)) {
       return {
         ok: false,
@@ -6892,6 +7374,15 @@ Return ONLY valid JSON:
         oldFolder = String(insts[0].folder_id || oldFolder);
       }
 
+      // Fresh Discogs account ownership re-check IMMEDIATELY before calling DELETE!
+      const liveAccountNow = String(cfg.discogsUser || '').trim().toLowerCase();
+      if (!isOwnedByActiveDiscogsAccount(oldInfo) || !liveAccountNow || liveAccountNow !== expectedAccount) {
+        return {
+          ok: false,
+          warning: `Discogs account changed while verifying old copy #${oldInfo.releaseId} — aborted remote delete safely.`
+        };
+      }
+
       await CC.deleteDiscogsInstance(oldFolder, oldInfo.releaseId, oldInst);
       record.pending_delete_old = null;
       await CC.mutateStashItemIfAlive(record.id, record.sync_id, (live) => ({ ...live, pending_delete_old: null }), ['pending_delete_old']);
@@ -6931,7 +7422,10 @@ Return ONLY valid JSON:
       condNote: document.getElementById('gNotes').value.trim(),
       tiebreakChecked,
       scanRunIdAtTap: scanRunId,
-      defaultFolderId: cfg.discogsFolderId || '1'
+      defaultFolderId: CC.resolveTargetDiscogsFolderId(currentInspected?.format || ''),
+      frankenSnap: frankenState?.active
+        ? { is_franken_copy: true, franken_type: frankenState.mismatchType || '', franken_note: frankenState.reason || '' }
+        : { is_franken_copy: Boolean(currentInspected?.is_franken_copy || currentExtracted?.is_franken_copy), franken_type: currentInspected?.franken_type || currentExtracted?.franken_type || '', franken_note: currentInspected?.franken_note || currentExtracted?.franken_note || '' }
     };
     snap.inspected.media_condition = snap.mediaCond;
     snap.inspected.sleeve_condition = snap.sleeveCond;
@@ -7018,6 +7512,10 @@ Return ONLY valid JSON:
           spine_thumb_url: snap.inspected.spine_thumb_url || snap.stagedSlotSnap.spine || (isEditing ? (oldItem.spine_thumb_url || '') : ''),
           spine_source_url: snap.inspected.spine_source_url || snap.stagedSlotSnap.spine || (isEditing ? (oldItem.spine_source_url || '') : ''),
           spine_flipped: Boolean(snap.inspected.spine_flipped ?? (isEditing ? oldItem.spine_flipped : false)),
+          is_franken_copy: Boolean(snap.frankenSnap?.is_franken_copy || (isEditing && oldItem.is_franken_copy)),
+          franken_type: snap.frankenSnap?.franken_type || (isEditing ? (oldItem.franken_type || '') : ''),
+          franken_note: snap.frankenSnap?.franken_note || (isEditing ? (oldItem.franken_note || '') : ''),
+          needs_verification: false,
           created_at: isEditing ? (oldItem.created_at || now) : now,
           updated_at: now
         };
@@ -7180,7 +7678,84 @@ Return ONLY valid JSON:
     }
   };
 
-  window.startEditStashItem = (id) => {
+  // Offline Thrift Queue: "📥 Save Now, Verify Later" — 100% offline, ZERO Gemini/Discogs calls!
+  window.saveUnverifiedOffline = async () => {
+    const titleVal = document.getElementById('fTitle').value.trim();
+    const artistVal = document.getElementById('fArtist').value.trim();
+    const catnoVal = document.getElementById('fCatno').value.trim();
+    const barcodeVal = (stagedUpc || document.getElementById('fBarcode').value || '').replace(/\D/g, '').trim();
+    const hasAnything = stagedPhotos.length > 0 || Boolean(barcodeVal) || Boolean(titleVal || artistVal || catnoVal);
+    if (!hasAnything) {
+      toast('Stage at least 1 photo, UPC, or title/artist first');
+      return;
+    }
+
+    const now = Date.now();
+    const dateTag = new Date(now).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const effFmt = getEffectiveScanFormat();
+    const fmt = (effFmt !== 'Auto' && effFmt !== 'Other')
+      ? effFmt
+      : (document.getElementById('fFormat').value || 'Cassette');
+
+    const photoSlots = {
+      front: stagedSlots.front?.saveWebp || '',
+      back: stagedSlots.back?.saveWebp || '',
+      extras: (stagedSlots.extras || []).filter(Boolean).map(p => p.saveWebp)
+    };
+    const derived = CC.deriveThumbsFromSlots(photoSlots, '');
+    const spineThumb = stagedSpineThumbUrl || stagedSlots.spine?.saveWebp || '';
+    const spineSource = stagedSpineSourceUrl || stagedSlots.spine?.origDataUrl || spineThumb;
+
+    const rec = CC.stampStashRevision({
+      sync_id: CC.generateSyncId(),
+      artist: artistVal || 'Unverified Scan',
+      title: titleVal || (barcodeVal ? `UPC ${barcodeVal}` : dateTag),
+      format: fmt,
+      catno: catnoVal,
+      barcode: barcodeVal,
+      label: document.getElementById('fLabel').value.trim(),
+      year: document.getElementById('fYear').value.trim(),
+      country: '',
+      genres: [],
+      media_condition: 'Not Graded',
+      sleeve_condition: 'Not Graded',
+      condition_note: barcodeVal ? `Queued offline (UPC: ${barcodeVal})` : 'Queued offline — ready to verify at home.',
+      needs_verification: true,
+      is_franken_copy: false,
+      franken_type: '',
+      franken_note: '',
+      synced_to_discogs: false,
+      discogs_id: null,
+      intended_discogs_folder_id: CC.resolveTargetDiscogsFolderId(fmt),
+      photo_slots: photoSlots,
+      thumbs: derived.thumbs,
+      thumb_data_url: derived.thumb_data_url,
+      spine_thumb_url: spineThumb,
+      spine_source_url: spineSource,
+      spine_flipped: Boolean(stagedSpineFlipped),
+      created_at: now,
+      updated_at: now
+    }, null);
+
+    await CC.commitLocalMutation({ upsertStash: rec, queueOutbox: true });
+    await loadStashCache();
+    renderStash();
+    updateCloudUI();
+    scheduleGoogleAutoSync();
+    resetScanner();
+    toast('📥 Saved to Offline Queue (⏳ To Verify) — ready for next scan!', 3400);
+  };
+
+  async function hydratePhotoPairFromSavedDataUrl(dataUrl) {
+    const s = String(dataUrl || '').trim();
+    if (!s || isUnresolvedDriveRef(s) || !s.startsWith('data:image/')) return null;
+    const apiB64 = await renderDataUrlToCompactJpegB64(s, 2048, 0.90);
+    if (!apiB64) return null;
+    return { apiB64, saveWebp: s, origDataUrl: s, autoCropped: true, cropBox: null, rotationDeg: 0 };
+  }
+
+  window.startEditStashItem = async (id, opts = {}) => {
+    const { preloadPhotos = false } = opts || {};
     const it = stashCache.find(x => x.id === id);
     if (!it) return;
     closeStashDetail();
@@ -7189,19 +7764,52 @@ Return ONLY valid JSON:
     resetScanner();
 
     editingStashItem = { ...it };
-    document.getElementById('editModeTitle').textContent = `${it.artist} — ${it.title} (${it.discogs_id ? '#' + it.discogs_id : 'Local Only'} · Saved Grade: ${shortGrade(it.media_condition || 'VG+')}/${shortGrade(it.sleeve_condition || 'VG+')})`;
-    document.getElementById('chkRegradeEdit').checked = false;
+    const isQueued = Boolean(it.needs_verification);
+    document.getElementById('editModeTitle').textContent = isQueued
+      ? `⏳ Verifying Queued Scan: ${it.artist} — ${it.title}`
+      : `${it.artist} — ${it.title} (${it.discogs_id ? '#' + it.discogs_id : 'Local Only'} · Saved Grade: ${shortGrade(it.media_condition || 'Not Graded')}/${shortGrade(it.sleeve_condition || 'Not Graded')})`;
+    document.getElementById('chkRegradeEdit').checked = isQueued ? Boolean(cfg.autoGradeOnScan) : false;
     document.getElementById('editModeBanner').classList.remove('hidden');
 
-    document.getElementById('fTitle').value = it.title || '';
-    document.getElementById('fArtist').value = it.artist || '';
+    document.getElementById('fTitle').value = (isQueued && it.artist === 'Unverified Scan') ? '' : (it.title || '');
+    document.getElementById('fArtist').value = (isQueued && it.artist === 'Unverified Scan') ? '' : (it.artist || '');
     document.getElementById('fCatno').value = it.catno || '';
     document.getElementById('fLabel').value = it.label || '';
     document.getElementById('fYear').value = it.year || '';
+    if (it.barcode) {
+      stagedUpc = String(it.barcode).replace(/\D/g, '');
+      document.getElementById('fBarcode').value = stagedUpc;
+    }
     if (it.format) setSelectFormatValue('fFormat', it.format);
+
+    if (preloadPhotos || isQueued) {
+      setStatus('Loading saved photos into scanner...', true);
+      const slots = getStashPhotoSlots(it);
+      if (slots.front) stagedSlots.front = await hydratePhotoPairFromSavedDataUrl(slots.front);
+      if (slots.back) stagedSlots.back = await hydratePhotoPairFromSavedDataUrl(slots.back);
+      if (it.spine_thumb_url) {
+        stagedSlots.spine = await hydratePhotoPairFromSavedDataUrl(it.spine_thumb_url);
+        if (stagedSlots.spine) {
+          stagedSpineThumbUrl = it.spine_thumb_url;
+          stagedSpineSourceUrl = it.spine_source_url || it.spine_thumb_url;
+          stagedSpineFlipped = Boolean(it.spine_flipped);
+        }
+      }
+      for (const ex of (slots.extras || []).slice(0, 2)) {
+        const pair = await hydratePhotoPairFromSavedDataUrl(ex);
+        if (pair) stagedSlots.extras.push(pair);
+      }
+      syncStagedPhotosCompat();
+      setStatus('', false);
+    }
+
     updateStageUI();
-    toast('Take new 2-shot photos (or tap Search & Verify) to re-check this item!', 3800);
+    toast(preloadPhotos || isQueued
+      ? '🔍 Photos & UPC loaded — tap Search & Verify!'
+      : 'Take new photos (or tap Search & Verify) to re-check this item!', 3600);
   };
+
+  window.verifyQueuedStashItem = (id) => startEditStashItem(id, { preloadPhotos: true });
 
   window.cancelEditMode = () => {
     editingStashItem = null;
@@ -7215,6 +7823,8 @@ Return ONLY valid JSON:
     inspectSeq++;
     batchAutoCropCancelled = true;
     deepSearchCancelled = true;
+    frankenState = null;
+    renderFrankenBanner();
     CC.cancelAI();
     stopHighlightAudio();
     setStatus('', false);
@@ -7371,8 +7981,105 @@ Return ONLY valid JSON:
     renderStash();
   };
 
+  const ALPHA_RAIL_LETTERS = ['#', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'];
+  let alphaRailBound = false;
+
+  function sortKeyIgnoreThe(str) {
+    return CC.foldText(String(str || '')).trim().toLowerCase().replace(/^the\s+/, '').trim();
+  }
+
+  function alphaBucketForText(str) {
+    const k = sortKeyIgnoreThe(str);
+    const ch = k.charAt(0).toUpperCase();
+    return /^[A-Z]$/.test(ch) ? ch : '#';
+  }
+
+  function getItemApproxUsd(it) {
+    if (it.est_usd != null && Number.isFinite(Number(it.est_usd))) return Number(it.est_usd);
+    if (it.est_price == null) return null;
+    const u = toApproxUsd(it.est_price, it.est_currency || 'USD');
+    return u !== null ? u : (Number.isFinite(Number(it.est_price)) ? Number(it.est_price) : null);
+  }
+
+  window.onStashSortChange = (val) => {
+    activeStashSort = val || 'newest';
+    try { localStorage.setItem(STASH_SORT_KEY, activeStashSort); } catch (_) {}
+    renderStash();
+  };
+
+  function scrollToStashAlphaLetter(letter) {
+    const target = document.querySelector(`#stashList [data-alpha-anchor="${CSS.escape(letter)}"]`);
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      document.querySelectorAll('#stashAlphaRail .stash-alpha-letter').forEach(b => {
+        b.classList.toggle('active', b.dataset.letter === letter);
+      });
+    }
+  }
+
+  function initStashAlphaRailEvents() {
+    if (alphaRailBound) return;
+    const rail = document.getElementById('stashAlphaRail');
+    if (!rail) return;
+    alphaRailBound = true;
+    let dragging = false;
+    let lastLetter = '';
+
+    const handlePoint = (clientX, clientY) => {
+      const el = document.elementFromPoint(clientX, clientY);
+      const btn = el?.closest?.('.stash-alpha-letter');
+      if (btn && !btn.classList.contains('dim') && btn.dataset.letter && btn.dataset.letter !== lastLetter) {
+        lastLetter = btn.dataset.letter;
+        scrollToStashAlphaLetter(lastLetter);
+      }
+    };
+
+    rail.addEventListener('pointerdown', (e) => {
+      dragging = true;
+      lastLetter = '';
+      try { rail.setPointerCapture(e.pointerId); } catch (_) {}
+      handlePoint(e.clientX, e.clientY);
+    });
+    rail.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      handlePoint(e.clientX, e.clientY);
+    });
+    const endDrag = () => { dragging = false; lastLetter = ''; };
+    rail.addEventListener('pointerup', endDrag);
+    rail.addEventListener('pointercancel', endDrag);
+  }
+
+  function renderStashAlphaRail(populatedLetters, showRail) {
+    const rail = document.getElementById('stashAlphaRail');
+    const list = document.getElementById('stashList');
+    if (!rail) return;
+    if (!showRail || !populatedLetters || populatedLetters.size === 0 || currentView !== 'stash') {
+      rail.classList.add('hidden');
+      rail.innerHTML = '';
+      if (list) list.classList.remove('stash-list-has-rail');
+      return;
+    }
+    initStashAlphaRailEvents();
+    rail.classList.remove('hidden');
+    if (list) list.classList.add('stash-list-has-rail');
+    rail.innerHTML = ALPHA_RAIL_LETTERS.map(ch => {
+      const has = populatedLetters.has(ch);
+      return `<button type="button" class="stash-alpha-letter ${has ? '' : 'dim'}" data-letter="${ch}" ${has ? '' : 'disabled tabindex="-1"'}>${ch}</button>`;
+    }).join('');
+  }
+
   window.renderStash = () => {
     renderStashFolderChips();
+
+    const toVerifyCount = stashCache.filter(it => Boolean(it.needs_verification)).length;
+    const chipTv = document.getElementById('chipToVerify');
+    if (chipTv) {
+      chipTv.textContent = toVerifyCount > 0 ? `⏳ To Verify (${toVerifyCount})` : '⏳ To Verify';
+      chipTv.classList.toggle('hidden', toVerifyCount === 0 && activeStashFilter !== 'toverify');
+    }
+
+    const sortEl = document.getElementById('stashSort');
+    if (sortEl && sortEl.value !== activeStashSort) sortEl.value = activeStashSort;
 
     const syncLine = document.getElementById('stashDiscogsSyncLine');
     if (syncLine) {
@@ -7386,6 +8093,7 @@ Return ONLY valid JSON:
 
     const q = norm(document.getElementById('stashSearch').value);
     const filtered = stashCache.filter(it => {
+      if (activeStashFilter === 'toverify' && !it.needs_verification) return false;
       if (['Cassette', 'CD', 'Vinyl'].includes(activeStashFilter) && norm(it.format) !== norm(activeStashFilter)) return false;
       if (activeStashFilter === 'other') {
         if (CC.isPrimaryMediaFormat(it.format)) return false;
@@ -7403,16 +8111,71 @@ Return ONLY valid JSON:
       return norm(`${it.artist} ${it.title} ${it.catno} ${it.label} ${it.condition_note} ${getFolderNameById(it.discogs_folder_id)} ${(it.tracklist || []).map(t => `${t.artist || ''} ${t.title}`).join(' ')}`).includes(q);
     });
 
+    // Apply selected Stash Sort order
+    filtered.sort((a, b) => {
+      switch (activeStashSort) {
+        case 'artist_az': {
+          const ka = sortKeyIgnoreThe(a.artist || '');
+          const kb = sortKeyIgnoreThe(b.artist || '');
+          const c = ka.localeCompare(kb);
+          if (c !== 0) return c;
+          return sortKeyIgnoreThe(a.title || '').localeCompare(sortKeyIgnoreThe(b.title || ''));
+        }
+        case 'title_az': {
+          const c = sortKeyIgnoreThe(a.title || '').localeCompare(sortKeyIgnoreThe(b.title || ''));
+          if (c !== 0) return c;
+          return sortKeyIgnoreThe(a.artist || '').localeCompare(sortKeyIgnoreThe(b.artist || ''));
+        }
+        case 'value_desc': {
+          const va = getItemApproxUsd(a);
+          const vb = getItemApproxUsd(b);
+          if (va === null && vb === null) return (b.created_at || 0) - (a.created_at || 0);
+          if (va === null) return 1;
+          if (vb === null) return -1;
+          return vb - va;
+        }
+        case 'value_asc': {
+          const va = getItemApproxUsd(a);
+          const vb = getItemApproxUsd(b);
+          if (va === null && vb === null) return (b.created_at || 0) - (a.created_at || 0);
+          if (va === null) return 1;
+          if (vb === null) return -1;
+          return va - vb;
+        }
+        case 'taste_desc': {
+          const ta = Number(a.taste_score || 0);
+          const tb = Number(b.taste_score || 0);
+          if (tb !== ta) return tb - ta;
+          return (b.created_at || 0) - (a.created_at || 0);
+        }
+        case 'year_desc': {
+          const ya = Number(String(a.year || '').match(/\d{4}/)?.[0] || 0);
+          const yb = Number(String(b.year || '').match(/\d{4}/)?.[0] || 0);
+          if (yb !== ya) return yb - ya;
+          return (b.created_at || 0) - (a.created_at || 0);
+        }
+        case 'year_asc': {
+          const ya = Number(String(a.year || '').match(/\d{4}/)?.[0] || 9999);
+          const yb = Number(String(b.year || '').match(/\d{4}/)?.[0] || 9999);
+          if (ya !== yb) return ya - yb;
+          return (b.created_at || 0) - (a.created_at || 0);
+        }
+        default:
+          return (b.created_at || 0) - (a.created_at || 0);
+      }
+    });
+
     updateRecalibrateStashBtn();
 
     const totalValUsd = filtered.reduce((s, it) => {
-      const u = toApproxUsd(it.est_price, it.est_currency || 'USD');
-      return s + (u !== null ? u : (Number(it.est_price) || 0));
+      const u = getItemApproxUsd(it);
+      return s + (u !== null ? u : 0);
     }, 0);
     document.getElementById('stashStats').textContent = `${filtered.length} items · ~$${Math.round(totalValUsd)}`;
 
     const list = document.getElementById('stashList');
     if (!filtered.length) {
+      renderStashAlphaRail(null, false);
       const hasDriveCfg = Boolean(CC.isGoogleSignedIn() || cfg.googleBoundEmail || cfg.googleEmail || cfg.googleLastSyncAt || cfg.googleLastLoadAt);
       const emptyAction = hasDriveCfg
         ? `<button type="button" class="btn btn-green btn-sm" style="margin-top:8px;" onclick="syncStashWithCloudUI()">☁️ Sync with Cloud</button>`
@@ -7424,13 +8187,23 @@ Return ONLY valid JSON:
       return;
     }
 
+    const isAlphaSort = activeStashSort === 'artist_az' || activeStashSort === 'title_az';
+
     if (activeStashView === 'spines') {
+      const spineLetters = new Set();
+      const seenAnchors = new Set();
       list.innerHTML = `<div class="spine-shelf">${filtered.map(it => {
         const tasteTxt = it.taste_score ? `${it.taste_score}/10` : '';
         const priceTxt = it.est_price != null ? formatMoney(it.est_price, it.est_currency || 'USD') : '';
+        let anchorAttr = '';
+        if (isAlphaSort) {
+          const ch = alphaBucketForText(activeStashSort === 'artist_az' ? it.artist : it.title);
+          spineLetters.add(ch);
+          if (!seenAnchors.has(ch)) { seenAnchors.add(ch); anchorAttr = ` data-alpha-anchor="${ch}"`; }
+        }
         if (it.spine_thumb_url) {
           return `
-            <div class="spine-row" onclick="openStashDetail(${it.id})">
+            <div class="spine-row"${anchorAttr} onclick="openStashDetail(${it.id})">
               <div class="spine-img-wrap">
                 ${renderPhotoImgOrPlaceholder(it.spine_thumb_url, 'spine-img', `alt="${esc(it.artist)} — ${esc(it.title)}"`)}
                 ${(tasteTxt || priceTxt) ? `<div class="spine-img-tag">${priceTxt ? `<span>${esc(priceTxt)}</span>` : ''}${tasteTxt ? `<span style="color:var(--spotify);">${esc(tasteTxt)}</span>` : ''}</div>` : ''}
@@ -7441,7 +8214,7 @@ Return ONLY valid JSON:
         const accentCls = it.is_high_value ? 's-val' : ((it.taste_score || 0) >= 7 ? 's-keep' : '');
         const metaParts = [it.catno || '', it.format || '', tasteTxt].filter(Boolean).join(' · ');
         return `
-          <div class="spine-row" onclick="openStashDetail(${it.id})">
+          <div class="spine-row"${anchorAttr} onclick="openStashDetail(${it.id})">
             <div class="spine-typo ${accentCls}">
               <span class="spine-typo-title">${esc(it.artist || '?')} — ${esc(it.title || '?')}</span>
               <span class="spine-typo-meta">${esc(metaParts || '—')}</span>
@@ -7449,10 +8222,11 @@ Return ONLY valid JSON:
           </div>
         `;
       }).join('')}</div>`;
+      renderStashAlphaRail(spineLetters, isAlphaSort);
       return;
     }
 
-    list.innerHTML = filtered.map(it => {
+    const renderStashCard = (it) => {
       const priceText = it.est_price != null ? formatMoney(it.est_price, it.est_currency || 'USD') : '—';
       const priceCls = it.est_price == null ? 'c-muted' : (it.is_high_value ? 'c-yellow' : '');
       const tasteText = it.taste_score ? `${it.taste_score}/10` : '—';
@@ -7462,7 +8236,9 @@ Return ONLY valid JSON:
 
       let syncText = 'LOCAL';
       let syncCls = 'c-muted';
-      if (it.discogs_removed) {
+      if (it.needs_verification) {
+        syncText = 'TO VERIFY'; syncCls = 'c-yellow';
+      } else if (it.discogs_removed) {
         syncText = 'REMOVED'; syncCls = 'c-yellow';
       } else if (it.synced_to_discogs) {
         if (it.pending_delete_old) { syncText = 'OLD COPY'; syncCls = 'c-yellow'; }
@@ -7472,6 +8248,8 @@ Return ONLY valid JSON:
       }
 
       const flags = [
+        it.needs_verification ? `<span class="badge badge-yellow">⏳ TO VERIFY</span>` : '',
+        it.is_franken_copy ? `<span class="badge badge-red">🧟 FRANKEN</span>` : '',
         it.is_high_value ? `<span class="badge badge-yellow">🔥 VALUE</span>` : '',
         it.is_scarce ? `<span class="badge badge-purple">💎 SCARCE</span>` : '',
         it.discogs_removed ? `<span class="badge badge-yellow">Removed from Discogs</span>` : '',
@@ -7500,7 +8278,59 @@ Return ONLY valid JSON:
           </div>
         </div>
       `;
-    }).join('');
+    };
+
+    if (activeStashSort === 'artist_az') {
+      const groups = [];
+      const groupMap = new Map();
+      const populatedLetters = new Set();
+      filtered.forEach(it => {
+        const displayArtist = String(it.artist || 'Unknown Artist').trim();
+        const key = sortKeyIgnoreThe(displayArtist) || 'unknown artist';
+        const letter = alphaBucketForText(displayArtist);
+        populatedLetters.add(letter);
+        if (!groupMap.has(key)) {
+          const g = { label: displayArtist, letter, items: [] };
+          groupMap.set(key, g);
+          groups.push(g);
+        }
+        groupMap.get(key).items.push(it);
+      });
+      const seenLetters = new Set();
+      list.innerHTML = groups.map(g => {
+        const anchor = !seenLetters.has(g.letter) ? ` data-alpha-anchor="${g.letter}"` : '';
+        seenLetters.add(g.letter);
+        return `<div class="stash-group-hdr"${anchor}><strong>${esc(g.label)}</strong><span>${g.items.length}</span></div>` +
+          g.items.map(renderStashCard).join('');
+      }).join('');
+      renderStashAlphaRail(populatedLetters, true);
+      return;
+    }
+
+    if (activeStashSort === 'title_az') {
+      const groups = [];
+      const groupMap = new Map();
+      const populatedLetters = new Set();
+      filtered.forEach(it => {
+        const letter = alphaBucketForText(it.title || '');
+        populatedLetters.add(letter);
+        if (!groupMap.has(letter)) {
+          const g = { letter, items: [] };
+          groupMap.set(letter, g);
+          groups.push(g);
+        }
+        groupMap.get(letter).items.push(it);
+      });
+      list.innerHTML = groups.map(g =>
+        `<div class="stash-group-hdr" data-alpha-anchor="${g.letter}"><strong>${g.letter}</strong><span>${g.items.length}</span></div>` +
+        g.items.map(renderStashCard).join('')
+      ).join('');
+      renderStashAlphaRail(populatedLetters, true);
+      return;
+    }
+
+    renderStashAlphaRail(null, false);
+    list.innerHTML = filtered.map(renderStashCard).join('');
   };
 
   window.recalibrateSingleStashItem = async (id) => {
@@ -7518,58 +8348,7 @@ Return ONLY valid JSON:
 
     const localMatch = checkLocalSpotify(it);
     it.spotify_matches = localMatch;
-
-    const tracksStr = (it.tracklist || []).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title).join('; ');
-    const dna = spotifyProfile?.tasteDna || '';
-    const softSpots = spotifyProfile?.softSpots || '';
-    const onRelLiked = (localMatch.albumTrackHits || []).filter(h => h.liked || h.top).map(h => h.artist ? `${h.artist} - ${h.title}` : h.title);
-    const spBlock = localMatch.hasProvenance
-      ? `- PRIORITY #1 LIKED / TOP SONGS LITERALLY ON THIS RELEASE: ${onRelLiked.join(', ') || 'None'}
-- HIGH-WEIGHT Liked / Top / Saved-Album Artists: ${(localMatch.likedArtistDetails || []).join('; ') || 'None'}
-- HIGH-WEIGHT Liked / Top / Saved-Album Songs: ${(localMatch.likedTrackMatches || []).join(', ') || 'None'}
-- CASUAL Playlist-Only Artists (0 Liked Songs): ${(localMatch.playlistOnlyArtistDetails || []).join('; ') || 'None'}
-- CASUAL Playlist-Only Songs (0 Liked Songs): ${(localMatch.playlistOnlyTrackMatches || []).join(', ') || 'None'}`
-      : `- Matching Artists in Library: ${localMatch.details || 'None'}
-- Exact / Matching Songs Already in Library: ${localMatch.matchedTracks.join(', ') || 'None'}`;
-
-    const prompt = `Evaluate this physical music release strictly against the user's musical taste profile and provide brief musical/pop-culture context. Speak directly to "you".
-
-Release: "${it.artist} - ${it.title}" (${it.year || '?'}, ${it.format}, Genres: ${(it.genres || []).join(', ') || 'unknown'}).
-Full Tracklist: ${tracksStr || 'Unknown'}.
-Exact Local Matches Across ALL ${spotifyProfile?.totalTracks || 0} Spotify Tracks / ${spotifyProfile?.totalArtists || 0} Artists:
-${spBlock}
-
-User's Taste Profile:
-${dna || 'No written Taste Profile yet.'}
-
-User's Explicit Soft Spots & Niche Pockets (FIRST-CLASS WEIGHT — treat these with EQUAL importance to Core Obsessions so smaller 5–15 song favorite pockets are NEVER averaged out of a large library):
-${softSpots || 'None specified yet.'}
-
-HARD RULES:
-0. PRIORITY #1 — ON-RELEASE LIKED SONGS: If 1 or more of the user's Liked Songs (or Top Tracks) is literally on this physical release's tracklist, treat that as the #1 highest-priority KEEP signal (strong 9–10 KEEP when it aligns with their taste/favorite artists, or solid 7–8+ KEEP even on compilations) and explicitly name the matched on-release Liked Song(s) in "summary"!
-1. PROVENANCE WEIGHTING (LIKED SONGS > SAVED ALBUMS > PLAYLIST-ONLY):
-   - Liked Songs, Top Tracks, Top Artists, and Saved Albums are STRONG personal favorites — boost the score and NEVER dismiss them as outside the user's taste!
-   - Playlist-Only matches (0 Liked Songs) indicate CASUAL familiarity only; state this explicitly in "summary" rather than inflating to a 9–10.
-2. SOFT SPOTS EQUAL WEIGHT: If this release fits ANY genre, style, era, or mood listed in "Soft Spots & Niche Pockets", score it enthusiastically as a genuine match on par with Core Obsessions.
-
-Verdict rules:
-- "KEEP" if score >= 7.
-- "LISTEN" if score is 5-6.
-- "SELL / SKIP" if score <= 4.
-
-Return ONLY valid JSON:
-{
-  "score": 1 to 10 integer,
-  "verdict": "KEEP" | "LISTEN" | "SELL / SKIP",
-  "summary": "1-2 punchy sentences speaking directly to 'you' explaining why you will or won't enjoy this, referencing specific library hits, Soft Spots, or Taste Profile traits.",
-  "context_note": "1-2 neutral sentences of useful context (plain description, no hype). Empty string if obscure/unremarkable.",
-  "litmus_track": "exact song title from Full Tracklist (WITHOUT artist prefix) of the single best/most representative track to preview",
-  "litmus_artist": "performing artist of litmus_track",
-  "notable_songs": [
-    { "artist": "performing artist", "title": "exact song title from Tracklist", "reason": "short 6-12 word reason it stands out" }
-  ]
-}
-Include up to 6 genuinely recognizable songs in notable_songs (or empty array if none).`;
+    const prompt = buildTasteEvaluationPrompt(it, { localMatch });
 
     setStatus(`🔄 Re-scoring "${it.artist} — ${it.title}"...`, true, { cancellable: true });
     try {
@@ -7588,7 +8367,7 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
         'notable_songs', 'litmus_track', 'litmus_artist', 'taste_scored_at'
       ]);
 
-      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v220`);
+      tasteCache.delete(`${norm(it.artist)}|${norm(it.title)}|v230`);
       await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
       await loadStashCache();
       renderStash();
@@ -7611,29 +8390,31 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
     }
   };
 
-  window.recalibrateStashBatch = async () => {
-    if (!CC.isAiReady()) { toast('Add your Gemini API Key in Settings first'); return; }
-    if (!stashCache.length) { toast('Your Stash is empty'); return; }
-    if (recalibratingStash) { toast('Recalibration already running'); return; }
+  window.recalibrateStashBatch = async (opts = {}) => {
+    const { silentConfirm = false, scope = null } = (opts && typeof opts === 'object') ? opts : {};
+    if (!CC.isAiReady()) { if (!silentConfirm) toast('Add your Gemini API Key in Settings first'); return { updated: 0, skipped: true }; }
+    if (!stashCache.length) { if (!silentConfirm) toast('Your Stash is empty'); return { updated: 0, skipped: true }; }
+    if (recalibratingStash) { if (!silentConfirm) toast('Recalibration already running'); return { updated: 0, skipped: true }; }
 
     const staleItems = stashCache.filter(isStashTasteStale);
-    let targets = staleItems;
-    if (staleItems.length > 0 && staleItems.length < stashCache.length) {
-      if (!confirm(`Recalibrate ${staleItems.length} stale Stash item(s) whose Taste Profile / Spotify library changed?`)) return;
-    } else if (staleItems.length === 0) {
-      if (!confirm(`All ${stashCache.length} Stash items are up to date. Re-score ALL ${stashCache.length} items anyway?`)) return;
-      targets = stashCache.slice();
-    } else {
-      if (!confirm(`Recalibrate all ${targets.length} Stash item(s) against your latest Taste Profile & Soft Spots?`)) return;
+    let targets = scope === 'all' ? stashCache.slice() : (scope === 'stale' ? staleItems : staleItems);
+    if (!silentConfirm) {
+      if (staleItems.length > 0 && staleItems.length < stashCache.length) {
+        if (!confirm(`Recalibrate ${staleItems.length} stale Stash item(s) whose Taste Profile / Spotify library changed?`)) return { updated: 0, cancelled: true };
+      } else if (staleItems.length === 0) {
+        if (!confirm(`All ${stashCache.length} Stash items are up to date. Re-score ALL ${stashCache.length} items anyway?`)) return { updated: 0, cancelled: true };
+        targets = stashCache.slice();
+      } else {
+        if (!confirm(`Recalibrate all ${targets.length} Stash item(s) against your latest Taste Profile & Soft Spots?`)) return { updated: 0, cancelled: true };
+      }
     }
+    if (!targets.length) return { updated: 0, skipped: true };
 
     const BATCH_SIZE = 10;
     recalibratingStash = true;
     recalibrateProgressText = `⏳ Recalibrating 1–${Math.min(BATCH_SIZE, targets.length)} of ${targets.length}...`;
     updateRecalibrateStashBtn();
 
-    const dna = spotifyProfile?.tasteDna || 'No written Taste Profile yet.';
-    const softSpots = spotifyProfile?.softSpots || 'None specified';
     let updatedTotal = 0;
 
     try {
@@ -7645,60 +8426,12 @@ Include up to 6 genuinely recognizable songs in notable_songs (or empty array if
         updateRecalibrateStashBtn();
         setStatus(`🔄 Recalibrating ${start + 1}–${endNum} of ${targets.length}...`, true, { cancellable: true });
 
-        const payload = chunk.map((it, idx) => {
+        const chunkWithMatches = chunk.map(it => {
           const lm = checkLocalSpotify(it);
           it.spotify_matches = lm;
-          return {
-            idx,
-            artist: it.artist,
-            title: it.title,
-            year: it.year || '',
-            format: it.format || '',
-            genres: (it.genres || []).slice(0, 6),
-            sample_tracks: (it.tracklist || []).slice(0, 24).map(t => t.artist ? `${t.artist} - ${t.title}` : t.title),
-            liked_songs_literally_on_this_release: (lm.albumTrackHits || []).filter(h => h.liked || h.top).map(h => h.artist ? `${h.artist} - ${h.title}` : h.title),
-            liked_artists_in_spotify: lm.hasProvenance ? lm.likedArtistDetails : (lm.details !== 'None' ? [lm.details] : []),
-            liked_tracks_in_spotify: lm.hasProvenance ? lm.likedTrackMatches : lm.matchedTracks,
-            playlist_only_artists: lm.hasProvenance ? lm.playlistOnlyArtistDetails : [],
-            playlist_only_tracks: lm.hasProvenance ? lm.playlistOnlyTrackMatches : []
-          };
+          return { it, lm };
         });
-
-        const prompt = `Batch-recalibrate personal taste scores for these ${chunk.length} saved music releases based on the user's Taste Profile, explicit Soft Spots, and exact local Spotify matches. Speak directly to "you".
-
-User's Taste Profile:
-${dna}
-
-User's Explicit Soft Spots & Niche Pockets (FIRST-CLASS WEIGHT — treat these with EQUAL importance to Core Obsessions):
-${softSpots}
-
-HARD RULES:
-0. PRIORITY #1 — ON-RELEASE LIKED SONGS: If "liked_songs_literally_on_this_release" is non-empty, treat that as the #1 highest-priority KEEP signal (strong 9–10 KEEP when it aligns with their taste/favorite artists, or solid 7–8+ KEEP even on compilations) and explicitly name the matched on-release Liked Song(s) in "summary"!
-1. PROVENANCE WEIGHTING: Liked/Top/Saved-Album matches deserve a strong boost; Playlist-Only matches (0 Liked Songs) indicate casual familiarity only — state that clearly instead of inflating to 9–10.
-2. Evaluate BOTH the specific album/release (era, genre, studio album vs compilation) AND the artist.
-3. Verdict rules: "KEEP" if score >= 7, "LISTEN" if 5-6, "SELL / SKIP" if <= 4.
-4. For each release, also provide brief musical/pop-culture context ("context_note", 1 short sentence or ""), the best preview track ("litmus_track" & "litmus_artist"), and up to 4 standout/recognizable songs in "notable_songs" (or [] if none).
-
-Releases:
-${JSON.stringify(payload)}
-
-Return ONLY valid JSON:
-{
-  "scores": [
-    {
-      "idx": number,
-      "score": 1 to 10 integer,
-      "verdict": "KEEP" | "LISTEN" | "SELL / SKIP",
-      "summary": "1-2 punchy sentences speaking to 'you'",
-      "context_note": "1 short neutral sentence of album/pop-culture context, or empty string",
-      "litmus_track": "exact song title from sample_tracks (WITHOUT artist prefix) of the best preview track, or empty string",
-      "litmus_artist": "performing artist of litmus_track",
-      "notable_songs": [
-        { "artist": "performing artist", "title": "exact song title", "reason": "short 5-10 word reason it stands out" }
-      ]
-    }
-  ]
-}`;
+        const prompt = buildTasteEvaluationPrompt(chunkWithMatches);
         const batchRes = await CC.callAI([{ text: prompt }], null, { retryLabel: `Recalibrate ${start + 1}-${endNum}`, maxOutputTokens: 8192 });
         if (!recalibratingStash) break;
 
@@ -8185,8 +8918,9 @@ Return ONLY valid JSON:
       toast('☁️ Spine photo is still on Google Drive — tap Sync with Cloud first', 3600);
       return;
     }
+    const spec = getPhotoQualitySpec();
     const sourceUrl = it.spine_source_url || it.spine_thumb_url;
-    const rotated = await rotateDataUrlByDeg(it.spine_thumb_url, 90, 'image/webp', 0.82, 960);
+    const rotated = await rotateDataUrlByDeg(it.spine_thumb_url, 90, 'image/webp', spec.quality, spec.raw ? null : spec.spineMaxW);
     const res = await CC.mutateStashItemIfAlive(id, it.sync_id || '', (liveRow) => ({
       ...liveRow,
       spine_source_url: liveRow.spine_source_url || sourceUrl,
@@ -8434,9 +9168,17 @@ Return ONLY valid JSON:
               `<a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="https://www.discogs.com/sell/history/${it.discogs_id}">📈 Sales History</a>` +
               `<a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="https://www.discogs.com/sell/post/${it.discogs_id}">🏷️ Sell</a>` + links;
     }
-    links = `<button type="button" class="btn btn-purple btn-sm" onclick="startEditStashItem(${it.id})">🔄 Edit / Re-Check</button>` + links;
+    links = (it.needs_verification
+      ? `<button type="button" class="btn btn-green btn-sm" onclick="verifyQueuedStashItem(${it.id})">🔍 Verify &amp; Price Now</button>`
+      : `<button type="button" class="btn btn-purple btn-sm" onclick="startEditStashItem(${it.id})">🔄 Edit / Re-Check</button>`) + links;
 
     let alerts = '';
+    if (it.needs_verification) {
+      alerts += `<div class="alert-box alert-dup">⏳ <strong>Queued Offline (Not Verified Yet)</strong> — tap <strong>🔍 Verify &amp; Price Now</strong> to load these saved photos &amp; UPC straight into the scanner and verify on Discogs.</div>`;
+    }
+    if (it.is_franken_copy) {
+      alerts += `<div class="alert-box alert-format-warn">🧟 <strong>FRANKEN-COPY (${esc((it.franken_type || 'mismatch').replace(/_/g, ' '))})</strong>${it.franken_note ? ` — ${esc(it.franken_note)}` : ' — Physical media does not match packaging.'}</div>`;
+    }
     if (it.discogs_removed) {
       alerts += `<div class="alert-box alert-dup">⚠️ <strong>Removed from Discogs</strong> — this copy is no longer in your Discogs collection. Your local record, photos, spine, grades, and notes are safely preserved under <strong>Local Only</strong>.${hasDiscogs ? ' You can push it back to Discogs below if desired.' : ''}</div>`;
     }
@@ -8646,7 +9388,7 @@ Return ONLY valid JSON:
 
       <div class="section-block">
         <div class="section-heading">🎵 Tracklist (${(it.tracklist || []).length})</div>
-        <div class="tracklist-open">${(it.tracklist || []).length ? buildTracklistHtml(it.tracklist, localMatch.matchedTracks, 'stash', it.artist) : (hydratingStashIds.has(it.id) ? `<div style="padding:12px; color:var(--muted); font-size:0.84rem;">⏳ Loading tracklist &amp; values from Discogs...</div>` : buildTracklistHtml([], localMatch.matchedTracks, 'stash', it.artist))}</div>
+        <div class="tracklist-open">${(it.tracklist || []).length ? buildTracklistHtml(it.tracklist, localMatch.matchedTracks, 'stash', it.artist, localMatch.altMatchedTracks) : (hydratingStashIds.has(it.id) ? `<div style="padding:12px; color:var(--muted); font-size:0.84rem;">⏳ Loading tracklist &amp; values from Discogs...</div>` : buildTracklistHtml([], localMatch.matchedTracks, 'stash', it.artist, localMatch.altMatchedTracks))}</div>
       </div>
 
       ${it.pressing_notes ? `
@@ -8658,9 +9400,14 @@ Return ONLY valid JSON:
 
       <div class="grade-box">
         <strong style="display:block; font-size:0.92rem; margin-bottom:8px;">🏷️ Discogs Grading &amp; Notes</strong>
-        <button id="btnVoiceRegradeStash" type="button" class="btn btn-purple dictate-btn" style="width:100%; min-height:44px; font-size:0.88rem; margin-bottom:8px;" onclick="voiceRegrade('stash', 'btnVoiceRegradeStash')">
-          ${VOICE_BTN_IDLE}
-        </button>
+        <div class="voice-row">
+          <button id="btnVoiceRegradeStash" type="button" class="btn btn-purple btn-sm dictate-btn" style="flex:1;" onclick="voiceRegrade('stash', 'btnVoiceRegradeStash')">
+            ${VOICE_BTN_IDLE}
+          </button>
+          <button id="btnVoiceCancelStash" type="button" class="btn btn-secondary btn-sm hidden" onclick="cancelVoiceRegrade()">
+            ✕ Cancel
+          </button>
+        </div>
         <div id="voiceLiveStash" class="voice-live hidden"></div>
         <div class="field-grid" style="margin-bottom:8px;">
           <div>
@@ -8903,12 +9650,22 @@ Return ONLY valid JSON:
       }
     }
 
-    // Commit locally BEFORE declaring full success so storage failures are always reported accurately!
+    // Persist locally via mutateStashItemIfAlive so if the item was deleted while waiting on Discogs,
+    // it aborts cleanly instead of resurrecting the deleted row!
     try {
-      const stamped = CC.stampStashRevision(updated, prev, changedFields);
-      await CC.commitLocalMutation({ upsertStash: stamped, queueOutbox: true });
+      const patch = {};
+      changedFields.forEach(f => { patch[f] = updated[f]; });
+      const mutRes = await CC.mutateStashItemIfAlive(id, it.sync_id || '', (liveRow) => ({
+        ...liveRow,
+        ...patch
+      }), changedFields);
       await loadStashCache();
       renderStash();
+      if (mutRes.aborted) {
+        if (activeStashItem?.id === id) closeStashDetail();
+        toast('Item was deleted while saving — local grade change discarded', 3800);
+        return;
+      }
       updateCloudUI();
       scheduleGoogleAutoSync();
       if (activeStashItem?.id === id) openStashDetail(id, true);
@@ -8951,7 +9708,7 @@ Return ONLY valid JSON:
       updated.sleeve_condition = document.getElementById('sdSleeveCond')?.value || updated.sleeve_condition;
       updated.condition_note = document.getElementById('sdNotes')?.value.trim() ?? updated.condition_note;
     }
-    const targetFolder = updated.intended_discogs_folder_id || cfg.discogsFolderId || '1';
+    const targetFolder = CC.resolveTargetDiscogsFolderId(updated.format, updated.intended_discogs_folder_id || null);
 
     try {
       const added = await ensureDiscogsInstanceDurable(ledgerKey, updated.discogs_id, targetFolder, [relKey]);
@@ -9181,7 +9938,7 @@ Return ONLY valid JSON:
     const mismatchBox = document.getElementById('googleAccountMismatchBox');
     const conflictsBox = document.getElementById('googleConflictsBox');
     const btnIn = document.getElementById('btnGoogleSignIn');
-    const btnLoad = document.getElementById('btnGoogleLoad');
+    const signedInRow = document.getElementById('googleSignedInRow');
     const btnSync = document.getElementById('btnGoogleSyncNow');
     const btnOut = document.getElementById('btnGoogleSignOut');
 
@@ -9256,8 +10013,11 @@ Return ONLY valid JSON:
         }
       }
       if (btnIn) btnIn.classList.add('hidden');
-      if (btnLoad) btnLoad.classList.remove('hidden');
-      if (btnSync) btnSync.classList.remove('hidden');
+      if (signedInRow) signedInRow.classList.remove('hidden');
+      if (btnSync) {
+        btnSync.classList.remove('hidden');
+        btnSync.disabled = Boolean(googleSyncInFlight || (pending === 0 && !cloudEmptyAwaitingPublish));
+      }
       if (btnOut) btnOut.classList.remove('hidden');
     } else if (hasClient) {
       const wasConnected = Boolean(cfg.googleBoundEmail || cfg.googleLastSyncAt || cfg.googleLastLoadAt);
@@ -9265,7 +10025,7 @@ Return ONLY valid JSON:
         btnIn.textContent = wasConnected ? '🔄 Reconnect Google Drive' : '☁️ Connect Google Drive';
         btnIn.classList.remove('hidden');
       }
-      if (btnLoad) btnLoad.classList.add('hidden');
+      if (signedInRow) signedInRow.classList.add('hidden');
       if (btnSync) btnSync.classList.add('hidden');
       if (btnOut) btnOut.classList.add('hidden');
 
@@ -9287,7 +10047,7 @@ Return ONLY valid JSON:
       if (aPill) { aPill.textContent = 'Off'; aPill.className = 'pill'; }
       if (sum) sum.textContent = 'Not connected. Open Advanced below to set a Google OAuth Client ID.';
       if (btnIn) btnIn.classList.remove('hidden');
-      if (btnLoad) btnLoad.classList.add('hidden');
+      if (signedInRow) signedInRow.classList.add('hidden');
       if (btnSync) btnSync.classList.add('hidden');
       if (btnOut) btnOut.classList.add('hidden');
     }
@@ -9360,7 +10120,7 @@ Return ONLY valid JSON:
   };
 
   function setCloudButtonsDisabled(disabled) {
-    ['btnGoogleSignIn', 'btnGoogleLoad', 'btnGoogleSyncNow', 'btnStashSyncCloud'].forEach(id => {
+    ['btnGoogleSignIn', 'btnGoogleSyncNow'].forEach(id => {
       const b = document.getElementById(id);
       if (b) b.disabled = disabled;
     });
@@ -9732,6 +10492,192 @@ Return ONLY valid JSON:
 
   window.syncDiscogsCollectionUI = () => syncWithDiscogsUI(true, false);
 
+  window.updateSettingsDirtyButtons = () => {
+    const gKey = (document.getElementById('cfgGeminiKey')?.value || '').trim();
+    const gModel = document.getElementById('cfgGeminiModel')?.value || 'gemini-3.5-flash-lite';
+    const gAutoPlay = Boolean(document.getElementById('cfgAutoPlay')?.checked);
+    const gAutoDet = Boolean(document.getElementById('cfgAutoDetective')?.checked);
+    const geminiDirty =
+      gKey !== String(cfg.geminiKey || '') ||
+      gModel !== String(cfg.geminiModel || 'gemini-3.5-flash-lite') ||
+      gAutoPlay !== (cfg.autoPlayHighlight !== false) ||
+      gAutoDet !== (cfg.autoDetective !== false);
+    const btnG = document.getElementById('btnSaveGemini');
+    if (btnG) btnG.disabled = !geminiDirty;
+
+    const dTok = (document.getElementById('cfgDiscogsToken')?.value || '').trim();
+    const dFld = document.getElementById('cfgDiscogsFolder')?.value || '1';
+    const dHome = document.getElementById('cfgHomeCountry')?.value ?? 'US';
+    const dThresh = Number(document.getElementById('cfgThreshold')?.value) || 20;
+    const dVg = Boolean(document.getElementById('cfgFetchVg')?.checked);
+    const dVoice = Boolean(document.getElementById('cfgVoice')?.checked);
+    const discogsDirty =
+      dTok !== String(cfg.discogsToken || '') ||
+      dFld !== String(cfg.discogsFolderId || '1') ||
+      dHome !== String(cfg.homeCountry ?? 'US') ||
+      dThresh !== Number(cfg.threshold ?? 20) ||
+      dVg !== (cfg.fetchVgSuggestions !== false) ||
+      dVoice !== Boolean(cfg.voice);
+    const btnD = document.getElementById('btnSaveDiscogs');
+    if (btnD) btnD.disabled = !discogsDirty;
+
+    const tDna = (document.getElementById('cfgTasteDna')?.value || '').trim();
+    const tSoft = (document.getElementById('cfgSoftSpots')?.value || '').trim();
+    const tasteDirty =
+      tDna !== String(spotifyProfile?.tasteDna || '').trim() ||
+      tSoft !== String(spotifyProfile?.softSpots || '').trim();
+    const btnT = document.getElementById('btnSaveTaste');
+    if (btnT) btnT.disabled = !tasteDirty;
+  };
+
+  window.updateRebuildWorkflowBtn = () => {
+    const ids = ['rbStepDrivePre', 'rbStepSpotify', 'rbStepDraftTaste', 'rbStepDiscogs', 'rbStepRecalibrate', 'rbStepDrivePost'];
+    const anyChecked = ids.some(id => Boolean(document.getElementById(id)?.checked));
+    const runBtn = document.getElementById('btnRunRebuild');
+    const cancelBtn = document.getElementById('btnCancelRebuild');
+    if (runBtn) runBtn.disabled = rebuildWorkflowActive || !anyChecked;
+    if (cancelBtn) cancelBtn.classList.toggle('hidden', !rebuildWorkflowActive);
+  };
+
+  window.cancelMaintenanceWorkflow = () => {
+    if (!rebuildWorkflowActive) return;
+    rebuildWorkflowCancelled = true;
+    recalibratingStash = false;
+    CC.cancelAI();
+    CC.cancelSpotifySync();
+    CC.cancelDiscogsEnrich();
+    toast('Cancelling maintenance workflow...', 2000);
+  };
+
+  window.runMaintenanceWorkflow = async () => {
+    if (rebuildWorkflowActive) return;
+    const steps = [];
+    if (document.getElementById('rbStepDrivePre')?.checked) steps.push({ key: 'drive_pre', label: 'Syncing with Google Drive first...' });
+    if (document.getElementById('rbStepSpotify')?.checked) steps.push({ key: 'spotify', label: 'Syncing Spotify Library...' });
+    if (document.getElementById('rbStepDraftTaste')?.checked) steps.push({ key: 'draft_taste', label: 'Auto-Drafting Taste Profile from Spotify...' });
+    if (document.getElementById('rbStepDiscogs')?.checked) steps.push({ key: 'discogs', label: 'Syncing with Discogs...' });
+    if (document.getElementById('rbStepRecalibrate')?.checked) steps.push({ key: 'recalibrate', label: 'Recalibrating Taste across Stash...' });
+    if (document.getElementById('rbStepDrivePost')?.checked) steps.push({ key: 'drive_post', label: 'Pushing final updates to Google Drive...' });
+    if (!steps.length) return;
+
+    rebuildWorkflowActive = true;
+    rebuildWorkflowCancelled = false;
+    updateRebuildWorkflowBtn();
+
+    const progWrap = document.getElementById('rebuildProgressWrap');
+    const stepLbl = document.getElementById('rebuildStepLabel');
+    const pctLbl = document.getElementById('rebuildPctLabel');
+    const fillEl = document.getElementById('rebuildProgressFill');
+    const setProg = (idx, label, pct) => {
+      if (progWrap) progWrap.classList.remove('hidden');
+      if (stepLbl) stepLbl.textContent = label;
+      const p = Math.max(0, Math.min(100, Math.round(pct)));
+      if (pctLbl) pctLbl.textContent = `${p}%`;
+      if (fillEl) fillEl.style.width = `${p}%`;
+    };
+
+    try {
+      for (let i = 0; i < steps.length; i++) {
+        if (rebuildWorkflowCancelled) {
+          setProg(i, 'Cancelled by user.', (i / steps.length) * 100);
+          toast('Maintenance workflow cancelled');
+          return;
+        }
+        const st = steps[i];
+        setProg(i, `Step ${i + 1}/${steps.length}: ${st.label}`, (i / steps.length) * 100);
+
+        if (st.key === 'drive_pre') {
+          if (CC.isGoogleSignedIn() && !cloudAccountMismatch) {
+            const dRes = await runGoogleSyncFlow({ interactive: false, quiet: false, publishInitialLocal: false });
+            if (!dRes || !dRes.ok || dRes.status === 'account_mismatch' || dRes.status === 'partial') {
+              setProg(i, `Stopped at Step ${i + 1}/${steps.length}: Google Drive sync needs attention.`, (i / steps.length) * 100);
+              toast('Workflow paused — resolve Google Drive sync first', 4500);
+              return;
+            }
+          }
+        } else if (st.key === 'spotify') {
+          if (!cfg.spotifyClientId) {
+            toast('Skipped Spotify step — no Spotify Client ID set', 3200);
+            continue;
+          }
+          const spMode = document.getElementById('rbSpotifyMode')?.value === 'full' ? 'full' : 'liked';
+          const remCd = CC.getSpotifyCooldownRemainingSec();
+          if (remCd > 0) {
+            setProg(i, `Paused at Step ${i + 1}/${steps.length}: Spotify cooling down (${remCd}s). Resume once cooldown finishes.`, (i / steps.length) * 100);
+            ensureSpotifyCooldownTicker();
+            toast(`⏸️ Workflow paused — Spotify cooldown (${remCd}s remaining). Resume cleanly once timer hits 0.`, 5200);
+            return;
+          }
+          const canRunDirect = Boolean(
+            (cfg.spotifyRefreshToken && await CC.refreshSpotifyToken()) ||
+            (cfg.spotifyAccessToken && Date.now() < Number(cfg.spotifyExpiresAt || 0))
+          );
+          if (!canRunDirect) {
+            setProg(i, `Paused at Step ${i + 1}/${steps.length}: Reconnect Spotify in Section 4 first.`, (i / steps.length) * 100);
+            toast('Spotify login expired — reconnect in Section 4 and re-run workflow', 4800);
+            return;
+          }
+          const prevDna = spotifyProfile?.tasteDna || document.getElementById('cfgTasteDna')?.value.trim() || '';
+          const prevSoft = spotifyProfile?.softSpots || document.getElementById('cfgSoftSpots')?.value.trim() || '';
+          const useResume = Boolean(hasActiveSpotifyCheckpoint() && spotifyCheckpoint.mode === spMode);
+          const spRes = await CC.syncSpotifyResumable({
+            mode: useResume ? 'resume' : spMode,
+            resume: useResume,
+            existingDna: prevDna,
+            existingSoftSpots: prevSoft,
+            autoCommitProfile: true
+          });
+          if (spRes?.completed && spRes.profile) {
+            spotifyProfile = spRes.profile;
+            spotifyCheckpoint = null;
+            tasteCache.clear();
+            updateSpotifyUI();
+            updateSettingsDirtyButtons();
+          } else if (spRes?.paused) {
+            spotifyCheckpoint = spRes.checkpoint ? CC.normalizeSpotifyCheckpoint(spRes.checkpoint) : await CC.getSpotifyCheckpoint();
+            updateSpotifyUI();
+            const waitSec = spRes.retryAfterSec || CC.getSpotifyCooldownRemainingSec() || 90;
+            setProg(i, `Paused at Step ${i + 1}/${steps.length}: Spotify HTTP 429 cooldown (${waitSec}s) — progress saved!`, (i / steps.length) * 100);
+            if (spRes.reason === 'rate_limit') ensureSpotifyCooldownTicker();
+            toast(`⏸️ Workflow paused on Spotify rate limit (${waitSec}s). Progress saved — resume safely once timer completes.`, 5600);
+            return;
+          }
+        } else if (st.key === 'draft_taste') {
+          if (CC.isAiReady() && spotifyProfile?.totalArtists > 0) {
+            await analyzeFullSpotifyDNA();
+          }
+        } else if (st.key === 'discogs') {
+          if (cfg.discogsToken && cfg.discogsUser) {
+            await syncWithDiscogsUI(true, false);
+          }
+        } else if (st.key === 'recalibrate') {
+          if (CC.isAiReady() && stashCache.length > 0) {
+            const scope = document.getElementById('rbRecalMode')?.value === 'all' ? 'all' : 'stale';
+            await recalibrateStashBatch({ silentConfirm: true, scope });
+          }
+        } else if (st.key === 'drive_post') {
+          if (CC.isGoogleSignedIn() && !cloudAccountMismatch) {
+            await runGoogleSyncFlow({ interactive: false, quiet: false, publishInitialLocal: true });
+          }
+        }
+        setProg(i + 1, `Completed Step ${i + 1}/${steps.length}`, ((i + 1) / steps.length) * 100);
+      }
+      setProg(steps.length, `✅ Completed all ${steps.length} step(s)!`, 100);
+      toast(`✅ Maintenance workflow complete (${steps.length}/${steps.length} steps)!`, 4200);
+    } catch (err) {
+      if (err?.name !== 'AbortError') {
+        setProg(0, `Error: ${err?.message || 'Failed'}`, 0);
+        toast('Workflow error: ' + (err?.message || 'Failed'), 4800);
+      }
+    } finally {
+      rebuildWorkflowActive = false;
+      rebuildWorkflowCancelled = false;
+      setStatus('', false);
+      updateRebuildWorkflowBtn();
+      updateSettingsDirtyButtons();
+    }
+  };
+
   window.saveSettings = (silent = false) => {
     // Snapshot prior values of all synced preferences & secrets BEFORE mutating cfg so
     // clicking Sync or saving unchanged settings NEVER advances cfgUpdatedAt and overwrites newer cloud prefs!
@@ -9781,6 +10727,7 @@ Return ONLY valid JSON:
     CC.persistCfg(syncedSettingChanged);
     refreshNotice();
     updateStageUI();
+    updateSettingsDirtyButtons();
 
     if (prefsChanged) {
       const outPrefs = { cfgUpdatedAt: Number(cfg.cfgUpdatedAt || Date.now()) };
@@ -9851,10 +10798,12 @@ Return ONLY valid JSON:
   function populateFolders() {
     const sel = document.getElementById('cfgDiscogsFolder');
     const folders = getDiscogsFoldersList();
-    sel.innerHTML = folders.map(f => `<option value="${f.id}">${esc(f.name)} (${f.count ?? 0})</option>`).join('');
+    sel.innerHTML = `<option value="auto">✨ Auto-Match by Format</option>` +
+      folders.map(f => `<option value="${f.id}">${esc(f.name)} (${f.count ?? 0})</option>`).join('');
     sel.value = cfg.discogsFolderId || '1';
     if (!sel.value && sel.options.length) sel.selectedIndex = 0;
     document.getElementById('discogsUserBadge').textContent = cfg.discogsUser ? `Connected: @${cfg.discogsUser}` : '';
+    updateSettingsDirtyButtons();
   }
 
   function hasActiveSpotifyCheckpoint() {
@@ -10255,6 +11204,24 @@ Return ONLY valid JSON:
     updateSpotifyUI();
     refreshNotice();
     updateStageUI();
+    updateSettingsDirtyButtons();
+    updateRebuildWorkflowBtn();
+
+    const stashSortSel = document.getElementById('stashSort');
+    if (stashSortSel) stashSortSel.value = activeStashSort;
+
+    // Quietly pull cloud updates on tab focus/visibility if signed in & stale > 2 min
+    const maybeQuietCloudPull = () => {
+      if (document.visibilityState && document.visibilityState !== 'visible') return;
+      if (!CC.isGoogleSignedIn() || cloudAccountMismatch || googleSyncInFlight) return;
+      const now = Date.now();
+      const lastCheck = Math.max(Number(cfg.googleLastLoadAt || 0), Number(cfg.googleLastSyncAt || 0), lastQuietFocusPullAt);
+      if (now - lastCheck < 120000) return;
+      lastQuietFocusPullAt = now;
+      performSharedGooglePull({ quiet: true }).catch(() => {});
+    };
+    document.addEventListener('visibilitychange', maybeQuietCloudPull);
+    window.addEventListener('focus', maybeQuietCloudPull);
 
     document.getElementById('camStage').addEventListener('click', (e) => tapCameraToFocus(e));
 
